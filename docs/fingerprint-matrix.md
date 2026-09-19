@@ -16,8 +16,10 @@ Evidence:
   `--fingerprinting-canvas-image-data-noise` and
   `--fingerprinting-client-rects-noise`, and a list of older switches was
   measured to have no effect on that build.
-- This repository's Linux acceptance certifies the runtime path with
-  ungoogled-chromium 148 (`docs/chromium-acceptance.md`).
+- This repository certifies the runtime path against a fingerprint-chromium 148
+  build (`docs/chromium-acceptance.md`), and now certifies the fingerprint
+  surface itself by reading it back out of the page
+  (`crates/runtime/tests/fingerprint_real.rs`).
 - Nothing below 144 has been verified here, so nothing below 144 is claimed.
 
 ## Capability table
@@ -28,7 +30,7 @@ the compatibility layer both read it.
 | Capability | Legacy (< 144) | Chrome144Plus (>= 144) | Switch |
 | --- | --- | --- | --- |
 | seed | yes | yes | `--fingerprint=` |
-| brand | yes | yes | `--fingerprint-brand=` |
+| brand | Chrome, Edge | Chrome, Edge | `--fingerprint-brand=` |
 | brand version | yes | yes | `--fingerprint-brand-version=` |
 | platform | yes | yes | `--fingerprint-platform=` |
 | platform version | yes | yes | `--fingerprint-platform-version=` |
@@ -57,6 +59,84 @@ So the rule here is:
    the profile row.
 3. An undetected version (major `0`) is refused by the capability resolver
    rather than resolved to an assumed capability set.
+4. A claim that has not been read back is not certified. A core is only
+   "verified" for the generation whose claims this project has measured.
+
+## How the switches were measured
+
+A switch name is not evidence: the engine accepts unknown arguments silently, so
+every row below is a value read out of the page. The method:
+
+1. Launch the browser with `--remote-debugging-port` on loopback.
+2. Connect over CDP, navigate the target to a real document (`file:` — the user
+   agent data surface does not exist on `about:blank` or `data:` URLs), and
+   evaluate a probe that hashes the canvas surfaces and reads `navigator`,
+   `Intl` and `navigator.userAgentData`.
+3. Compare against a baseline run (no switches) and against a run with only
+   `--fingerprint=<seed>`.
+4. For anything a headless run fixes on its own (`screen.*`,
+   `devicePixelRatio`), repeat on a real X11 display.
+
+The probe and the comparison live in `crates/runtime/src/verify.rs`; the
+end-to-end run is:
+
+```sh
+CHROMIUM_BIN=/path/to/chrome cargo test -p runtime --test fingerprint_real -- --ignored
+```
+
+## Measured on the verified generation (fingerprint-chromium 148, Linux)
+
+Effective:
+
+| Switch | Observable that moved |
+| --- | --- |
+| `--fingerprint=<seed>` | canvas `toDataURL` **and** `getImageData`, `measureText`, sub-pixel client rects, `hardwareConcurrency`, `deviceMemory`, WebGL vendor/renderer, UA-CH full version. Deterministic: the same seed twice gives byte-identical readings. |
+| `--fingerprint-brand=Chrome` | UA-CH brands gain `Google Chrome/148` (default is `Chromium/148` only) |
+| `--fingerprint-brand=Edge` | UA-CH brands gain `Microsoft Edge/148`, user agent gains `Edg/148.0.0.0` |
+| `--fingerprint-brand-version=120.0.0.0` | with a brand: brands and UA-CH full version report `120`; without a brand: no effect |
+| `--fingerprint-platform=windows` | `navigator.platform` `Win32`, user agent `Windows NT 10.0; Win64; x64`, UA-CH platform version default `19.0.0` |
+| `--fingerprint-platform=macos` | `navigator.platform` `MacIntel`, user agent `Macintosh; Intel Mac OS X 10_15_7`, UA-CH platform version default `15.6.0` |
+| `--fingerprint-platform-version=11.0.0` | with a platform: UA-CH platform version `11.0.0`; without a platform: no effect |
+| `--accept-lang=en-US,en` | `navigator.language` `en-US`, `navigator.languages` `en-US,en` |
+| `--timezone=America/New_York` | `Intl.DateTimeFormat().resolvedOptions().timeZone`, UTC offset `240` |
+| `--fingerprint-hardware-concurrency=4` | `navigator.hardwareConcurrency` |
+| `--disable-spoofing=canvas` | canvas returns to the engine's own values (the seed stops reaching it) |
+| `--disable-spoofing=clientrects` | client rects become integral again |
+| `--disable-spoofing=gpu` | WebGL vendor/renderer return to the host values |
+| `--disable-spoofing=font` | not isolatable with this probe: needs a font-listing reading |
+| `--fingerprinting-canvas-image-data-noise` | canvas `toDataURL` hash changes; `getImageData` is **not** affected on this build |
+
+Accepted and ignored (no observable moved):
+
+| Switch | Result |
+| --- | --- |
+| `--lang=en-US` | `navigator.language` unchanged; only `--accept-lang` moves it. Both are emitted: `--lang` aligns the browser's own locale, `--accept-lang` is what a page sees. |
+| `--fingerprint-screen-width` / `--fingerprint-screen-height` | on a real 1440x900 display with a 2x scale factor, `screen.width/height` stayed 1440x900 |
+| `--fingerprint-device-scale-factor=1` / `2` / `3` | on the same display `devicePixelRatio` stayed 2 |
+| `--fingerprint-platform=mac` | platform stayed `Linux x86_64`: the token must be `macos` |
+| `--fingerprint-brand=Opera` / `Vivaldi` / `brave` / `google chrome` / `microsoft edge` | brands unchanged: only the tokens `Chrome` and `Edge` are honoured |
+| `--disable-spoofing=all` / `rects` / `client-rects` / `webrtc` / `timezone` / `screen` / `hardware` / `language` / `navigator` / `webgl` | no observable moved |
+| `--fingerprinting-client-rects-noise` | no change beyond what the seed already applies |
+| `--fingerprinting-canvas-measuretext-noise` | no change beyond what the seed already applies |
+
+Still unverified, because the probe cannot see them yet: audio noise, font
+lists, WebRTC leak behaviour, geolocation, and anything that needs a network
+peer.
+
+## Defects this measurement found
+
+Three of them were in this repository's own switch vocabulary, and all three
+failed silently — the engine accepted the argument and the profile shipped with
+a fingerprint nobody asked for:
+
+| Defect | Before | Evidence | Fix |
+| --- | --- | --- | --- |
+| macOS platform never applied | `--fingerprint-platform=mac` | `navigator.platform` stayed `Linux x86_64`; `macos` switches it to `MacIntel` | `Platform::MacOs` emits `macos` |
+| ClientRects exclusion never applied | `--disable-spoofing=client-rects` | client rects kept their sub-pixel noise; `clientrects` removes it | `SpoofingFeature::ClientRects` emits `clientrects` |
+| Brands claimed that the engine ignores | Opera and Vivaldi in `supported_brands` | `--fingerprint-brand=Opera` leaves the default Chromium brand list | table carries only `Chrome` and `Edge`; the compatibility layer reports the rest |
+
+Each fix has a regression test in `crates/runtime/tests/fingerprint_real.rs`
+that reads the value back, not just the command line.
 
 ## Version detection
 
@@ -73,8 +153,6 @@ downgraded to "unknown".
 
 ## Not implemented yet
 
-Known gaps, all inherited from the sibling product's matrix:
-
 - **Cross-platform font handling.** When the spoofed platform differs from the
   host, `Ant-Browser` appends `font` to `--disable-spoofing` so the host's real
   fonts are used and CJK text does not render as missing glyphs. The Rust model
@@ -82,18 +160,14 @@ Known gaps, all inherited from the sibling product's matrix:
 - **Legacy switch names.** Pre-144 cores used `--fingerprint-canvas-noise` /
   `--fingerprint-client-rects-noise`. This model does not carry them; those
   cores simply do not get canvas noise.
-- **No-effect switches for 144+.** `--fingerprint-device-memory`,
-  `--fingerprint-color-depth`, `--fingerprint-touch-points`,
-  `--fingerprint-do-not-track`, `--fingerprint-media-devices`,
-  `--fingerprint-audio-noise`, font and WebGL vendor/renderer switches, screen
-  size, DPR, geolocation and canvas measure-text noise were measured as having
-  no effect on Chromium 144. The typed profile never emits them, so there is
-  nothing to clean up yet; adding any of those fields requires re-measuring.
+- **Profile fields the engine cannot honour.** Screen size, device scale
+  factor, geolocation and the no-effect switches listed above are not modelled
+  at all, so there is nothing to clean up yet; adding any of those fields
+  requires re-measuring first.
 - **GPU switch migration.** `--disable-gpu-fingerprint` maps to
   `--disable-spoofing=gpu`, and `--fingerprint-gpu-vendor`/`-renderer` are gone
   in 144+. The Rust model exposes only `SpoofingFeature::Gpu`, so the migration
   is implicit.
-- **Runtime verification.** `Ant-Browser` re-reads the resulting JS fingerprint
-  values from the browser to prove the switches took effect. The Rust runtime
-  only certifies that the process started; reading back fingerprints is a
-  separate acceptance step and the only way to certify a new major.
+- **Surfaces without a reading.** Audio, fonts, WebRTC and geolocation are
+  neither probed nor asserted; a profile can request the audio exclusion and
+  nothing confirms it did anything.

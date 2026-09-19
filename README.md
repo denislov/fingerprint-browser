@@ -43,8 +43,8 @@ Configure `SupervisorComponents.xray_executable`, `runtime_dir` and
 (`bin/xray.exe` on Windows), `data/runtime` and five seconds. Temporary configs
 live at `<runtime_dir>/<profile-id>/xray.json`; Unix files use mode `0600`.
 
-Phase 4 has started: version detection, the capability table and the
-compatibility report.
+Phase 4 has started: version detection, the capability table, the
+compatibility report, and read-back verification of the fingerprint itself.
 
 - `BrowserCore.major` now comes from the binary. `runtime::version::VersionReport`
   runs `<executable> --version` under a five second deadline and parses the first
@@ -67,6 +67,22 @@ compatibility report.
   `RuntimeSnapshot::last_warning`, on the profile row and in Runtime Details.
   An undetected version (major `0`) is refused instead of being resolved to an
   assumed capability set.
+- A switch name is not evidence. `CdpSession` opens the browser's debugging
+  endpoint on loopback and `FingerprintProbe` reads the fingerprint back out of
+  a real page; `runtime::verify` compares that reading with the profile and
+  reports every claim it does not support (a missing reading is itself a
+  finding). Measuring the verified generation this way found three switches
+  this project was emitting that the engine silently ignores: `mac` instead of
+  `macos`, `client-rects` instead of `clientrects`, and two brands no build
+  honours. All three are fixed and covered by
+  [the switch matrix](docs/fingerprint-matrix.md).
+
+```sh
+# fingerprint surface, read back out of a real browser
+CHROMIUM_BIN=/absolute/path/to/chrome cargo test -p runtime --test fingerprint_real -- --ignored
+# process lifetime, proxies, cookie isolation
+CHROMIUM_BIN=/absolute/path/to/chrome XRAY_BIN=/absolute/path/to/xray cargo test -p runtime --test chromium_real -- --ignored
+```
 
 Phase 5 also has its first slice: the GPUI window is wired to the services
 instead of being a static mockup.

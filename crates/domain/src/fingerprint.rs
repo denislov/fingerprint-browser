@@ -39,7 +39,10 @@ impl Platform {
     pub fn as_arg_value(&self) -> &'static str {
         match self {
             Self::Windows => "windows",
-            Self::MacOs => "mac",
+            // The engine accepts `macos`; `mac` is silently ignored and the
+            // profile would keep the host platform (measured on 148, see
+            // docs/fingerprint-matrix.md).
+            Self::MacOs => "macos",
             Self::Linux => "linux",
         }
     }
@@ -71,12 +74,17 @@ pub enum SpoofingFeature {
 }
 
 impl SpoofingFeature {
+    /// The token `--disable-spoofing` accepts.
+    ///
+    /// `clientrects` has no separator: the hyphenated spelling used by feature
+    /// names in prose is ignored by the engine and the ClientRects noise stays
+    /// on (measured on 148, see docs/fingerprint-matrix.md).
     pub fn as_flag_name(&self) -> &'static str {
         match self {
             Self::Font => "font",
             Self::Audio => "audio",
             Self::Canvas => "canvas",
-            Self::ClientRects => "client-rects",
+            Self::ClientRects => "clientrects",
             Self::Gpu => "gpu",
         }
     }

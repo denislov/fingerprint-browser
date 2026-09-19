@@ -79,6 +79,12 @@ pub enum CdpError {
 
     #[error("CDP invalid JSON response: {0}")]
     InvalidResponse(String),
+
+    #[error("no CDP page target available")]
+    NoPageTarget,
+
+    #[error("CDP evaluation failed: {0}")]
+    Evaluation(String),
 }
 
 #[derive(Debug, Error)]

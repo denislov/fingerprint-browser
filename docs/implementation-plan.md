@@ -115,8 +115,24 @@ ShutdownAll；修复正常 Stop 强杀导致 Cookie 丢失的问题。详见 `ch
 
 - browser version detection 在启动时复核（目前开工时复核）；
 - 跨平台字体策略（目标平台不等于宿主平台时补 `font` 到 `--disable-spoofing`）；
-- 回读 JS 指纹值做运行时验证，这是认证第二个 major 的唯一手段；
-- 真实 fingerprint-chromium 二进制验收（当前已认证的只有 ungoogled-chromium 148 的运行时链路）。
+- 音频/字体/WebRTC 泄漏/地理位置的运行时回读（当前探针看不到这些面）。
+
+### 第二批：开关词汇的实测与回读验证
+
+进度（2026-09-19）：已完成。方法与全部实测数据见 [fingerprint-matrix.md](fingerprint-matrix.md)。
+
+- `runtime::cdp::CdpSession`：loopback 限制的 websocket 会话（有界超时、跳过事件、只认自己的 id），
+  支持 `Page.navigate` 与 `Runtime.evaluate`。
+- `runtime::verify`：在真实文档上执行探针（JSON 回读 canvas 哈希、measureText、client rects、
+  `navigator.*`、`Intl`、UA-CH 高熵），把观测值与 profile 逐条对账；**读不到也算差异**。
+- 实测发现并修复三处“引擎静默忽略”的本仓缺陷：`mac`→`macos`、`client-rects`→`clientrects`、
+  去掉 Opera/Vivaldi 品牌声明（引擎只认 Chrome/Edge）。
+- `crates/runtime/tests/fingerprint_real.rs`：5 个真实二进制验收，包括
+  “同一 seed 可重现 / 不同 seed 不同 canvas / `--disable-spoofing=canvas` 使 canvas 与 seed 无关 /
+  macOS 不被留在宿主平台 / 排除 client rects 只影响 rects”。
+
+已知未验证面：音频噪声、字体列表、WebRTC 泄漏、地理位置（探针读不到），
+以及 `--fingerprinting-client-rects-noise` 在已有 seed 时测不出额外效果。
 
 既有实现：
 
@@ -223,6 +239,40 @@ legacy core reports the unverified switch group with the pivot major
 unsupported brand is reported with what asked for it
 unsupported switches are reported only when the profile uses them
 findings keep a stable order
+```
+
+### Verification
+
+```text
+a faithful session reports nothing
+every claim is checked independently
+a missing reading is a discrepancy, not a pass
+an unsupported brand is not asserted
+noise is visible by comparison only
+the probe expression never touches the network
+```
+
+### CDP session
+
+```text
+evaluation skips events and returns the reply value
+a page exception is reported instead of a value
+a silent peer cannot hold the evaluation past its deadline
+a peer that never completes the handshake fails the dial
+a debugger url off loopback is refused (and the probe port is accepted)
+a browser without a page target reports no page target
+an unresponsive http server cannot exceed the readiness deadline
+empty json is not ready
+```
+
+### Fingerprint acceptance (real binary, opt-in)
+
+```text
+a verified core honours every profile claim
+two profiles do not share a canvas surface
+disabling canvas spoofing makes the canvas seed independent
+a macos profile is not left on the host platform
+excluding client rects removes only that noise
 ```
 
 ### Version

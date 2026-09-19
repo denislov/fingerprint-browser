@@ -9,11 +9,12 @@ pub mod planner;
 pub mod ports;
 pub mod process;
 pub mod supervisor;
+pub mod verify;
 pub mod version;
 pub mod xray;
 
 pub use capability::{CapabilityResolver, DefaultCapabilityResolver};
-pub use cdp::{CdpInfo, CdpProbe, HttpCdpProbe};
+pub use cdp::{CdpInfo, CdpProbe, CdpSession, CdpTarget, HttpCdpProbe};
 pub use compat::{CompatibilityReport, Finding as CompatibilityFinding};
 pub use error::{
     CapabilityError, CdpError, LaunchPlanError, PortError, ProcessError, ProxyError,
@@ -27,6 +28,10 @@ pub use ports::{PortAllocator, PortReservation, TcpPortAllocator};
 pub use process::{DefaultProcessTreeController, ProcessTreeController};
 pub use supervisor::{
     ChannelRuntimeFacade, RuntimeSupervisor, RuntimeSupervisorChannels, SupervisorComponents,
+};
+pub use verify::{
+    Discrepancy, FingerprintProbe, ObservedFingerprint, PROBE_EXPRESSION,
+    verify as verify_fingerprint,
 };
 pub use version::{DEFAULT_TIMEOUT as DEFAULT_VERSION_TIMEOUT, VersionReport, parse_major};
 pub use xray::{DefaultXrayConfigBuilder, XrayConfigBuilder};

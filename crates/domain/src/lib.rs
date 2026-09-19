@@ -61,6 +61,22 @@ mod tests {
     }
 
     #[test]
+    fn test_launch_switch_vocabulary_matches_the_engine() {
+        // Measured on the verified generation: `mac` is ignored and the profile
+        // keeps the host platform, `macos` switches it.
+        assert_eq!(Platform::MacOs.as_arg_value(), "macos");
+        assert_eq!(Platform::Windows.as_arg_value(), "windows");
+        assert_eq!(Platform::Linux.as_arg_value(), "linux");
+
+        // `--disable-spoofing` takes the unhyphenated token for client rects.
+        assert_eq!(SpoofingFeature::ClientRects.as_flag_name(), "clientrects");
+        assert_eq!(SpoofingFeature::Canvas.as_flag_name(), "canvas");
+        assert_eq!(SpoofingFeature::Gpu.as_flag_name(), "gpu");
+        assert_eq!(SpoofingFeature::Font.as_flag_name(), "font");
+        assert_eq!(SpoofingFeature::Audio.as_flag_name(), "audio");
+    }
+
+    #[test]
     fn test_window_validation() {
         let valid_window = WindowProfile::new(1920, 1080);
         assert!(validate_window(&valid_window).is_ok());

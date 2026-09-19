@@ -72,6 +72,16 @@ pub struct CoreCapabilities {
     pub supported_brands: Vec<BrowserBrand>,
 }
 
+/// Brands the verified generation honours.
+///
+/// The engine only knows two brand tokens: `Chrome` and `Edge` (matched case
+/// insensitively). `google chrome`, `microsoft edge`, `opera`, `vivaldi` and
+/// `brave` are accepted on the command line and ignored, leaving the default
+/// Chromium brand list in place. Claiming them would let a profile ask for a
+/// brand the engine silently drops, so the table carries only the honoured
+/// two and the compatibility layer reports the rest as unsupported.
+const VERIFIED_BRANDS: [BrowserBrand; 2] = [BrowserBrand::Chrome, BrowserBrand::Edge];
+
 impl CoreCapabilities {
     /// Capability table for a detected major.
     ///
@@ -91,12 +101,7 @@ impl CoreCapabilities {
             supports_canvas_noise: verified,
             supports_brand_version: true,
             supports_platform_version: true,
-            supported_brands: vec![
-                BrowserBrand::Chrome,
-                BrowserBrand::Edge,
-                BrowserBrand::Opera,
-                BrowserBrand::Vivaldi,
-            ],
+            supported_brands: VERIFIED_BRANDS.to_vec(),
         }
     }
 
@@ -152,14 +157,24 @@ mod tests {
             assert!(capabilities.supports_disable_spoofing, "major {major}");
             assert!(capabilities.supports_brand_version, "major {major}");
             assert!(capabilities.supports_platform_version, "major {major}");
-            for brand in [
-                BrowserBrand::Chrome,
-                BrowserBrand::Edge,
-                BrowserBrand::Opera,
-                BrowserBrand::Vivaldi,
-            ] {
+            for brand in VERIFIED_BRANDS {
                 assert!(capabilities.supports_brand(brand), "major {major} {brand}");
             }
+        }
+    }
+
+    #[test]
+    fn only_brands_the_engine_honours_are_claimed() {
+        let capabilities = CoreCapabilities::for_major(148);
+
+        assert!(capabilities.supports_brand(BrowserBrand::Chrome));
+        assert!(capabilities.supports_brand(BrowserBrand::Edge));
+        // Measured on 148: these tokens are accepted and ignored.
+        for brand in [BrowserBrand::Opera, BrowserBrand::Vivaldi] {
+            assert!(
+                !capabilities.supports_brand(brand),
+                "{brand} is ignored by the engine and must not be claimed"
+            );
         }
     }
 
