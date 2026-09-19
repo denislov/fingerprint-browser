@@ -100,6 +100,15 @@ tab of its own and reports every claim the browser did not reproduce, with a
 per-row badge so the answer is visible without selecting anything. A reading
 that fails is reported as unreadable, never as confirmed.
 
+Proxies have a page of their own. A proxy can be created, edited and deleted,
+and assigned to a profile from the profile editor; the row says which profiles
+use it. Only SOCKS5 and HTTP can be created, because those are the two outbounds
+the config builder can turn into a working config - the other four protocols the
+model can store are named in the form and refused, rather than stored and left to
+fail at launch. A proxy that a profile still points at cannot be deleted: the
+schema would null the assignment out and send that traffic direct, so the refusal
+names the profiles that hold it.
+
 Profiles can be edited, duplicated and deleted from the window. The editor is a
 form over the profile's fingerprint and window: name, seed (with a re-roll),
 brand and its version, platform and its version, language, accept language,

@@ -1,9 +1,11 @@
 pub mod error;
 pub mod profile_service;
+pub mod proxy_service;
 pub mod runtime_service;
 
 pub use error::AppError;
 pub use profile_service::{DefaultProfileService, DeleteMode, NewProfile, ProfileService};
+pub use proxy_service::{DefaultProxyService, NewProxy, ProxyService};
 pub use runtime_service::RuntimeService;
 
 #[cfg(test)]

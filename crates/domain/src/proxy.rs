@@ -19,6 +19,66 @@ pub enum ProxyOutbound {
     Trojan(TrojanOutbound),
 }
 
+impl ProxyOutbound {
+    /// The protocol name, as a config file or a summary line would spell it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Socks5(_) => "socks5",
+            Self::Http(_) => "http",
+            Self::Shadowsocks(_) => "shadowsocks",
+            Self::Vmess(_) => "vmess",
+            Self::Vless(_) => "vless",
+            Self::Trojan(_) => "trojan",
+        }
+    }
+
+    pub fn host(&self) -> &str {
+        match self {
+            Self::Socks5(o) => &o.host,
+            Self::Http(o) => &o.host,
+            Self::Shadowsocks(o) => &o.host,
+            Self::Vmess(o) => &o.host,
+            Self::Vless(o) => &o.host,
+            Self::Trojan(o) => &o.host,
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        match self {
+            Self::Socks5(o) => o.port,
+            Self::Http(o) => o.port,
+            Self::Shadowsocks(o) => o.port,
+            Self::Vmess(o) => o.port,
+            Self::Vless(o) => o.port,
+            Self::Trojan(o) => o.port,
+        }
+    }
+
+    /// Whether a user name and password are both present or both absent.
+    ///
+    /// Only the two credential-carrying protocols can be incomplete; the rest
+    /// carry their own secrets and are never half set.
+    pub fn credentials_complete(&self) -> bool {
+        match self {
+            Self::Socks5(o) => o.username.is_some() == o.password.is_some(),
+            Self::Http(o) => o.username.is_some() == o.password.is_some(),
+            _ => true,
+        }
+    }
+}
+
+impl ProxyProfile {
+    /// `kind://host:port`, for a row or a refusal message.
+    pub fn endpoint(&self) -> String {
+        format!(
+            "{}://{}:{}",
+            self.outbound.kind(),
+            self.outbound.host(),
+            self.outbound.port()
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Socks5Outbound {
     pub host: String,

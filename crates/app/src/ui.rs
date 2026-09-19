@@ -5,10 +5,11 @@
 //! runtime façade contract requires.
 
 use crate::editor::ProfileEditor;
-use crate::state::{AppState, ProfileRow, Verification};
+use crate::proxy_editor::ProxyEditor;
+use crate::state::{AppState, Page, ProfileRow, ProxyRow, Verification};
 use crate::verifier::FingerprintVerifier;
 use crossbeam_channel::{Receiver, Sender};
-use domain::{ProfileId, RuntimeState};
+use domain::{ProfileId, ProxyId, RuntimeState};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::Root;
 use gpui_kit::component::WindowExt as _;
@@ -37,6 +38,8 @@ const WARNING_WIDTH: f32 = 420.0;
 pub struct AppView {
     /// The editor behind the open dialog, if any.
     editor: Option<Entity<ProfileEditor>>,
+    /// The proxy editor behind the open dialog, if any.
+    proxy_editor: Option<Entity<ProxyEditor>>,
     verifier: Arc<dyn FingerprintVerifier>,
     verifications: Receiver<(ProfileId, Result<Vec<Discrepancy>, String>)>,
     verification_tx: Sender<(ProfileId, Result<Vec<Discrepancy>, String>)>,
@@ -57,6 +60,7 @@ impl AppView {
         let (verification_tx, verifications) = crossbeam_channel::unbounded();
         Self {
             editor: None,
+            proxy_editor: None,
             verifier,
             verifications,
             verification_tx,
@@ -82,6 +86,17 @@ impl AppView {
     #[cfg(test)]
     pub fn editor(&self) -> Option<Entity<ProfileEditor>> {
         self.editor.clone()
+    }
+
+    /// The proxy editor behind the open dialog, for tests that type into it.
+    #[cfg(test)]
+    pub fn proxy_editor(&self) -> Option<Entity<ProxyEditor>> {
+        self.proxy_editor.clone()
+    }
+
+    fn on_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.state.set_page(page);
+        cx.notify();
     }
 
     /// Load storage once, then keep reconciling from snapshots in the background.
@@ -167,7 +182,8 @@ impl AppView {
             cx.notify();
             return;
         };
-        let editor = cx.new(|cx| ProfileEditor::new(&profile, window, cx));
+        let proxies = self.state.proxy_choices();
+        let editor = cx.new(|cx| ProfileEditor::new(&profile, &proxies, window, cx));
         self.editor = Some(editor.clone());
         let view = cx.entity().downgrade();
         let accepted = editor.clone();
@@ -285,6 +301,142 @@ impl AppView {
         cx.notify();
     }
 
+    /// Opens the form for a new proxy, or for one that is already stored.
+    fn on_edit_proxy(&mut self, id: Option<ProxyId>, window: &mut Window, cx: &mut Context<Self>) {
+        let editing = id.and_then(|id| self.state.proxy(id));
+        if id.is_some() && editing.is_none() {
+            self.state
+                .push_notice("that proxy is no longer there".to_string(), true);
+            cx.notify();
+            return;
+        }
+        let proxy_editor = cx.new(|cx| match &editing {
+            Some(proxy) => ProxyEditor::for_proxy(proxy, window, cx),
+            None => ProxyEditor::new(window, cx),
+        });
+        self.proxy_editor = Some(proxy_editor.clone());
+        let view = cx.entity().downgrade();
+        let accepted = proxy_editor.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let proxy_editor = proxy_editor.clone();
+            let view = view.clone();
+            let accepted = accepted.clone();
+            let title = proxy_editor.read(cx).title();
+            dialog
+                .title(title)
+                .w(px(640.0))
+                .content({
+                    let proxy_editor = proxy_editor.clone();
+                    move |content, _, _| content.child(proxy_editor.clone())
+                })
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                        )
+                        .child(DialogAction::new().child(Button::new("ok").label("Save"))),
+                )
+                .on_ok(move |_, _, cx| {
+                    let built = proxy_editor.read(cx).build_proxy(cx);
+                    let saved = match built {
+                        Ok(proxy) => {
+                            let existing = proxy_editor.read(cx).is_edit();
+                            view.update(cx, |view, _| {
+                                let result = if existing {
+                                    view.state.update_proxy(proxy)
+                                } else {
+                                    view.state
+                                        .create_proxy(&proxy.name, proxy.outbound)
+                                        .map(|_| ())
+                                };
+                                match result {
+                                    Ok(()) => true,
+                                    Err(error) => {
+                                        view.state.push_notice(error.to_string(), true);
+                                        false
+                                    }
+                                }
+                            })
+                            .unwrap_or(false)
+                        }
+                        Err(error) => {
+                            // Keep the dialog open: the form is where the
+                            // mistake is, not the window behind it.
+                            accepted.update(cx, |editor, cx| {
+                                editor.set_error(Some(error));
+                                cx.notify();
+                            });
+                            return false;
+                        }
+                    };
+                    if saved {
+                        accepted.update(cx, |editor, cx| {
+                            editor.set_error(None);
+                            cx.notify();
+                        });
+                    } else {
+                        accepted.update(cx, |editor, cx| {
+                            editor.set_error(Some("the proxy could not be saved".to_string()));
+                            cx.notify();
+                        });
+                    }
+                    saved
+                })
+        });
+    }
+
+    /// Deleting a proxy that is still assigned is refused, and says by whom.
+    fn on_delete_proxy(&mut self, id: ProxyId, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, endpoint, used_by) = match self.state.proxy(id) {
+            Some(proxy) => {
+                let used_by = self
+                    .state
+                    .proxy_rows()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|row| row.proxy.id == id)
+                    .map(|row| row.used_by)
+                    .unwrap_or_default();
+                let endpoint = proxy.endpoint();
+                (proxy.name, endpoint, used_by)
+            }
+            None => (id.to_string(), String::new(), Vec::new()),
+        };
+        let description = if used_by.is_empty() {
+            format!("\"{name}\" ({endpoint}) will be removed.")
+        } else {
+            format!(
+                "\"{name}\" is assigned to {}. Assign those profiles to another proxy or to Direct first.",
+                used_by.join(", ")
+            )
+        };
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            let description = description.clone();
+            alert
+                .title("Delete proxy")
+                .description(description)
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Delete")
+                        .cancel_text("Keep")
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            if let Some(view) = view.upgrade() {
+                                view.update(cx, |view, cx| {
+                                    let _ = view.state.delete_proxy(id);
+                                    cx.notify();
+                                });
+                            }
+                            true
+                        })
+                        .on_cancel(|_, _, _| true),
+                )
+        });
+        cx.notify();
+    }
+
     fn on_verify(&mut self, id: ProfileId, cx: &mut Context<Self>) {
         let job = match self.state.begin_verification(id) {
             Ok(job) => job,
@@ -382,31 +534,55 @@ impl Render for AppView {
             .text_color(rgb(TEXT))
             .child(header(cx))
             .child(
-                div().flex().flex_1().min_h_0().child(sidebar()).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .p_6()
-                        .gap_4()
-                        .child(profiles_header(cx))
-                        .children(notice.map(|notice| notice_banner(notice, cx)))
-                        .child(
-                            div()
-                                .id("profiles-scroll")
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_h_0()
-                                .gap_2()
-                                .overflow_y_scroll()
-                                .children(empty_hint(&rows, has_core))
-                                .child(profile_list(&rows, selected_id, &verifications, cx)),
-                        )
-                        .child(details_panel(selected.as_ref(), verification, cx)),
-                ),
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(sidebar(self.state.page(), cx))
+                    .child({
+                        let page = self.state.page();
+                        let proxy_rows = self.state.proxy_rows().unwrap_or_default();
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .p_6()
+                            .gap_4()
+                            .child(match page {
+                                Page::Proxies => proxies_header(cx),
+                                _ => profiles_header(cx),
+                            })
+                            .children(notice.map(|notice| notice_banner(notice, cx)))
+                            .when(page == Page::Proxies, |this| {
+                                this.child(proxies_body(&proxy_rows, cx))
+                            })
+                            .when(page != Page::Proxies, |this| {
+                                this.child(
+                                    div()
+                                        .id("profiles-scroll")
+                                        .flex()
+                                        .flex_col()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .gap_2()
+                                        .overflow_y_scroll()
+                                        .children(empty_hint(&rows, has_core))
+                                        .child(profile_list(
+                                            &rows,
+                                            selected_id,
+                                            &verifications,
+                                            cx,
+                                        )),
+                                )
+                                .child(details_panel(
+                                    selected.as_ref(),
+                                    verification,
+                                    cx,
+                                ))
+                            })
+                    }),
             )
             .children(dialogs)
             .children(sheets)
@@ -449,14 +625,9 @@ fn header(cx: &mut Context<AppView>) -> Div {
         )
 }
 
-fn sidebar() -> Div {
-    let items = [
-        ("Profiles", true),
-        ("Proxies", false),
-        ("Browser Cores", false),
-        ("Settings", false),
-    ];
+const PAGES: [Page; 4] = [Page::Profiles, Page::Proxies, Page::Cores, Page::Settings];
 
+fn sidebar(page: Page, cx: &mut Context<AppView>) -> Div {
     div()
         .flex()
         .flex_col()
@@ -466,8 +637,16 @@ fn sidebar() -> Div {
         .border_r_1()
         .border_color(rgb(BORDER))
         .p_4()
-        .children(items.map(|(label, active)| {
+        .children(PAGES.map(|candidate| {
+            let active = candidate == page;
+            let label = if candidate.is_ready() {
+                candidate.label().to_string()
+            } else {
+                format!("{} (soon)", candidate.label())
+            };
             div()
+                .id(format!("nav-{}", candidate.label()))
+                .test_support()
                 .px_3()
                 .py_2()
                 .rounded_md()
@@ -475,11 +654,13 @@ fn sidebar() -> Div {
                 .when(active, |this| {
                     this.bg(rgb(BORDER)).font_weight(FontWeight::MEDIUM)
                 })
-                .when(!active, |this| this.text_color(rgb(MUTED)))
-                .child(if active {
-                    label.to_string()
-                } else {
-                    format!("{label} (soon)")
+                .when(!active && candidate.is_ready(), |this| {
+                    this.text_color(rgb(MUTED)).cursor_pointer()
+                })
+                .when(!candidate.is_ready(), |this| this.text_color(rgb(0x52525b)))
+                .child(label)
+                .when(candidate.is_ready(), |this| {
+                    this.on_click(cx.listener(move |this, _, _, cx| this.on_page(candidate, cx)))
                 })
         }))
 }
@@ -513,6 +694,120 @@ fn profiles_header(cx: &mut Context<AppView>) -> Div {
                 .primary()
                 .on_click(cx.listener(|this, _, _, cx| this.on_new_profile(cx))),
         )
+}
+
+fn proxies_header(cx: &mut Context<AppView>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Proxies"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child("Assign a proxy to a profile to route its traffic through it."),
+                ),
+        )
+        .child(
+            Button::new("new-proxy")
+                .label("New Proxy")
+                .primary()
+                .on_click(cx.listener(|this, _, window, cx| this.on_edit_proxy(None, window, cx))),
+        )
+}
+
+fn proxies_body(rows: &[ProxyRow], cx: &mut Context<AppView>) -> impl IntoElement {
+    div()
+        .id("proxies-scroll")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .gap_2()
+        .overflow_y_scroll()
+        .when(rows.is_empty(), |this| {
+            this.child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .bg(rgb(PANEL))
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child(
+                        "No proxies yet. A profile with no proxy goes direct from this machine.",
+                    ),
+            )
+        })
+        // The cards are built inline: a helper would have to return a type
+        // borrowing the context, which the closure cannot hand back.
+        .children(rows.iter().enumerate().map(|(index, row)| {
+            let id = row.proxy.id;
+            div()
+                .id(format!("proxy-{index}"))
+                .test_support()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .px_4()
+                .py_3()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(row.proxy.name.clone()),
+                        )
+                        .child(div().text_xs().text_color(rgb(MUTED)).child(row.endpoint()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(if row.is_used() { 0x86efac } else { 0x71717a }))
+                                .child(row.usage_label()),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new(format!("edit-proxy-{index}"))
+                                .label("Edit")
+                                .outline()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.on_edit_proxy(Some(id), window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("delete-proxy-{index}"))
+                                .label("Delete")
+                                .outline()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.on_delete_proxy(id, window, cx)
+                                })),
+                        ),
+                )
+        }))
 }
 
 fn notice_banner(notice: crate::state::Notice, cx: &mut Context<AppView>) -> Div {
@@ -1061,7 +1356,7 @@ mod tests {
     use crate::state::Verification;
     use crate::state::testing::{FakeRuntime, core};
     use crate::verifier::testing::FakeVerifier;
-    use application::{DefaultProfileService, RuntimeService};
+    use application::{DefaultProfileService, DefaultProxyService, ProxyService, RuntimeService};
     use domain::CoreId;
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt as _;
@@ -1093,12 +1388,14 @@ mod tests {
             PathBuf::from("data"),
         ));
         let runtime_service = Arc::new(RuntimeService::new(
-            profile_repo,
+            profile_repo.clone(),
             core_repo.clone(),
             proxy_repo.clone(),
             runtime.clone(),
         ));
-        let state = AppState::new(profiles, runtime_service, core_repo, proxy_repo);
+        let proxies: Arc<dyn ProxyService> =
+            Arc::new(DefaultProxyService::new(proxy_repo, profile_repo));
+        let state = AppState::new(profiles, runtime_service, core_repo, proxies);
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
 
         let view = cx.new(|cx| {
@@ -1413,6 +1710,222 @@ mod tests {
         cx
     }
 
+    #[gpui_kit::test]
+    fn the_sidebar_switches_to_the_proxies_page(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        assert!(
+            cx.update(|window, _| window.try_find("proxies-scroll").is_none()),
+            "the proxies page is not shown first"
+        );
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("new-proxy").is_some()),
+            "the proxies page is shown"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().page()),
+            crate::state::Page::Proxies
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_proxy_can_be_created_from_the_window(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("new-proxy", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("proxy-name").is_some()),
+            "the proxy form opens"
+        );
+
+        let editor = view
+            .read_with(cx, |view, _| view.proxy_editor())
+            .expect("a proxy editor");
+        let (name, host) =
+            editor.read_with(cx, |editor, _| (editor.name_input(), editor.host_input()));
+        cx.update(|window, cx| {
+            name.update(cx, |state, cx| state.set_value("Office", window, cx));
+            host.update(cx, |state, cx| state.set_value("10.0.0.1", window, cx));
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        let rows = view.read_with(cx, |view, cx| {
+            let _ = cx;
+            view.state().proxy_rows().expect("rows")
+        });
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].proxy.name, "Office");
+        assert_eq!(rows[0].endpoint(), "socks5://10.0.0.1:1080");
+        assert!(
+            cx.update(|window, _| window.try_find("proxy-name").is_none()),
+            "saving closes the dialog"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_proxy_form_says_why_and_stays_open(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("new-proxy", cx));
+        settle(cx);
+
+        let editor = view
+            .read_with(cx, |view, _| view.proxy_editor())
+            .expect("a proxy editor");
+        let name = editor.read_with(cx, |editor, _| editor.name_input());
+        cx.update(|window, cx| {
+            name.update(cx, |state, cx| state.set_value("No host", window, cx));
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("proxy-error").is_some()),
+            "the form says what is wrong"
+        );
+        let shown = editor
+            .read_with(cx, |editor, _| editor.error().map(str::to_string))
+            .expect("the reason is recorded on the form");
+        assert!(shown.contains("host"), "{shown}");
+        assert!(
+            cx.update(|window, _| window.try_find("proxy-name").is_some()),
+            "a refused save leaves the form open"
+        );
+        assert!(
+            view.read_with(cx, |view, cx| {
+                let _ = cx;
+                view.state().proxy_rows().expect("rows").is_empty()
+            }),
+            "nothing was written"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn assigning_a_proxy_from_the_profile_editor_reaches_storage(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        // A proxy to choose, made through its own page.
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("new-proxy", cx));
+        settle(cx);
+        let proxy_editor = view
+            .read_with(cx, |view, _| view.proxy_editor())
+            .expect("a proxy editor");
+        let (name, host) =
+            proxy_editor.read_with(cx, |editor, _| (editor.name_input(), editor.host_input()));
+        cx.update(|window, cx| {
+            name.update(cx, |state, cx| state.set_value("Office", window, cx));
+            host.update(cx, |state, cx| state.set_value("10.0.0.1", window, cx));
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+        let proxy_id = view.read_with(cx, |view, cx| {
+            let _ = cx;
+            view.state().proxy_rows().expect("rows")[0].proxy.id
+        });
+
+        // A profile to assign it to.
+        cx.update(|window, cx| window.click("nav-Profiles", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("new-profile", cx));
+        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
+        settle(cx);
+
+        cx.update(|window, cx| window.click("editor-proxy-0", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        assert_eq!(
+            view.read_with(cx, |view, _| view
+                .state()
+                .profile(id)
+                .expect("the profile is loaded")
+                .proxy_id),
+            Some(proxy_id),
+            "the assignment reached the state"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn deleting_a_proxy_in_use_is_refused_in_the_window(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("new-proxy", cx));
+        settle(cx);
+        let proxy_editor = view
+            .read_with(cx, |view, _| view.proxy_editor())
+            .expect("a proxy editor");
+        let (name, host) =
+            proxy_editor.read_with(cx, |editor, _| (editor.name_input(), editor.host_input()));
+        cx.update(|window, cx| {
+            name.update(cx, |state, cx| state.set_value("Office", window, cx));
+            host.update(cx, |state, cx| state.set_value("10.0.0.1", window, cx));
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        cx.update(|window, cx| window.click("nav-Profiles", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("new-profile", cx));
+        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("editor-proxy-0", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("delete-proxy-0", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        assert_eq!(
+            view.read_with(cx, |view, cx| {
+                let _ = cx;
+                view.state().proxy_rows().expect("rows").len()
+            }),
+            1,
+            "the proxy is still there"
+        );
+        let notice = view
+            .read_with(cx, |view, _| view.state().notice().cloned())
+            .expect("the refusal is shown");
+        assert!(notice.error, "the refusal is an error");
+        assert!(
+            notice.message.contains("Office") && notice.message.contains("Profile 1"),
+            "the message names the proxy and who holds it: {}",
+            notice.message
+        );
+    }
+
     /// Draws enough frames for a layer to mount and then paint at rest.
     fn settle(cx: &mut gpui_kit::VisualTestContext) {
         cx.run_until_parked();
@@ -1550,12 +2063,14 @@ mod tests {
             PathBuf::from("data"),
         ));
         let runtime_service = Arc::new(RuntimeService::new(
-            profile_repo,
+            profile_repo.clone(),
             core_repo.clone(),
             proxy_repo.clone(),
             runtime,
         ));
-        let state = AppState::new(profiles, runtime_service, core_repo, proxy_repo);
+        let proxies: Arc<dyn ProxyService> =
+            Arc::new(DefaultProxyService::new(proxy_repo, profile_repo));
+        let state = AppState::new(profiles, runtime_service, core_repo, proxies);
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
         let view = cx.new(|cx| {
             let mut view = AppView::new(state, event_rx, Arc::new(FakeVerifier::passing()));

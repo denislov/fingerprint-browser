@@ -167,6 +167,34 @@ ShutdownAll；修复正常 Stop 强杀导致 Cookie 丢失的问题。详见 `ch
 而且 headless 测试与真机都同样失败——这个 bug 是 headless UI 测试抓到的，
 不是真机截图抓到的（真机只会看到点了没反应）。
 
+### 第六批：Proxies 页面
+
+进度（2026-09-20）：已完成。Browser Cores / Settings 仍为 `(soon)`。
+
+- 侧边栏变成真实导航（`Page`），proxies 页与 profiles 页共用横幅与滚动容器。
+- `domain::validate_proxy` 以前只查名字，现在把"启动时才会炸"的错误提前：
+  主机为空/含空格或 scheme、端口为 0、用户名密码只给一半、各协议自己的必填字段
+  （ss 的 password/method、vmess 的 uuid/security、vless 的 uuid/encryption、trojan 的 password）。
+- `application::ProxyService`（新）：`create`/`update`/`delete`/`get`/`list`/`usage`。
+  两层闸门：先过 domain 校验，再过 `runtime::outbound_is_supported`（配置构建器只支持
+  SOCKS5 与 HTTP）。**存不下的代理不如早点拒绝**：四个构建不了的协议在表单里被列出来并说明原因，
+  不允许选中，而不是存下来到启动时才失败。
+- **在用代理不可删**：`profiles.proxy_id` 有 `ON DELETE SET NULL`，直接删会让那个 profile
+  静默变成 direct（流量泄漏）。所以 `delete` 先查引用，拒绝并点名持有它的 profile，
+  提示改派后再删。行内也实时显示 `used by …`。
+- profile 编辑器补上 **Proxy 选择**（芯片：Direct + 每个代理；指向已消失代理时显示 missing 而
+  不是当成 Direct）。这是上一批编辑器里唯一缺的字段。
+
+真机验收链路（全部有证据）：界面建代理 → SQLite 落库 → 在 profile 编辑器里指派 → 启动后
+xray 子进程的配置 outbound 正是表单里填的 `10.0.0.1:1080`，浏览器 argv 里出现
+`--proxy-server=socks5://127.0.0.1:37815`（xray 的本地入站）→ 详情面板显示 Xray PID / SOCKS port，
+行内显示 `proxy: Office`。删除在用代理被拒（红字点名 `Profile 1`），改派 Direct 后删除成功。
+
+真机又抓出两个 headless 漏掉的缺陷（都在这一批修的）：
+1. 代理芯片标签显示成 `0-Office`——我把"唯一 id"和"显示名"用同一个字符串拼了，
+   而测试点的正是那个串，所以测试全绿。现在 id 与标签分开，映射由 `proxy_chip` 这个纯函数产出并有测试。
+2. 协议说明文字在 640px 对话框里被裁切：gpui 的单行文本不会自动换行，长句要在源码里断行。
+
 ### 第四批：窗口内的指纹验证动作
 
 进度（2026-09-20）：已完成。
@@ -353,6 +381,51 @@ deleting a profile removes it and forgets its reading
 a profile can be edited from the window
 a refused edit keeps the dialog open and shows why
 duplicating adds a profile and deleting removes one
+```
+
+### Proxies
+
+```text
+a well formed proxy passes
+a nameless proxy is refused
+a proxy without a host or port is refused
+a pasted url is refused as a host
+half a credential is refused
+the per protocol secrets are required
+the endpoint names the protocol and the host
+a created proxy can be read back
+a broken proxy is refused before it is stored
+a protocol the runtime cannot build is refused
+updating a proxy that is gone is not found
+an edit is stored and re-checked
+a proxy still assigned to a profile cannot be deleted
+an unassigned proxy is deleted
+usage names the profiles per proxy
+deleting a missing proxy is not found
+a created proxy is listed and stored
+a broken proxy is refused and reported
+the picker offers every stored proxy
+assigning a proxy reaches storage and the usage list
+a proxy in use cannot be deleted
+a proxy is deleted once nothing uses it
+saving a proxy keeps a running profile on what it started with
+the page can be switched
+the sidebar switches to the proxies page
+a proxy can be created from the window
+a refused proxy form says why and stays open
+assigning a proxy from the profile editor reaches storage
+deleting a proxy in use is refused in the window
+the form opens on a stored proxy
+a new form starts on socks5 and needs a name and host
+a port the user typed survives a protocol switch
+an untouched port follows the protocol
+half a credential is refused by the form
+a port that is not a number is refused by the form
+the offered protocols match what the runtime can build
+a proxy chip is labelled with its name alone
+the proxy the profile is on is what the form offers
+choosing a proxy and choosing direct change the assignment
+an assignment to a missing proxy is kept and shown
 ```
 
 ### Fingerprint acceptance (real binary, opt-in)

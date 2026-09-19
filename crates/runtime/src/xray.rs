@@ -4,6 +4,15 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 
+/// Whether the config builder can turn this outbound into a working config.
+///
+/// Four of the six protocols the model can store have no builder yet. A stored
+/// proxy the builder cannot use fails the launch, so this is what the editor
+/// asks before offering a protocol, and what the proxy service refuses on.
+pub fn is_supported(outbound: &ProxyOutbound) -> bool {
+    matches!(outbound, ProxyOutbound::Socks5(_) | ProxyOutbound::Http(_))
+}
+
 pub trait XrayConfigBuilder: Send + Sync {
     fn build(
         &self,
@@ -33,9 +42,10 @@ impl XrayConfigBuilder for DefaultXrayConfigBuilder {
             ProxyOutbound::Socks5(s) => (&s.host, s.port, &s.username, &s.password),
             ProxyOutbound::Http(h) => (&h.host, h.port, &h.username, &h.password),
             _ => {
-                return Err(ProxyError::UnsupportedOutbound(
-                    "phase 3 supports SOCKS5 and HTTP only".into(),
-                ));
+                return Err(ProxyError::UnsupportedOutbound(format!(
+                    "the config builder cannot build a {} outbound yet",
+                    proxy.outbound.kind()
+                )));
             }
         };
         if host.trim().is_empty()
@@ -91,9 +101,10 @@ impl XrayConfigBuilder for DefaultXrayConfigBuilder {
                 })
             }
             _ => {
-                return Err(ProxyError::UnsupportedOutbound(
-                    "phase 3 supports SOCKS5 and HTTP only".into(),
-                ));
+                return Err(ProxyError::UnsupportedOutbound(format!(
+                    "the config builder cannot build a {} outbound yet",
+                    proxy.outbound.kind()
+                )));
             }
         };
 

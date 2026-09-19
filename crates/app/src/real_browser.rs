@@ -107,7 +107,12 @@ impl Harness {
             dir.clone(),
         ));
 
-        let mut state = AppState::new(profiles, runtime_service, core_repo, proxy_repo);
+        let proxy_service: Arc<dyn application::ProxyService> =
+            Arc::new(application::DefaultProxyService::new(
+                Arc::clone(&proxy_repo),
+                Arc::clone(&profile_repo),
+            ));
+        let mut state = AppState::new(profiles, runtime_service, core_repo, proxy_service);
         state.load().expect("initial load");
 
         Self {

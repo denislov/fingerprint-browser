@@ -5,14 +5,17 @@
 //! into it. Runtime state is never owned here: every read goes through
 //! [`RuntimeService::snapshot`], which is the documented reconciliation path.
 
-use application::{AppError, DeleteMode, NewProfile, ProfileService, RuntimeService};
+use application::{
+    AppError, DeleteMode, NewProfile, NewProxy, ProfileService, ProxyService, RuntimeService,
+};
 use domain::{
-    BrowserProfile, CoreCapabilities, CoreId, FingerprintProfile, ProfileId, ProxyId, RuntimeState,
+    BrowserProfile, CoreCapabilities, CoreId, FingerprintProfile, ProfileId, ProxyId,
+    ProxyOutbound, ProxyProfile, RuntimeState,
 };
 use runtime::{Discrepancy, RuntimeSnapshot};
 use std::collections::HashMap;
 use std::sync::Arc;
-use storage::{CoreRepository, ProxyRepository};
+use storage::CoreRepository;
 
 /// A user-facing message shown in the window banner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,11 +205,63 @@ pub struct VerificationJob {
     pub capabilities: CoreCapabilities,
 }
 
+/// Which page the sidebar has selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Profiles,
+    Proxies,
+    Cores,
+    Settings,
+}
+
+impl Page {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Profiles => "Profiles",
+            Self::Proxies => "Proxies",
+            Self::Cores => "Browser Cores",
+            Self::Settings => "Settings",
+        }
+    }
+
+    /// Whether the page has been built yet.
+    pub fn is_ready(self) -> bool {
+        matches!(self, Self::Profiles | Self::Proxies)
+    }
+}
+
+/// One row of the proxies list, with who is using it.
+#[derive(Clone)]
+pub struct ProxyRow {
+    pub proxy: ProxyProfile,
+    pub used_by: Vec<String>,
+}
+
+impl ProxyRow {
+    /// `name` plus what it dials, for the row's second line.
+    pub fn endpoint(&self) -> String {
+        self.proxy.endpoint()
+    }
+
+    pub fn is_used(&self) -> bool {
+        !self.used_by.is_empty()
+    }
+
+    pub fn usage_label(&self) -> String {
+        match self.used_by.len() {
+            0 => "not assigned".to_string(),
+            1 => format!("used by {}", self.used_by[0]),
+            count => format!("used by {count} profiles"),
+        }
+    }
+}
+
 pub struct AppState {
     profiles: Arc<dyn ProfileService>,
     runtime: Arc<RuntimeService>,
     cores: Arc<dyn CoreRepository>,
-    proxies: Arc<dyn ProxyRepository>,
+    proxies: Arc<dyn ProxyService>,
+    page: Page,
     rows: Vec<ProfileRow>,
     selected: Option<ProfileId>,
     notice: Option<Notice>,
@@ -218,13 +273,14 @@ impl AppState {
         profiles: Arc<dyn ProfileService>,
         runtime: Arc<RuntimeService>,
         cores: Arc<dyn CoreRepository>,
-        proxies: Arc<dyn ProxyRepository>,
+        proxies: Arc<dyn ProxyService>,
     ) -> Self {
         Self {
             profiles,
             runtime,
             cores,
             proxies,
+            page: Page::Profiles,
             rows: Vec::new(),
             selected: None,
             notice: None,
@@ -252,12 +308,7 @@ impl AppState {
             .into_iter()
             .map(|core| (core.id, core.name))
             .collect();
-        let proxies: HashMap<ProxyId, String> = self
-            .proxies
-            .list()?
-            .into_iter()
-            .map(|proxy| (proxy.id, proxy.name))
-            .collect();
+        let proxies = self.proxy_names()?;
 
         let mut profiles = self.profiles.list()?;
         profiles.sort_by_key(|profile| profile.name.to_lowercase());
@@ -334,6 +385,91 @@ impl AppState {
     /// Placeholder naming until the Profile Editor page exists.
     pub fn next_profile_name(&self) -> String {
         format!("Profile {}", self.rows.len() + 1)
+    }
+
+    /// The page the sidebar is showing.
+    pub fn page(&self) -> Page {
+        self.page
+    }
+
+    pub fn set_page(&mut self, page: Page) {
+        self.page = page;
+        if page == Page::Proxies {
+            // Usage is derived from the profiles, so re-read both.
+            let _ = self.load_rows();
+        }
+    }
+
+    fn proxy_names(&self) -> Result<HashMap<ProxyId, String>, AppError> {
+        Ok(self
+            .proxies
+            .list()?
+            .into_iter()
+            .map(|proxy| (proxy.id, proxy.name))
+            .collect())
+    }
+
+    /// Every proxy with the profiles assigned to it, for the Proxies page.
+    pub fn proxy_rows(&self) -> Result<Vec<ProxyRow>, AppError> {
+        let usage = self.proxies.usage()?;
+        Ok(self
+            .proxies
+            .list()?
+            .into_iter()
+            .map(|proxy| ProxyRow {
+                used_by: usage.get(&proxy.id).cloned().unwrap_or_default(),
+                proxy,
+            })
+            .collect())
+    }
+
+    /// `(id, name)` for every proxy, for the profile editor's picker.
+    pub fn proxy_choices(&self) -> Vec<(ProxyId, String)> {
+        self.proxies
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|proxy| (proxy.id, proxy.name))
+            .collect()
+    }
+
+    pub fn proxy(&self, id: ProxyId) -> Option<ProxyProfile> {
+        self.proxies.get(id).ok().flatten()
+    }
+
+    pub fn create_proxy(
+        &mut self,
+        name: &str,
+        outbound: ProxyOutbound,
+    ) -> Result<ProxyId, AppError> {
+        let created = self.record(self.proxies.create(NewProxy {
+            name: name.trim().to_string(),
+            outbound,
+        }))?;
+        let id = created.id;
+        self.notice = Some(Notice::info(format!("Created proxy {}", created.name)));
+        Ok(id)
+    }
+
+    pub fn update_proxy(&mut self, proxy: ProxyProfile) -> Result<(), AppError> {
+        self.record(self.proxies.update(proxy.clone()))?;
+        self.notice = Some(Notice::info(format!(
+            "Saved {}. Running profiles keep the proxy they started with.",
+            proxy.name
+        )));
+        Ok(())
+    }
+
+    /// Removes a proxy. Refused while a profile still points at it, because the
+    /// alternative is that profile quietly going direct.
+    pub fn delete_proxy(&mut self, id: ProxyId) -> Result<(), AppError> {
+        let name = self
+            .proxy(id)
+            .map(|proxy| proxy.name)
+            .unwrap_or_else(|| id.to_string());
+        self.record(self.proxies.delete(id))?;
+        self.notice = Some(Notice::info(format!("Deleted proxy {name}")));
+        Ok(())
     }
 
     pub fn has_core(&self) -> bool {
@@ -564,6 +700,12 @@ pub(crate) mod testing {
             snapshot.last_warning = Some(message.to_string());
         }
 
+        /// The snapshot a test wants to inspect without going through the UI.
+        #[cfg(test)]
+        pub fn snapshot_of(&self, id: ProfileId) -> Option<RuntimeSnapshot> {
+            self.snapshot(id)
+        }
+
         fn record(&self, command: &str) {
             self.commands
                 .lock()
@@ -633,11 +775,12 @@ pub(crate) mod testing {
 mod tests {
     use super::*;
     use crate::state::testing::{FakeRuntime, core};
-    use application::DefaultProfileService;
+    use application::{DefaultProfileService, DefaultProxyService};
     use domain::CoreId;
     use std::path::PathBuf;
     use storage::{
         MemCoreRepository, MemProfileRepository, MemProxyRepository, ProfileRepository as _,
+        ProxyRepository as _,
     };
 
     struct Fixture {
@@ -645,6 +788,7 @@ mod tests {
         runtime: Arc<FakeRuntime>,
         cores: Arc<MemCoreRepository>,
         profiles: Arc<MemProfileRepository>,
+        proxies: Arc<MemProxyRepository>,
     }
 
     fn fixture() -> Fixture {
@@ -664,18 +808,19 @@ mod tests {
             runtime.clone(),
         ));
 
-        let state = AppState::new(
-            service,
-            runtime_service,
-            core_repo.clone(),
+        let proxy_service: Arc<dyn ProxyService> = Arc::new(DefaultProxyService::new(
             proxy_repo.clone(),
-        );
+            profile_repo.clone(),
+        ));
+
+        let state = AppState::new(service, runtime_service, core_repo.clone(), proxy_service);
 
         Fixture {
             state,
             runtime,
             cores: core_repo,
             profiles: profile_repo,
+            proxies: proxy_repo,
         }
     }
 
@@ -769,6 +914,195 @@ mod tests {
             "a deleted profile keeps no verification result"
         );
         assert_eq!(fixture.state.selected_id(), None);
+    }
+
+    fn socks5(host: &str, port: u16) -> ProxyOutbound {
+        ProxyOutbound::Socks5(domain::Socks5Outbound {
+            host: host.to_string(),
+            port,
+            username: None,
+            password: None,
+        })
+    }
+
+    #[test]
+    fn a_created_proxy_is_listed_and_stored() {
+        let mut fixture = fixture();
+        let id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+
+        let rows = fixture.state.proxy_rows().expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].proxy.name, "Office");
+        assert_eq!(rows[0].endpoint(), "socks5://10.0.0.1:1080");
+        assert_eq!(rows[0].usage_label(), "not assigned");
+        assert!(fixture.proxies.get(id).expect("stored").is_some());
+    }
+
+    #[test]
+    fn a_broken_proxy_is_refused_and_reported() {
+        let mut fixture = fixture();
+        assert!(
+            fixture
+                .state
+                .create_proxy("Broken", socks5("", 1080))
+                .is_err()
+        );
+        assert!(fixture.state.proxy_rows().expect("rows").is_empty());
+        assert!(
+            fixture.state.notice().is_some_and(|notice| notice.error),
+            "the refusal is shown in the banner"
+        );
+    }
+
+    #[test]
+    fn the_picker_offers_every_stored_proxy() {
+        let mut fixture = fixture();
+        assert!(fixture.state.proxy_choices().is_empty());
+        let id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create");
+        assert_eq!(
+            fixture.state.proxy_choices(),
+            vec![(id, "Office".to_string())]
+        );
+    }
+
+    #[test]
+    fn assigning_a_proxy_reaches_storage_and_the_usage_list() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let profile_id = fixture.state.create_profile("Proxied").expect("create");
+        let proxy_id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+
+        let mut profile = fixture.state.profile(profile_id).expect("loaded");
+        profile.proxy_id = Some(proxy_id);
+        fixture.state.update_profile(profile).expect("assign");
+
+        assert_eq!(
+            fixture.proxies.get(proxy_id).expect("stored").map(|p| p.id),
+            Some(proxy_id)
+        );
+        let rows = fixture.state.proxy_rows().expect("rows");
+        assert_eq!(rows[0].used_by, vec!["Proxied".to_string()]);
+        assert_eq!(rows[0].usage_label(), "used by Proxied");
+        assert!(rows[0].is_used());
+        assert_eq!(
+            fixture
+                .profiles
+                .get(profile_id)
+                .expect("stored")
+                .and_then(|profile| profile.proxy_id),
+            Some(proxy_id),
+            "the assignment reached storage"
+        );
+        assert_eq!(
+            fixture.state.rows()[0].proxy_name.as_deref(),
+            Some("Office"),
+            "the row shows the assigned proxy"
+        );
+    }
+
+    /// Refused rather than quietly rewritten to Direct: the assignment would
+    /// otherwise be nulled out and that profile's traffic would leave unproxied.
+    #[test]
+    fn a_proxy_in_use_cannot_be_deleted() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let profile_id = fixture.state.create_profile("Proxied").expect("create");
+        let proxy_id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        let mut profile = fixture.state.profile(profile_id).expect("loaded");
+        profile.proxy_id = Some(proxy_id);
+        fixture.state.update_profile(profile).expect("assign");
+
+        let error = fixture.state.delete_proxy(proxy_id).unwrap_err();
+        assert!(error.to_string().contains("Proxied"), "{error}");
+        assert_eq!(fixture.state.proxy_rows().expect("rows").len(), 1);
+        assert_eq!(
+            fixture
+                .profiles
+                .get(profile_id)
+                .expect("stored")
+                .and_then(|profile| profile.proxy_id),
+            Some(proxy_id),
+            "the assignment survived the refused delete"
+        );
+    }
+
+    #[test]
+    fn a_proxy_is_deleted_once_nothing_uses_it() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let profile_id = fixture.state.create_profile("Proxied").expect("create");
+        let proxy_id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        let mut profile = fixture.state.profile(profile_id).expect("loaded");
+        profile.proxy_id = Some(proxy_id);
+        fixture.state.update_profile(profile).expect("assign");
+
+        let mut unassigned = fixture.state.profile(profile_id).expect("loaded");
+        unassigned.proxy_id = None;
+        fixture.state.update_profile(unassigned).expect("unassign");
+        fixture.state.delete_proxy(proxy_id).expect("delete");
+
+        assert!(fixture.state.proxy_rows().expect("rows").is_empty());
+        assert_eq!(
+            fixture.state.rows()[0].proxy_name,
+            None,
+            "the row falls back to direct"
+        );
+    }
+
+    #[test]
+    fn saving_a_proxy_keeps_a_running_profile_on_what_it_started_with() {
+        let mut fixture = fixture();
+        let profile_id = running_profile(&mut fixture);
+        let proxy_id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+
+        let mut proxy = fixture.state.proxy(proxy_id).expect("stored");
+        proxy.outbound = socks5("10.0.0.2", 1081);
+        fixture.state.update_proxy(proxy).expect("save");
+
+        assert_eq!(
+            fixture.runtime.snapshot_of(profile_id).map(|s| s.state),
+            Some(RuntimeState::Running),
+            "editing a proxy does not disturb a running profile"
+        );
+        assert!(
+            fixture
+                .state
+                .notice()
+                .is_some_and(|notice| notice.message.contains("next start")
+                    || notice.message.contains("keep")),
+            "the banner says when the change takes effect"
+        );
+    }
+
+    #[test]
+    fn the_page_can_be_switched() {
+        let mut fixture = fixture();
+        assert_eq!(fixture.state.page(), Page::Profiles);
+        fixture.state.set_page(Page::Proxies);
+        assert_eq!(fixture.state.page(), Page::Proxies);
+        assert!(Page::Proxies.is_ready());
+        assert!(!Page::Settings.is_ready());
     }
 
     /// A running profile with a debug port, ready to be verified.

@@ -6,13 +6,16 @@
 
 mod core_detect;
 mod editor;
+mod proxy_editor;
 #[cfg(all(test, target_os = "linux"))]
 mod real_browser;
 mod state;
 mod ui;
 mod verifier;
 
-use application::{DefaultProfileService, ProfileService, RuntimeService};
+use application::{
+    DefaultProfileService, DefaultProxyService, ProfileService, ProxyService, RuntimeService,
+};
 use gpui_kit::component::Root;
 use gpui_kit::*;
 use runtime::{
@@ -83,8 +86,12 @@ fn main() {
         Arc::clone(&profile_repo),
         data_dir.clone(),
     ));
+    let proxy_service: Arc<dyn ProxyService> = Arc::new(DefaultProxyService::new(
+        Arc::clone(&proxy_repo),
+        Arc::clone(&profile_repo),
+    ));
 
-    let mut app_state = AppState::new(profile_service, runtime_service, core_repo, proxy_repo);
+    let mut app_state = AppState::new(profile_service, runtime_service, core_repo, proxy_service);
     let _ = app_state.load();
     if let Some((message, error)) = core_notice {
         app_state.push_notice(message, error);

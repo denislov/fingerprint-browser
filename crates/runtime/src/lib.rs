@@ -34,7 +34,9 @@ pub use verify::{
     verify as verify_fingerprint,
 };
 pub use version::{DEFAULT_TIMEOUT as DEFAULT_VERSION_TIMEOUT, VersionReport, parse_major};
-pub use xray::{DefaultXrayConfigBuilder, XrayConfigBuilder};
+pub use xray::{
+    DefaultXrayConfigBuilder, XrayConfigBuilder, is_supported as outbound_is_supported,
+};
 
 #[cfg(test)]
 mod tests {

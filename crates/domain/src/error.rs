@@ -8,6 +8,21 @@ pub enum ValidationError {
     #[error("proxy name cannot be empty")]
     EmptyProxyName,
 
+    #[error("proxy host cannot be empty")]
+    EmptyProxyHost,
+
+    #[error("proxy host {host:?} must be a bare host name or address, without spaces or a scheme")]
+    InvalidProxyHost { host: String },
+
+    #[error("proxy port must be between 1 and 65535")]
+    InvalidProxyPort,
+
+    #[error("proxy credentials must be either both set or both empty")]
+    IncompleteProxyCredentials,
+
+    #[error("proxy {field} cannot be empty")]
+    EmptyProxyField { field: &'static str },
+
     #[error("core name cannot be empty")]
     EmptyCoreName,
 

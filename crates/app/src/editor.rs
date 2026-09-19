@@ -5,13 +5,13 @@
 //! the view hands the result to [`crate::state::AppState`], and a rejection
 //! comes back as a message the form shows without closing.
 //!
-//! Fields the profile already owns but this form does not edit (id, core, proxy
-//! assignment, user data directory, start target) are carried through
-//! untouched, so saving cannot silently drop them.
+//! Fields the profile already owns but this form does not edit (id, core, user
+//! data directory, start target) are carried through untouched, so saving
+//! cannot silently drop them.
 
 use domain::{
-    BrowserBrand, BrowserProfile, Platform, SpoofingFeature, WebRtcPolicy, validate_fingerprint,
-    validate_profile, validate_window,
+    BrowserBrand, BrowserProfile, Platform, ProxyId, SpoofingFeature, WebRtcPolicy,
+    validate_fingerprint, validate_profile, validate_window,
 };
 use gpui_kit::component::button::*;
 use gpui_kit::component::checkbox::Checkbox;
@@ -40,6 +40,9 @@ pub struct ProfileEditor {
     platform: Platform,
     webrtc_policy: WebRtcPolicy,
     disabled_spoofing: Vec<SpoofingFeature>,
+    /// The proxies this profile can be assigned to, and which one it is on.
+    proxies: Vec<(ProxyId, String)>,
+    proxy: Option<ProxyId>,
     /// Why the last save attempt was refused.
     error: Option<String>,
 }
@@ -79,7 +82,16 @@ const SPOOFING_FEATURES: [(SpoofingFeature, &str); 5] = [
 
 impl ProfileEditor {
     /// Builds the form from the profile as it is stored.
-    pub fn new(profile: &BrowserProfile, window: &mut Window, cx: &mut App) -> Self {
+    ///
+    /// The proxies are passed in because they live outside the profile: the
+    /// form needs their names to offer a choice, and the id it stores is the
+    /// only part of the assignment the profile owns.
+    pub fn new(
+        profile: &BrowserProfile,
+        proxies: &[(ProxyId, String)],
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
         let fingerprint = &profile.fingerprint;
         let field = |value: &str, window: &mut Window, cx: &mut App| {
             cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()))
@@ -115,6 +127,8 @@ impl ProfileEditor {
             platform: fingerprint.platform,
             webrtc_policy: fingerprint.webrtc_policy,
             disabled_spoofing: fingerprint.disabled_spoofing.clone(),
+            proxies: proxies.to_vec(),
+            proxy: profile.proxy_id,
             error: None,
         }
     }
@@ -172,6 +186,7 @@ impl ProfileEditor {
         profile.fingerprint.hardware_concurrency = hardware_concurrency;
         profile.fingerprint.webrtc_policy = self.webrtc_policy;
         profile.fingerprint.disabled_spoofing = self.disabled_spoofing.clone();
+        profile.proxy_id = self.proxy;
 
         // The same rules storage enforces, run before anything is written.
         validate_profile(&profile)
@@ -209,6 +224,91 @@ impl ProfileEditor {
             self.disabled_spoofing.push(feature);
         }
     }
+}
+
+/// The proxy assignment, as chips: Direct plus every stored proxy.
+///
+/// A chip whose id is no longer in the list is still shown, marked as missing:
+/// a profile assigned to a proxy that was deleted elsewhere must not silently
+/// read as Direct.
+/// The element id and the visible label of one proxy chip.
+///
+/// They are separate on purpose. The id is positional so a test can click it
+/// even when two proxies share a name; the label is the name and nothing else.
+/// Building the label out of the id is what put "0-Office" in the window.
+fn proxy_chip(index: usize, name: &str) -> (String, String) {
+    (format!("editor-proxy-{index}"), name.to_string())
+}
+
+fn proxy_row(
+    editor: Entity<ProfileEditor>,
+    selected: Option<ProxyId>,
+    options: &[(ProxyId, String)],
+) -> Div {
+    let missing = selected.filter(|id| !options.iter().any(|(candidate, _)| candidate == id));
+
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .child(proxy_choice(
+            editor.clone(),
+            "editor-proxy-direct".to_string(),
+            "Direct".to_string(),
+            selected.is_none(),
+            None,
+        ))
+        .children(options.iter().enumerate().map(|(index, (id, name))| {
+            let (chip_id, label) = proxy_chip(index, name);
+            proxy_choice(
+                editor.clone(),
+                chip_id,
+                label,
+                selected == Some(*id),
+                Some(*id),
+            )
+        }))
+        .children(missing.map(|id| {
+            proxy_choice(
+                editor.clone(),
+                "editor-proxy-missing".to_string(),
+                format!("(missing proxy {id})"),
+                true,
+                Some(id),
+            )
+        }))
+}
+
+fn proxy_choice(
+    editor: Entity<ProfileEditor>,
+    id: String,
+    label: String,
+    active: bool,
+    value: Option<ProxyId>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .test_support()
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(if active { 0x52525b } else { 0x27272a }))
+        .text_xs()
+        .when(active, |this| {
+            this.bg(rgb(0x27272a))
+                .text_color(rgb(0xf4f4f5))
+                .font_weight(FontWeight::MEDIUM)
+        })
+        .when(!active, |this| this.text_color(rgb(0x71717a)))
+        .child(label)
+        .on_click(move |_, _, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.proxy = value;
+                cx.notify();
+            });
+        })
 }
 
 /// A seed that is very unlikely to repeat, from the clock.
@@ -397,6 +497,14 @@ impl Render for ProfileEditor {
                         ),
                 ),
             )
+            .child(
+                Field::new()
+                    .label("Proxy")
+                    .description(
+                        "Chosen when the profile starts. A change applies to the next start.",
+                    )
+                    .child(proxy_row(editor.clone(), self.proxy, &self.proxies)),
+            )
             .child(Field::new().label("WebRTC").child(choice_row(
                 editor.clone(),
                 "editor-webrtc",
@@ -447,10 +555,11 @@ mod tests {
     // macro's expansion and makes it recurse.
     use super::ProfileEditor;
     use domain::{
-        BrowserBrand, CoreId, FingerprintProfile, Platform, ProfileId, SpoofingFeature,
+        BrowserBrand, CoreId, FingerprintProfile, Platform, ProfileId, ProxyId, SpoofingFeature,
         StartTarget, WebRtcPolicy, WindowProfile,
     };
     use gpui_kit::component::input::InputState;
+    use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
 
     fn profile() -> super::BrowserProfile {
@@ -471,8 +580,18 @@ mod tests {
         cx: &'a mut TestAppContext,
         profile: &super::BrowserProfile,
     ) -> (Entity<ProfileEditor>, &'a mut VisualTestContext) {
+        editor_with(cx, profile, &[])
+    }
+
+    /// The editor with proxies to choose from.
+    fn editor_with<'a>(
+        cx: &'a mut TestAppContext,
+        profile: &super::BrowserProfile,
+        proxies: &[(ProxyId, String)],
+    ) -> (Entity<ProfileEditor>, &'a mut VisualTestContext) {
         let profile = profile.clone();
-        cx.add_window_view(move |window, cx| ProfileEditor::new(&profile, window, cx))
+        let proxies = proxies.to_vec();
+        cx.add_window_view(move |window, cx| ProfileEditor::new(&profile, &proxies, window, cx))
     }
 
     fn set(cx: &mut VisualTestContext, input: &Entity<InputState>, text: &str) {
@@ -635,20 +754,106 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn the_engine_specific_defaults_survive_an_edit(cx: &mut TestAppContext) {
+    fn the_proxy_the_profile_is_on_is_what_the_form_offers(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let original = profile();
-        let (editor, cx) = editor(cx, &original);
-        let proxy = domain::ProxyId::new();
-
-        editor.update(cx, |editor, cx| {
-            editor.base.proxy_id = Some(proxy);
-            cx.notify();
-        });
+        let proxy = ProxyId::new();
+        let mut original = profile();
+        original.proxy_id = Some(proxy);
+        let proxies = vec![
+            (proxy, "Office".to_string()),
+            (ProxyId::new(), "Home".to_string()),
+        ];
+        let (editor, cx) = editor_with(cx, &original, &proxies);
 
         let rebuilt = editor
             .read_with(cx, |editor, cx| editor.build_profile(cx))
             .expect("valid");
-        assert_eq!(rebuilt.proxy_id, Some(proxy));
+        assert_eq!(
+            rebuilt.proxy_id,
+            Some(proxy),
+            "an edit that does not touch the assignment keeps it"
+        );
+    }
+
+    /// The chip's id carries the index; its label must not.
+    ///
+    /// The first version built the id as `editor-proxy-{index}-{name}` and then
+    /// showed that same string, so the window offered a proxy called
+    /// "0-Office". The tests passed, because they clicked the string they had
+    /// built; only the real window showed the mistake.
+    #[test]
+    fn a_proxy_chip_is_labelled_with_its_name_alone() {
+        let (id, label) = super::proxy_chip(0, "Office");
+        assert_eq!(id, "editor-proxy-0");
+        assert_eq!(label, "Office");
+        assert!(!label.contains('0'), "the index must not reach the label");
+        let (_, label) = super::proxy_chip(3, "Home");
+        assert_eq!(label, "Home");
+    }
+
+    #[gpui_kit::test]
+    fn choosing_a_proxy_and_choosing_direct_change_the_assignment(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let proxy = ProxyId::new();
+        let proxies = vec![(proxy, "Office".to_string())];
+        let (editor, cx) = editor_with(cx, &profile(), &proxies);
+        assert!(
+            editor
+                .read_with(cx, |editor, cx| editor.build_profile(cx))
+                .expect("valid")
+                .proxy_id
+                .is_none(),
+            "a profile with no proxy starts on Direct"
+        );
+
+        click(cx, "editor-proxy-0");
+        assert_eq!(
+            editor
+                .read_with(cx, |editor, cx| editor.build_profile(cx))
+                .expect("valid")
+                .proxy_id,
+            Some(proxy),
+            "picking a proxy assigns it"
+        );
+
+        click(cx, "editor-proxy-direct");
+        assert_eq!(
+            editor
+                .read_with(cx, |editor, cx| editor.build_profile(cx))
+                .expect("valid")
+                .proxy_id,
+            None,
+            "picking Direct clears the assignment"
+        );
+    }
+
+    /// A profile assigned to a proxy that is no longer stored must not read as
+    /// Direct: it is shown as missing instead.
+    #[gpui_kit::test]
+    fn an_assignment_to_a_missing_proxy_is_kept_and_shown(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let gone = ProxyId::new();
+        let mut original = profile();
+        original.proxy_id = Some(gone);
+        let (editor, cx) = editor_with(cx, &original, &[]);
+
+        assert_eq!(
+            editor
+                .read_with(cx, |editor, cx| editor.build_profile(cx))
+                .expect("valid")
+                .proxy_id,
+            Some(gone),
+            "the assignment survives even though the proxy is gone"
+        );
+        assert!(
+            editor
+                .read_with(cx, |editor, _| editor.proxy)
+                .is_some_and(|id| id == gone)
+        );
+    }
+
+    fn click(cx: &mut VisualTestContext, id: &str) {
+        let id = id.to_string();
+        cx.update(|window, cx| window.click(id, cx));
     }
 }
