@@ -96,6 +96,8 @@ ProxyProfile
 
 ## Phase 4 — Fingerprint capability layer
 
+前置验收更新（2026-09-19）：真实 ungoogled-chromium 148 + Xray 26.2.6 已通过 Linux 无界面运行时验收，覆盖双 Profile、Cookie 隔离与持久化、本地认证代理链路、崩溃回收和 ShutdownAll；修复正常 Stop 强杀导致 Cookie 丢失的问题。详见 `chromium-acceptance.md`。这不代表 fingerprint-chromium 的指纹能力已认证。
+
 实现：
 
 - browser version detection；

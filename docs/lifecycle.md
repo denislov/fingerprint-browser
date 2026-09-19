@@ -116,8 +116,8 @@ v1 不建议 Ant Browser 那种“窗口已起来但 CDP 未 ready 时继续后�
 ```text
 Running
   -> Stopping
-  -> request graceful browser close (optional)
-  -> wait short timeout
+  -> request Browser.close over loopback CDP
+  -> wait up to 2 seconds for exit (if request succeeds)
   -> terminate browser tree if needed
   -> stop Xray
   -> delete temp Xray config
@@ -131,6 +131,10 @@ Running
 stop(Stopped) -> no-op success
 stop(Stopping) -> no-op / already stopping
 ```
+
+真实 Chromium 验收发现直接强杀会丢失尚未落盘的 Cookie，因此正常 Stop、Restart、Shutdown 优先请求优雅关闭。
+CDP 不可用时直接强制回收；崩溃和启动回滚仍立即强制回收，尤其 Xray 崩溃不能等待浏览器落盘。
+异常退出或强制关闭时不保证 Cookie 持久化。Linux 实测结果见 `chromium-acceptance.md`。
 
 ---
 

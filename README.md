@@ -66,8 +66,11 @@ payload forwarding. Run it with:
 XRAY_BIN=/absolute/path/to/xray cargo test -p runtime --test xray_real -- --ignored
 ```
 
-The binary is not bundled. Browser state persistence, actual remote upstreams and
-Windows process-tree cleanup still need end-to-end acceptance testing.
+The binary is not bundled. Linux acceptance with real ungoogled-chromium
+148.0.7778.215 and Xray 26.2.6 now covers profile isolation, cookie persistence,
+authenticated local proxy forwarding, crash recovery and shutdown. See
+[the acceptance report](docs/chromium-acceptance.md) for reproduction and limits.
+Actual remote upstreams and Windows process-tree cleanup still need acceptance.
 
 Startup readiness now polls existing sessions during Xray waits and between
 bounded CDP requests. CDP bypasses environment proxies and requires browser and
@@ -98,6 +101,12 @@ counter, including when the receiver is full or disconnected. Diagnostics reset
 on a new start; stop preserves them. This is in-memory recovery, not a durable
 event history.
 
-Before declaring Phase 3 fully accepted, complete real Chromium acceptance and
-wire runtime settings and services into the GPUI UI.
+Normal stop first requests CDP `Browser.close` so Chromium can flush persistent
+state, waits up to two seconds for exit, and force-cleans remaining processes.
+Unavailable CDP falls back to forced cleanup; crash/rollback paths skip graceful
+close. Persistence is not guaranteed on a forced exit.
+
+Before declaring Phase 3 fully accepted for the fingerprint browser product,
+repeat acceptance with fingerprint-chromium and wire runtime settings and services
+into the GPUI UI.
 Phase 4 then adds version detection and fingerprint capability compatibility.

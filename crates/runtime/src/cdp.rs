@@ -18,6 +18,12 @@ pub struct CdpInfo {
 
 pub trait CdpProbe: Send + Sync {
     fn wait_ready(&self, port: u16, timeout: Duration) -> Result<CdpInfo, CdpError>;
+
+    fn close_browser(&self, _port: u16, _timeout: Duration) -> Result<(), CdpError> {
+        Err(CdpError::InvalidResponse(
+            "graceful close unavailable".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -30,6 +36,41 @@ impl HttpCdpProbe {
 }
 
 impl CdpProbe for HttpCdpProbe {
+    fn close_browser(&self, port: u16, timeout: Duration) -> Result<(), CdpError> {
+        use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+        let deadline = std::time::Instant::now() + timeout;
+        let info = self.wait_ready(port, timeout)?;
+        // CDP metadata must never redirect the close request off loopback.
+        let prefix = format!("ws://127.0.0.1:{port}/");
+        if !info.web_socket_debugger_url.starts_with(&prefix) {
+            return Err(CdpError::InvalidResponse(
+                "non-loopback CDP WebSocket".into(),
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(CdpError::Timeout {
+                timeout_secs: timeout.as_secs(),
+            });
+        }
+        let stream =
+            TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), remaining)
+                .map_err(|e| CdpError::Http(e.to_string()))?;
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|e| CdpError::Http(e.to_string()))?;
+        stream
+            .set_write_timeout(Some(remaining))
+            .map_err(|e| CdpError::Http(e.to_string()))?;
+        let (mut socket, _) = tungstenite::client(info.web_socket_debugger_url.as_str(), stream)
+            .map_err(|e| CdpError::Http(e.to_string()))?;
+        socket
+            .send(tungstenite::Message::Text(
+                r#"{"id":1,"method":"Browser.close"}"#.into(),
+            ))
+            .map_err(|e| CdpError::Http(e.to_string()))
+    }
+
     fn wait_ready(&self, port: u16, timeout: Duration) -> Result<CdpInfo, CdpError> {
         let start = std::time::Instant::now();
         let url = format!("http://127.0.0.1:{port}/json/version");

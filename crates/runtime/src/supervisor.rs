@@ -583,6 +583,10 @@ impl RuntimeSupervisor {
     }
 
     fn stop_profile(&mut self, profile_id: ProfileId) {
+        self.stop_session(profile_id, true);
+    }
+
+    fn stop_session(&mut self, profile_id: ProfileId, graceful: bool) {
         if let Some(mut session) = self.active_sessions.remove(&profile_id) {
             session.stopping = true;
 
@@ -592,6 +596,21 @@ impl RuntimeSupervisor {
                 state: RuntimeState::Stopping,
             });
 
+            if graceful
+                && matches!(session.browser.try_wait(), Ok(None))
+                && self
+                    .cdp_probe
+                    .close_browser(session._cdp_port, Duration::from_millis(250))
+                    .is_ok()
+            {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while matches!(session.browser.try_wait(), Ok(None))
+                    && std::time::Instant::now() < deadline
+                {
+                    self.poll_active_sessions();
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
             self.terminate_child(&mut session.browser);
             if let Some(child) = session.xray.as_mut() {
                 self.terminate_child(child);
@@ -644,7 +663,7 @@ impl RuntimeSupervisor {
             });
             self.emit(RuntimeEvent::StateChanged { profile_id, state });
             // Always reclaim both components before publishing Stopped.
-            self.stop_profile(profile_id);
+            self.stop_session(profile_id, false);
         }
     }
 
@@ -786,6 +805,7 @@ mod tests {
         }
     }
     struct Fixture {
+        _serial: std::sync::MutexGuard<'static, ()>,
         commands: Option<Sender<RuntimeCommand>>,
         supervisor: RuntimeSupervisor,
         events: Receiver<RuntimeEvent>,
@@ -794,6 +814,10 @@ mod tests {
     }
     impl Fixture {
         fn new(browser: bool, cdp: bool, script: &str) -> Self {
+            // Avoid fork/exec races with another test writing its executable
+            // and immediate port-rebind assertions racing sibling fixtures.
+            static FIXTURES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let serial = FIXTURES.lock().unwrap_or_else(|error| error.into_inner());
             let id = ProfileId::new();
             let dir = std::env::temp_dir().join(format!("fp-runtime-{id}"));
             std::fs::create_dir_all(&dir).unwrap();
@@ -844,6 +868,7 @@ mod tests {
                 start_target: StartTarget::Blank,
             };
             Self {
+                _serial: serial,
                 commands: Some(channels.command_tx),
                 supervisor,
                 events: channels.event_rx,
@@ -870,6 +895,42 @@ mod tests {
         }
     }
     const XRAY: &str = "#!/usr/bin/env python3\nimport json,socket,sys,time\nc=json.load(open(sys.argv[3]))\ns=socket.socket()\ns.bind(('127.0.0.1',c['inbounds'][0]['port']))\ns.listen()\ntime.sleep(60)\n";
+
+    #[test]
+    fn normal_stop_attempts_graceful_close_but_xray_crash_skips_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct ClosingProbe(Arc<AtomicUsize>);
+        impl CdpProbe for ClosingProbe {
+            fn wait_ready(&self, _: u16, _: Duration) -> Result<CdpInfo, CdpError> {
+                Ok(CdpInfo::default())
+            }
+            fn close_browser(&self, _: u16, _: Duration) -> Result<(), CdpError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(CdpError::Http("simulate unavailable CDP".into()))
+            }
+        }
+        let mut f = Fixture::new(true, true, XRAY);
+        let calls = Arc::new(AtomicUsize::new(0));
+        f.supervisor.cdp_probe = Box::new(ClosingProbe(calls.clone()));
+        f.start();
+        f.supervisor.stop_profile(f.params.profile.id);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        f.start();
+        let xray = f
+            .supervisor
+            .active_sessions
+            .get_mut(&f.params.profile.id)
+            .unwrap()
+            .xray
+            .as_mut()
+            .unwrap();
+        xray.kill().unwrap();
+        xray.wait().unwrap();
+        f.supervisor.poll_active_sessions();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+    }
 
     #[test]
     fn full_event_queue_does_not_block_stop_crash_or_shutdown() {
