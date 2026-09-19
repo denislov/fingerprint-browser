@@ -149,6 +149,25 @@ ShutdownAll；修复正常 Stop 强杀导致 Cookie 丢失的问题。详见 `ch
 仍未验证：地理位置（模型无字段，不发射开关；`--fingerprint-location` 在本环境产不出坐标，
 无法与"无定位源"区分），以及 `--fingerprinting-client-rects-noise` 在已有 seed 时测不出额外效果。
 
+### 第四批：窗口内的指纹验证动作
+
+进度（2026-09-20）：已完成。
+
+- `runtime::cdp`：新增 `create_page`/`close_page`（`PUT /json/new`、`GET /json/close/<id>`，
+  target id 只接受十六进制形状）与 `wait_for_document`——只等 `readyState` 不够，
+  新标签页会在导航提交前先报告一次 `complete`；同时探针不再依赖 `document.body` 存在
+  （用 `documentElement` 兜底），这两处都是真机 GUI 验收抓出来的。
+- `app::verifier`：`FingerprintVerifier` trait + `CdpFingerprintVerifier`；读不到一律算
+  `Unreadable`，绝不当作"已验证"。
+- `AppState`：验证状态机（Running/Confirmed/Disagreements/Unreadable）、`begin_verification`
+  校验（必须 Running 且有 CDP 端口、同一 profile 不并发）、stop/restart 丢弃过期读数。
+- `ui`：Runtime Details 内 "Verify fingerprint" 按钮（后台线程 + channel 回传，UI 不阻塞）、
+  结论按声明逐条列出（琥珀）、行内徽章；结论列表在可滚动的面板里，不会被截断。
+
+真机 GUI 验收同时验证了"假绿"风险：用一个剥掉所有指纹开关的包装脚本当内核，
+验证器报出 7 条差异（platform/brand/user agent/hardware concurrency/language/timezone/...），
+而不是显示 Confirmed。
+
 既有实现：
 
 ```text
@@ -287,10 +306,24 @@ an unresponsive http server cannot exceed the readiness deadline
 empty json is not ready
 ```
 
+### Verification state (app)
+
+```text
+a verification needs a running browser with a debug port
+a verification job carries the profile and its capabilities
+a second verification of the same profile is refused
+an outcome records confirmation disagreement or failure
+stopping or restarting a profile drops a stale reading
+a confirmed fingerprint is reported in the window
+disagreements are listed claim by claim
+every disagreement is reachable from a short panel
+```
+
 ### Fingerprint acceptance (real binary, opt-in)
 
 ```text
 a verified core honours every profile claim
+a fresh reading repeats and leaves the session as it was
 two profiles do not share a canvas surface
 disabling canvas spoofing makes the canvas seed independent
 a macos profile is not left on the host platform
@@ -298,6 +331,7 @@ excluding client rects removes only that noise
 audio spoofing is seed driven and can be excluded
 no ice candidate leaks an address on the product path
 font surface is readable and cjk is not boxed
+real chromium fingerprint verification through the verifier
 ```
 
 ### Version

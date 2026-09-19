@@ -21,12 +21,22 @@ pub struct CdpInfo {
 /// One entry of the `/json/list` page listing.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CdpTarget {
+    /// Present on `/json/new` replies and on `/json/list` entries.
+    #[serde(default)]
+    pub id: String,
     #[serde(rename = "type", default)]
     pub target_type: String,
     #[serde(default)]
     pub url: String,
     #[serde(rename = "webSocketDebuggerUrl", default)]
     pub web_socket_debugger_url: String,
+}
+
+impl CdpTarget {
+    /// The browser's id for this target, empty when it did not report one.
+    pub fn target_id(&self) -> &str {
+        &self.id
+    }
 }
 
 /// A debugger URL that points somewhere other than the loopback port we asked
@@ -88,6 +98,16 @@ impl CdpSession {
         Ok(Self { socket, next_id: 1 })
     }
 
+    /// Dial a page target the caller already created.
+    pub fn connect_page(
+        port: u16,
+        target: &CdpTarget,
+        timeout: Duration,
+    ) -> Result<Self, CdpError> {
+        let url = loopback_websocket_url(port, &target.web_socket_debugger_url)?;
+        Self::connect(&url, timeout)
+    }
+
     /// Resolve the first page target of a running browser and dial it.
     pub fn open_page(port: u16, timeout: Duration) -> Result<Self, CdpError> {
         let target = HttpCdpProbe::new()
@@ -113,10 +133,23 @@ impl CdpSession {
         self.send_text(&request.to_string())?;
         self.await_reply(id, timeout)?;
 
+        let scheme = url.split(':').next().unwrap_or_default().to_string();
+        self.wait_for_document(&format!("{scheme}:"), timeout)
+    }
+
+    /// Wait until the page holds the loaded document of `scheme`.
+    ///
+    /// `readyState` alone is not enough: a brand new target reports `complete`
+    /// for the empty document it starts with, before the navigation that opened
+    /// it has committed. Waiting for the scheme as well means the answer is
+    /// about the document the caller asked for, not the placeholder.
+    pub fn wait_for_document(&mut self, scheme: &str, timeout: Duration) -> Result<(), CdpError> {
+        let expression = "(document.readyState+'|'+location.protocol+'|'+             (document.documentElement?'document':'empty'))";
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            let state = self.evaluate("document.readyState", timeout)?;
-            if state.as_str() == Some("complete") {
+            let observed = self.evaluate(expression, timeout)?;
+            let observed = observed.as_str().unwrap_or_default();
+            if observed == format!("complete|{scheme}|document") {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
@@ -224,6 +257,24 @@ pub trait CdpProbe: Send + Sync {
         ))
     }
 
+    /// Opens a new page target at `url`, as the browser's own HTTP endpoint
+    /// does. Used so a probe can run somewhere the user is not looking.
+    fn create_page(
+        &self,
+        _port: u16,
+        _url: &str,
+        _timeout: Duration,
+    ) -> Result<CdpTarget, CdpError> {
+        Err(CdpError::InvalidResponse(
+            "page creation unavailable".into(),
+        ))
+    }
+
+    /// Closes a page target previously returned by [`Self::create_page`].
+    fn close_page(&self, _port: u16, _target_id: &str, _timeout: Duration) -> Result<(), CdpError> {
+        Err(CdpError::InvalidResponse("page closing unavailable".into()))
+    }
+
     fn page_target(&self, port: u16, timeout: Duration) -> Result<Option<CdpTarget>, CdpError> {
         Ok(self
             .page_targets(port, timeout)?
@@ -278,6 +329,37 @@ impl CdpProbe for HttpCdpProbe {
         serde_json::from_str(&body).map_err(|e| CdpError::InvalidResponse(e.to_string()))
     }
 
+    fn create_page(&self, port: u16, url: &str, timeout: Duration) -> Result<CdpTarget, CdpError> {
+        let body = self
+            .call_json(
+                port,
+                &format!("new?{}", encode_target_url(url)),
+                true,
+                timeout,
+            )
+            .ok_or_else(|| CdpError::InvalidResponse("page creation refused".into()))?;
+        let target: CdpTarget =
+            serde_json::from_str(&body).map_err(|e| CdpError::InvalidResponse(e.to_string()))?;
+        if target.target_id().is_empty() || target.web_socket_debugger_url.is_empty() {
+            return Err(CdpError::InvalidResponse(
+                "page creation returned no target".into(),
+            ));
+        }
+        loopback_websocket_url(port, &target.web_socket_debugger_url)?;
+        Ok(target)
+    }
+
+    fn close_page(&self, port: u16, target_id: &str, timeout: Duration) -> Result<(), CdpError> {
+        // The id comes from the browser; refuse anything that is not id shaped
+        // rather than putting it into a request path.
+        if target_id.is_empty() || !target_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(CdpError::InvalidResponse("bad page target id".into()));
+        }
+        self.call_json(port, &format!("close/{target_id}"), false, timeout)
+            .map(|_| ())
+            .ok_or_else(|| CdpError::InvalidResponse("page close refused".into()))
+    }
+
     fn wait_ready(&self, port: u16, timeout: Duration) -> Result<CdpInfo, CdpError> {
         let start = std::time::Instant::now();
 
@@ -308,18 +390,54 @@ impl CdpProbe for HttpCdpProbe {
 impl HttpCdpProbe {
     /// One bounded loopback GET of the CDP metadata endpoints.
     fn get_json(&self, port: u16, endpoint: &str, timeout: Duration) -> Option<String> {
+        self.call_json(port, endpoint, false, timeout)
+    }
+
+    /// One bounded loopback request to a CDP metadata endpoint.
+    ///
+    /// Only loopback is ever addressed, and the agent ignores any configured
+    /// proxy: this is the browser's own control endpoint, not traffic.
+    fn call_json(&self, port: u16, endpoint: &str, put: bool, timeout: Duration) -> Option<String> {
         let url = format!("http://127.0.0.1:{port}/json/{endpoint}");
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .proxy(None)
             .timeout_global(Some(timeout))
             .build()
             .into();
-        agent
-            .get(&url)
-            .call()
+        // The create endpoint needs a bodyless PUT; the rest are GETs.
+        let response = if put {
+            agent.put(&url).send_empty()
+        } else {
+            agent.get(&url).call()
+        };
+        response
             .ok()
             .and_then(|mut response| response.body_mut().read_to_string().ok())
     }
+}
+
+/// Percent-encodes a URL for use as a query value, keeping the characters that
+/// make it still a URL.
+fn encode_target_url(url: &str) -> String {
+    let mut encoded = String::with_capacity(url.len());
+    for byte in url.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~'
+            | b':'
+            | b'/'
+            | b'?'
+            | b'='
+            | b'&' => encoded.push(byte as char),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -522,6 +640,105 @@ mod tests {
             .expect_err("a browser with no page target cannot be read");
         assert!(matches!(error, CdpError::NoPageTarget), "{error}");
         server.join().unwrap();
+    }
+
+    /// Serves the CDP metadata endpoints as `method path` -> body.
+    fn fake_metadata_server(
+        reply: impl Fn(&str, &str, u16) -> Option<(u16, String)> + Send + 'static,
+    ) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                        let mut buffer = [0u8; 2048];
+                        let read = stream.read(&mut buffer).unwrap_or(0);
+                        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                        let mut parts = request.split_whitespace();
+                        let method = parts.next().unwrap_or_default().to_string();
+                        let path = parts.next().unwrap_or_default().to_string();
+                        let (status, body) =
+                            reply(&method, &path, port).unwrap_or((404, "{}".into()));
+                        let _ = stream.write_all(
+                            format!(
+                                "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_page_is_created_with_put_and_closed_by_id() {
+        let port = fake_metadata_server(|method, path, port| {
+            if method == "PUT" && path.starts_with("/json/new?file:///tmp/probe%20one.html") {
+                Some((
+                    200,
+                    format!(
+                        r#"{{"id":"A1B2C3","type":"page","url":"file:///tmp/probe one.html","webSocketDebuggerUrl":"ws://127.0.0.1:{port}/devtools/page/A1B2C3"}}"#
+                    ),
+                ))
+            } else if method == "GET" && path == "/json/close/A1B2C3" {
+                Some((200, "Target is closing".into()))
+            } else {
+                None
+            }
+        });
+
+        let created = HttpCdpProbe
+            .create_page(port, "file:///tmp/probe one.html", Duration::from_secs(2))
+            .expect("the create endpoint answers");
+        assert_eq!(created.target_id(), "A1B2C3");
+        HttpCdpProbe
+            .close_page(port, created.target_id(), Duration::from_secs(2))
+            .expect("the close endpoint answers");
+    }
+
+    #[test]
+    fn a_target_id_that_is_not_id_shaped_is_never_put_in_a_path() {
+        let error = HttpCdpProbe
+            .close_page(9222, "../version", Duration::from_secs(1))
+            .expect_err("a path cannot be smuggled through the target id");
+
+        assert!(matches!(error, CdpError::InvalidResponse(_)), "{error}");
+    }
+
+    #[test]
+    fn a_debugger_url_off_loopback_is_not_dialled_after_creation() {
+        let port = fake_metadata_server(|method, path, _| {
+            (method == "PUT" && path.starts_with("/json/new")).then(|| {
+                (
+                    200,
+                    r#"{"id":"AA","type":"page","webSocketDebuggerUrl":"ws://evil.example:1/x"}"#
+                        .to_string(),
+                )
+            })
+        });
+
+        let error = HttpCdpProbe
+            .create_page(port, "file:///tmp/probe.html", Duration::from_secs(2))
+            .expect_err("a hijacked debugger url must not be handed back");
+
+        assert!(matches!(error, CdpError::InvalidResponse(_)), "{error}");
+    }
+
+    #[test]
+    fn a_target_url_is_percent_encoded_for_the_create_query() {
+        assert_eq!(
+            encode_target_url("file:///tmp/probe one.html?a=1"),
+            "file:///tmp/probe%20one.html?a=1"
+        );
+        assert_eq!(encode_target_url("file:///t#x"), "file:///t%23x");
     }
 
     #[test]

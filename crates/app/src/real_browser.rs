@@ -289,3 +289,59 @@ fn real_chromium_start_stop_through_app_state() {
 
     println!("restarted A pid {:?}", restarted.browser_pid);
 }
+
+#[test]
+#[ignore = "requires CHROMIUM_BIN pointing to a real Chromium"]
+fn real_chromium_fingerprint_verification_through_the_verifier() {
+    use crate::verifier::{CdpFingerprintVerifier, FingerprintVerifier};
+    use runtime::{CdpProbe as _, HttpCdpProbe};
+
+    let mut harness = Harness::new();
+    let id = harness.state.create_profile("Verify me").expect("create");
+    harness.state.start(id).expect("start");
+    let row = harness.wait_for(id, RuntimeState::Running);
+    let port = row.cdp_port.expect("a running profile has a CDP port");
+
+    // The window's own verifier, on the profile the window would verify.
+    let job = harness.state.begin_verification(id).expect("begin");
+    assert_eq!(job.port, port);
+    let pages_before = HttpCdpProbe
+        .page_targets(port, Duration::from_secs(3))
+        .expect("the browser lists its pages")
+        .len();
+
+    let outcome = CdpFingerprintVerifier::default()
+        .verify(job.port, &job.profile, &job.capabilities)
+        .expect("the fingerprint can be read out of a running profile");
+    harness.state.finish_verification(id, Ok(outcome));
+    println!("verification: {:?}", harness.state.verification(id));
+
+    let verification = harness
+        .state
+        .verification(id)
+        .expect("the outcome is recorded");
+    assert_eq!(
+        verification.disagreements(),
+        &[],
+        "the engine reproduced every claim the profile makes"
+    );
+    assert_eq!(verification.failure(), None);
+
+    // Verifying must not disturb the session it verifies.
+    let pages_after = HttpCdpProbe
+        .page_targets(port, Duration::from_secs(3))
+        .expect("the browser still lists its pages")
+        .len();
+    assert_eq!(
+        pages_before, pages_after,
+        "the probe opens its own tab and closes it again"
+    );
+    assert!(
+        std::path::Path::new(&format!(
+            "/proc/{}",
+            row.browser_pid.expect("a running browser has a pid")
+        ))
+        .exists(),
+        "the browser is still the same live process"
+    );
+}

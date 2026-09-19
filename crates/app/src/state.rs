@@ -6,8 +6,10 @@
 //! [`RuntimeService::snapshot`], which is the documented reconciliation path.
 
 use application::{AppError, NewProfile, ProfileService, RuntimeService};
-use domain::{BrowserProfile, CoreId, ProfileId, ProxyId, RuntimeState};
-use runtime::RuntimeSnapshot;
+use domain::{
+    BrowserProfile, CoreCapabilities, CoreId, FingerprintProfile, ProfileId, ProxyId, RuntimeState,
+};
+use runtime::{Discrepancy, RuntimeSnapshot};
 use std::collections::HashMap;
 use std::sync::Arc;
 use storage::{CoreRepository, ProxyRepository};
@@ -145,6 +147,61 @@ impl ProfileRow {
     }
 }
 
+/// What a verification of one profile produced.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Verification {
+    /// A reading is in flight.
+    Running,
+    /// Every claim the profile makes was confirmed by the reading.
+    Confirmed,
+    /// The reading disagreed with the profile.
+    Disagreements(Vec<Discrepancy>),
+    /// No reading could be taken, so nothing was confirmed.
+    Unreadable(String),
+}
+
+impl Verification {
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running)
+    }
+
+    /// Short label for the profile row and the details panel.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Running => "verifying...".to_string(),
+            Self::Confirmed => "fingerprint confirmed".to_string(),
+            Self::Disagreements(found) => match found.len() {
+                1 => "1 claim not confirmed".to_string(),
+                count => format!("{count} claims not confirmed"),
+            },
+            Self::Unreadable(_) => "fingerprint unreadable".to_string(),
+        }
+    }
+
+    pub fn disagreements(&self) -> &[Discrepancy] {
+        match self {
+            Self::Disagreements(found) => found,
+            _ => &[],
+        }
+    }
+
+    pub fn failure(&self) -> Option<&str> {
+        match self {
+            Self::Unreadable(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// Everything a worker needs to verify one profile without touching the view.
+#[derive(Debug, Clone)]
+pub struct VerificationJob {
+    pub profile_id: ProfileId,
+    pub port: u16,
+    pub profile: FingerprintProfile,
+    pub capabilities: CoreCapabilities,
+}
+
 pub struct AppState {
     profiles: Arc<dyn ProfileService>,
     runtime: Arc<RuntimeService>,
@@ -153,6 +210,7 @@ pub struct AppState {
     rows: Vec<ProfileRow>,
     selected: Option<ProfileId>,
     notice: Option<Notice>,
+    verifications: HashMap<ProfileId, Verification>,
 }
 
 impl AppState {
@@ -170,6 +228,7 @@ impl AppState {
             rows: Vec::new(),
             selected: None,
             notice: None,
+            verifications: HashMap::new(),
         }
     }
 
@@ -325,14 +384,80 @@ impl AppState {
 
     pub fn stop(&mut self, id: ProfileId) -> Result<(), AppError> {
         self.record(self.runtime.stop(id))?;
+        // The reading described a browser that no longer exists.
+        self.forget_verification(id);
         self.refresh_runtime();
         Ok(())
     }
 
     pub fn restart(&mut self, id: ProfileId) -> Result<(), AppError> {
         self.record(self.runtime.restart(id))?;
+        // A restarted browser is a new browser: the old reading is stale.
+        self.forget_verification(id);
         self.refresh_runtime();
         Ok(())
+    }
+
+    /// Claims the verification slot for a profile and assembles the job.
+    ///
+    /// Refuses when the profile is not running, because a fingerprint can only
+    /// be read out of a live browser, and while another verification is in
+    /// flight for the same profile.
+    pub fn begin_verification(&mut self, id: ProfileId) -> Result<VerificationJob, AppError> {
+        let existing = self.verifications.get(&id);
+        if existing.is_some_and(Verification::is_running) {
+            return Err(AppError::Other(format!(
+                "profile {id} is already being verified"
+            )));
+        }
+        let job = self.verification_job(id)?;
+        self.verifications.insert(id, Verification::Running);
+        Ok(job)
+    }
+
+    /// Records the outcome of a verification the view ran on a worker.
+    pub fn finish_verification(
+        &mut self,
+        id: ProfileId,
+        outcome: Result<Vec<Discrepancy>, String>,
+    ) {
+        let verification = match outcome {
+            Ok(found) if found.is_empty() => Verification::Confirmed,
+            Ok(found) => Verification::Disagreements(found),
+            Err(reason) => Verification::Unreadable(reason),
+        };
+        self.verifications.insert(id, verification);
+    }
+
+    /// Clears a verification result, e.g. after the profile restarted: a new
+    /// browser has a new fingerprint.
+    pub fn forget_verification(&mut self, id: ProfileId) {
+        self.verifications.remove(&id);
+    }
+
+    pub fn verification(&self, id: ProfileId) -> Option<&Verification> {
+        self.verifications.get(&id)
+    }
+
+    fn verification_job(&mut self, id: ProfileId) -> Result<VerificationJob, AppError> {
+        let row = self
+            .rows
+            .iter()
+            .find(|row| row.profile.id == id)
+            .ok_or_else(|| AppError::Other(format!("profile {id} not found")))?;
+        let port = row.cdp_port().ok_or_else(|| {
+            AppError::Other("the browser must be running before it can be verified".to_string())
+        })?;
+        let core = self
+            .cores
+            .get(row.profile.core_id)?
+            .ok_or_else(|| AppError::Other(format!("core {} not found", row.profile.core_id)))?;
+        Ok(VerificationJob {
+            profile_id: id,
+            port,
+            profile: row.profile.fingerprint.clone(),
+            capabilities: CoreCapabilities::for_major(core.major),
+        })
     }
 
     fn core_id(&mut self) -> Result<CoreId, AppError> {
@@ -380,6 +505,15 @@ pub(crate) mod testing {
                 .entry(id)
                 .or_insert_with(|| snapshot(id, RuntimeState::Stopped));
             snapshot.state = state;
+        }
+
+        /// Publishes the debug port a running browser exposes.
+        pub fn set_cdp_port(&self, id: ProfileId, port: u16) {
+            let mut snapshots = self.snapshots.write().expect("snapshot lock");
+            let snapshot = snapshots
+                .entry(id)
+                .or_insert_with(|| snapshot(id, RuntimeState::Stopped));
+            snapshot.cdp_port = Some(port);
         }
 
         /// Publishes a diagnostic the way the supervisor's warning event does.
@@ -510,6 +644,123 @@ mod tests {
         let core = core(CoreId::new());
         fixture.cores.save(&core).expect("save core");
         core.id
+    }
+
+    /// A running profile with a debug port, ready to be verified.
+    fn running_profile(fixture: &mut Fixture) -> ProfileId {
+        seed_core(fixture);
+        fixture.state.load().expect("load");
+        let id = fixture
+            .state
+            .create_profile("verify me")
+            .expect("create profile");
+        fixture.runtime.set_state(id, RuntimeState::Running);
+        fixture.runtime.set_cdp_port(id, 9333);
+        fixture.state.refresh_runtime();
+        id
+    }
+
+    #[test]
+    fn a_verification_needs_a_running_browser_with_a_debug_port() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture
+            .state
+            .create_profile("stopped")
+            .expect("create profile");
+
+        assert!(fixture.state.begin_verification(id).is_err());
+        assert!(fixture.state.verification(id).is_none());
+    }
+
+    #[test]
+    fn a_verification_job_carries_the_profile_and_its_capabilities() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+
+        let job = fixture.state.begin_verification(id).expect("begin");
+
+        assert_eq!(job.port, 9333);
+        assert_eq!(job.profile_id, id);
+        assert_eq!(
+            job.profile.seed,
+            fixture.state.rows()[0].profile.fingerprint.seed
+        );
+        assert_eq!(
+            job.capabilities.major, 144,
+            "the capabilities come from the profile's own core"
+        );
+        assert!(
+            fixture
+                .state
+                .verification(id)
+                .is_some_and(Verification::is_running)
+        );
+    }
+
+    #[test]
+    fn a_second_verification_of_the_same_profile_is_refused() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+        fixture.state.begin_verification(id).expect("first");
+
+        assert!(fixture.state.begin_verification(id).is_err());
+    }
+
+    #[test]
+    fn an_outcome_records_confirmation_disagreement_or_failure() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+
+        fixture.state.finish_verification(id, Ok(Vec::new()));
+        assert_eq!(
+            fixture.state.verification(id),
+            Some(&Verification::Confirmed)
+        );
+
+        let disagreement = Discrepancy {
+            claim: "platform",
+            expected: "Win32".to_string(),
+            observed: "Linux x86_64".to_string(),
+        };
+        fixture
+            .state
+            .finish_verification(id, Ok(vec![disagreement.clone()]));
+        let recorded = fixture.state.verification(id).expect("recorded");
+        assert_eq!(
+            recorded.disagreements(),
+            std::slice::from_ref(&disagreement)
+        );
+        assert_eq!(recorded.label(), "1 claim not confirmed");
+
+        fixture
+            .state
+            .finish_verification(id, Err("no debug port".to_string()));
+        let failed = fixture.state.verification(id).expect("recorded");
+        assert_eq!(failed.failure(), Some("no debug port"));
+        assert!(
+            !failed.is_running(),
+            "a failed reading is not a reading in flight"
+        );
+    }
+
+    #[test]
+    fn stopping_or_restarting_a_profile_drops_a_stale_reading() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+        fixture.state.finish_verification(id, Ok(Vec::new()));
+        assert!(fixture.state.verification(id).is_some());
+
+        fixture.state.restart(id).expect("restart");
+        assert!(
+            fixture.state.verification(id).is_none(),
+            "a restarted browser has a new fingerprint"
+        );
+
+        fixture.state.finish_verification(id, Ok(Vec::new()));
+        fixture.state.stop(id).expect("stop");
+        assert!(fixture.state.verification(id).is_none());
     }
 
     #[test]

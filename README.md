@@ -94,7 +94,11 @@ CHROMIUM_BIN=/absolute/path/to/chrome XRAY_BIN=/absolute/path/to/xray cargo test
 ```
 
 Phase 5 also has its first slice: the GPUI window is wired to the services
-instead of being a static mockup.
+instead of being a static mockup, and it can verify a running profile: the
+Runtime Details panel reads the fingerprint back out of the live browser in a
+tab of its own and reports every claim the browser did not reproduce, with a
+per-row badge so the answer is visible without selecting anything. A reading
+that fails is reported as unreadable, never as confirmed.
 
 - `crates/app/src/state.rs` holds the view-facing state (`AppState`). It owns no
   runtime state: every read goes through `RuntimeService::snapshot`, and a

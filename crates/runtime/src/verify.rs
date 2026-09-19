@@ -41,6 +41,9 @@ pub const PROBE_EXPRESSION: &str = r#"(function(){
   function hash(text){var h=0;for(var i=0;i<text.length;i++){h=(h*31+text.charCodeAt(i))>>>0}return h}
   function hashBytes(bytes){var h=0;for(var i=0;i<bytes.length;i++){h=(h*31+bytes[i])>>>0}return h}
   function hashFloats(values){var h=0;for(var i=0;i<values.length;i++){h=(h*31+(Math.round(values[i]*1e7)&0xffff))>>>0}return h}
+  // A document that is still parsing has no body yet; documentElement always
+  // exists, and appending there is enough for a measurement.
+  function host(){return document.body||document.documentElement}
   var out={};
   var canvas=document.createElement('canvas');canvas.width=200;canvas.height=50;
   var context=canvas.getContext('2d');
@@ -54,7 +57,7 @@ pub const PROBE_EXPRESSION: &str = r#"(function(){
   for(var i=0;i<3;i++){
     var element=document.createElement('div');
     element.style.cssText='width:100px;height:20px';element.textContent='rect'+i;
-    document.body.appendChild(element);
+    host().appendChild(element);
     var rect=element.getBoundingClientRect();
     rects.push([Number(rect.x.toFixed(6)),Number(rect.y.toFixed(6)),rect.width,rect.height]);
   }
@@ -94,7 +97,7 @@ pub const PROBE_EXPRESSION: &str = r#"(function(){
     span.style.cssText='position:absolute;left:-9999px;top:-9999px;font-size:48px;white-space:nowrap';
     if(family)span.style.fontFamily=family;
     span.textContent=text;
-    document.documentElement.appendChild(span);
+    host().appendChild(span);
     var width=span.offsetWidth;
     span.remove();
     return width;
@@ -107,7 +110,7 @@ pub const PROBE_EXPRESSION: &str = r#"(function(){
           var span=document.createElement('span');
           span.style.cssText='position:absolute;left:-9999px;top:-9999px;font-size:72px;white-space:nowrap';
           span.textContent='mmmmmmmmmmlli';
-          document.documentElement.appendChild(span);
+          host().appendChild(span);
           var base={};
           bases.forEach(function(b){span.style.fontFamily=b;base[b]=span.offsetWidth+','+span.offsetHeight});
           var found=[];
@@ -550,6 +553,32 @@ impl FingerprintProbe {
         self.read_with(port, Some(url))
     }
 
+    /// Reads the fingerprint on a page of the probe's own.
+    ///
+    /// A fresh target is opened for the reading and closed afterwards, so
+    /// verifying a running profile does not navigate, reload or otherwise touch
+    /// the page the user is looking at. The document is a local file because
+    /// the user agent data surface is absent on `about:blank` and `data:` URLs.
+    pub fn read_fresh(&self, port: u16) -> Result<ObservedFingerprint, CdpError> {
+        let probe = HttpCdpProbe::new();
+        probe.wait_ready(port, self.timeout)?;
+        let document = write_probe_document()?;
+        let url = format!("file://{}", document.display());
+        let target = probe.create_page(port, &url, self.timeout)?;
+
+        let reading = (|| {
+            let mut session = CdpSession::connect_page(port, &target, self.timeout)?;
+            session.wait_for_document("file:", self.timeout)?;
+            let value = session.evaluate(PROBE_EXPRESSION, self.timeout)?;
+            ObservedFingerprint::parse(&value)
+        })();
+
+        // Closing is best effort: a target left behind must not turn a good
+        // reading into an error, and the reading is what the caller asked for.
+        let _ = probe.close_page(port, target.target_id(), self.timeout);
+        reading
+    }
+
     fn read_with(&self, port: u16, url: Option<&str>) -> Result<ObservedFingerprint, CdpError> {
         HttpCdpProbe::new().wait_ready(port, self.timeout)?;
         let mut session = CdpSession::open_page(port, self.timeout)?;
@@ -559,6 +588,19 @@ impl FingerprintProbe {
         let value = session.evaluate(PROBE_EXPRESSION, self.timeout)?;
         ObservedFingerprint::parse(&value)
     }
+}
+
+/// Writes the document the probe runs in and returns its path.
+///
+/// The content is deliberately empty: the probe brings its own DOM.
+fn write_probe_document() -> Result<std::path::PathBuf, CdpError> {
+    let path = std::env::temp_dir().join("fp-browser-probe.html");
+    std::fs::write(
+        &path,
+        "<!doctype html><meta charset=\"utf-8\"><title>fingerprint probe</title><body>",
+    )
+    .map_err(|error| CdpError::Http(error.to_string()))?;
+    Ok(path)
 }
 
 #[cfg(test)]

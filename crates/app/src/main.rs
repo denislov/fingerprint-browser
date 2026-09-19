@@ -9,6 +9,7 @@ mod core_detect;
 mod real_browser;
 mod state;
 mod ui;
+mod verifier;
 
 use application::{DefaultProfileService, ProfileService, RuntimeService};
 use gpui_kit::component::Root;
@@ -24,6 +25,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use storage::{CoreRepository, ProfileRepository, ProxyRepository, SqliteStorage};
 use ui::AppView;
+use verifier::CdpFingerprintVerifier;
 
 /// Data root. Overridable so tests and portable installs can relocate it.
 const DATA_DIR_ENV: &str = "FP_BROWSER_DATA_DIR";
@@ -116,7 +118,11 @@ fn main() {
                 },
                 |window, cx| {
                     let view = cx.new(|cx| {
-                        let mut view = AppView::new(app_state, event_rx);
+                        let mut view = AppView::new(
+                            app_state,
+                            event_rx,
+                            Arc::new(CdpFingerprintVerifier::default()),
+                        );
                         view.boot(cx);
                         view
                     });

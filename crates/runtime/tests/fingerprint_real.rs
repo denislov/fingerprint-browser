@@ -509,3 +509,61 @@ fn font_surface_is_readable_and_cjk_is_not_boxed() {
         harness.stop(snapshot.profile_id);
     }
 }
+
+#[test]
+#[ignore = "requires CHROMIUM_BIN and a real browser"]
+fn a_fresh_reading_repeats_and_leaves_the_session_as_it_was() {
+    // A new target reports a complete empty document before the navigation that
+    // opened it commits; reading too early fails or measures the wrong page.
+    let harness = Harness::verified();
+    let profile = harness.profile(11111, FingerprintProfile::new_random(0));
+    let (snapshot, _) = harness.read(&profile);
+    let port = snapshot.cdp_port.expect("a running profile has a CDP port");
+
+    let pages = |port: u16| {
+        HttpCdpProbe
+            .page_targets(port, Duration::from_secs(3))
+            .expect("the browser lists its pages")
+    };
+    let before = pages(port);
+
+    let mut readings = Vec::new();
+    for _ in 0..3 {
+        readings.push(
+            FingerprintProbe::default()
+                .read_fresh(port)
+                .expect("a fresh reading succeeds"),
+        );
+    }
+
+    assert!(
+        readings
+            .iter()
+            .all(|reading| reading.platform.as_deref() == Some("Win32")),
+        "every reading is of the profile's own document: {readings:#?}"
+    );
+    assert_eq!(
+        readings[0].canvas_signature(),
+        readings[2].canvas_signature(),
+        "repeated readings of one session must agree"
+    );
+
+    let after = pages(port);
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "each reading opens a tab and closes it again"
+    );
+    assert_eq!(
+        before
+            .iter()
+            .map(|page| page.url.clone())
+            .collect::<Vec<_>>(),
+        after
+            .iter()
+            .map(|page| page.url.clone())
+            .collect::<Vec<_>>(),
+        "the pages the user has keep their urls"
+    );
+    harness.stop(snapshot.profile_id);
+}
