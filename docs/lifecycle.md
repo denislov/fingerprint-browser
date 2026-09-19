@@ -308,6 +308,14 @@ Supervisor loop
   emit state changes
 ```
 
+当前实现会在 Xray readiness 循环和每段至多 100 ms 的 CDP 探测之间读取命令。
+Stop 当前启动项会先回收临时进程和配置，再发布 Stopped；不会发布 Started 或 Failed。
+ShutdownAll 和命令通道断开会取消启动、清理已有会话并退出主循环。
+Restart 当前启动项先取消，再通过待处理队列重新启动，避免递归启动。
+其他 Start/Restart 延后执行；Stop 可立即处理其他运行会话，并移除该 Profile 之前排队的启动请求。
+每次最多处理 64 条命令，避免持续命令流饿死 readiness 和崩溃轮询。
+上述响应时间不涵盖同步文件操作、进程创建及事件通道被消费者阻塞的情况。
+
 个人使用实例数通常有限，这比引入复杂 async runtime 更容易验证。
 
 ---

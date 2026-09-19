@@ -9,7 +9,7 @@ use crate::process::{DefaultProcessTreeController, ProcessTreeController};
 use crate::xray::{DefaultXrayConfigBuilder, XrayConfigBuilder};
 use crossbeam_channel::{Receiver, Sender};
 use domain::{ProfileId, RuntimeState};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
@@ -122,6 +122,8 @@ impl Default for SupervisorComponents {
 }
 
 pub struct RuntimeSupervisor {
+    pending_commands: VecDeque<RuntimeCommand>,
+    shutting_down: bool,
     command_rx: Receiver<RuntimeCommand>,
     event_tx: Sender<RuntimeEvent>,
     snapshots: Arc<RwLock<HashMap<ProfileId, RuntimeSnapshot>>>,
@@ -162,6 +164,8 @@ impl RuntimeSupervisor {
             command_rx,
             event_tx,
             snapshots,
+            pending_commands: VecDeque::new(),
+            shutting_down: false,
             active_sessions: HashMap::new(),
             planner: components.planner,
             capability_resolver: components.capability_resolver,
@@ -184,8 +188,12 @@ impl RuntimeSupervisor {
     }
 
     pub fn run(&mut self) {
-        loop {
-            match self.command_rx.recv_timeout(Duration::from_millis(100)) {
+        while !self.shutting_down {
+            let command = match self.pending_commands.pop_front() {
+                Some(command) => Ok(command),
+                None => self.command_rx.recv_timeout(Duration::from_millis(100)),
+            };
+            match command {
                 Ok(cmd) => {
                     let should_continue = self.handle_command(cmd);
                     if !should_continue {
@@ -219,6 +227,8 @@ impl RuntimeSupervisor {
                 true
             }
             RuntimeCommand::ShutdownAll => {
+                self.shutting_down = true;
+                self.pending_commands.clear();
                 self.cleanup_all();
                 false
             }
@@ -242,6 +252,11 @@ impl RuntimeSupervisor {
             profile_id,
             state: RuntimeState::Starting,
         });
+
+        if self.poll_start_commands(profile_id) {
+            self.stop_profile(profile_id);
+            return;
+        }
 
         // 1. Allocate CDP port
         let cdp_port = match self.port_allocator.allocate_loopback() {
@@ -306,6 +321,7 @@ impl RuntimeSupervisor {
 
         // Prepare and verify Xray before Chromium can issue any requests.
         let mut xray = None;
+        let mut cancelled = false;
         let xray_config = plan.xray.as_ref().map(|p| p.config_path.clone());
         if let Some(xray_plan) = &plan.xray {
             let result = (|| -> Result<std::process::Child, String> {
@@ -327,7 +343,10 @@ impl RuntimeSupervisor {
                     &mut child,
                     xray_plan.socks_port,
                     self.xray_ready_timeout,
-                    || self.poll_active_sessions(),
+                    || {
+                        cancelled = self.poll_start_commands(profile_id);
+                        !cancelled
+                    },
                 ) {
                     self.terminate_child(&mut child);
                     return Err(e.to_string());
@@ -338,12 +357,25 @@ impl RuntimeSupervisor {
                 Ok(child) => xray = Some(child),
                 Err(e) => {
                     Self::remove_config(xray_config.as_deref());
-                    self.fail_start(profile_id, e);
+                    if cancelled {
+                        self.stop_profile(profile_id);
+                    } else {
+                        self.fail_start(profile_id, e);
+                    }
                     return;
                 }
             }
         }
         let xray_pid = xray.as_ref().map(std::process::Child::id);
+
+        if self.poll_start_commands(profile_id) {
+            if let Some(child) = xray.as_mut() {
+                self.terminate_child(child);
+            }
+            Self::remove_config(xray_config.as_deref());
+            self.stop_profile(profile_id);
+            return;
+        }
 
         // 5. Spawn Chromium
         let mut cmd = std::process::Command::new(&plan.browser_executable);
@@ -375,7 +407,10 @@ impl RuntimeSupervisor {
         // 6. Probe CDP readiness
         let deadline = std::time::Instant::now() + self.cdp_ready_timeout;
         let readiness = loop {
-            self.poll_active_sessions();
+            cancelled = self.poll_start_commands(profile_id);
+            if cancelled {
+                break Err("startup cancelled".to_string());
+            }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 break Err("CDP readiness timed out".to_string());
@@ -403,6 +438,10 @@ impl RuntimeSupervisor {
                 .wait_ready(cdp_port, remaining.min(Duration::from_millis(100)))
             {
                 Ok(info) => {
+                    cancelled = self.poll_start_commands(profile_id);
+                    if cancelled {
+                        break Err("startup cancelled".to_string());
+                    }
                     // Recheck Xray after the probe before advertising Running.
                     if let Some(xray) = xray.as_mut()
                         && !matches!(xray.try_wait(), Ok(None))
@@ -462,9 +501,64 @@ impl RuntimeSupervisor {
                     self.terminate_child(child);
                 }
                 Self::remove_config(xray_config.as_deref());
-                self.fail_start(profile_id, format!("CDP readiness probe failed: {e}"));
+                if cancelled {
+                    self.stop_profile(profile_id);
+                } else {
+                    self.fail_start(profile_id, format!("CDP readiness probe failed: {e}"));
+                }
             }
         }
+    }
+
+    /// Service cancellation without recursively starting another profile.
+    /// A bounded batch leaves time for readiness and process monitoring.
+    fn poll_start_commands(&mut self, starting: ProfileId) -> bool {
+        self.poll_active_sessions();
+        for _ in 0..64 {
+            let command = match self.command_rx.try_recv() {
+                Ok(command) => command,
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.shutting_down = true;
+                    self.pending_commands.clear();
+                    self.cleanup_all();
+                    return true;
+                }
+            };
+            match command {
+                RuntimeCommand::ShutdownAll => {
+                    self.shutting_down = true;
+                    self.pending_commands.clear();
+                    self.cleanup_all();
+                    return true;
+                }
+                RuntimeCommand::Stop(id) => {
+                    self.pending_commands.retain(|command| match command {
+                        RuntimeCommand::Start(p) | RuntimeCommand::Restart(p) => {
+                            p.profile_id() != id
+                        }
+                        _ => true,
+                    });
+                    if id == starting {
+                        return true;
+                    }
+                    self.stop_profile(id);
+                }
+                RuntimeCommand::Start(params) if params.profile_id() == starting => {
+                    let _ = self.event_tx.send(RuntimeEvent::Warning {
+                        profile_id: starting,
+                        message: format!("profile {starting} is already starting"),
+                    });
+                }
+                RuntimeCommand::Restart(params) if params.profile_id() == starting => {
+                    self.pending_commands
+                        .push_back(RuntimeCommand::Restart(params));
+                    return true;
+                }
+                command => self.pending_commands.push_back(command),
+            }
+        }
+        false
     }
 
     fn fail_start(&mut self, profile_id: ProfileId, message: String) {
@@ -502,6 +596,10 @@ impl RuntimeSupervisor {
         } else {
             self.set_snapshot_state(profile_id, RuntimeState::Stopped);
             let _ = self.event_tx.send(RuntimeEvent::Stopped { profile_id });
+            let _ = self.event_tx.send(RuntimeEvent::StateChanged {
+                profile_id,
+                state: RuntimeState::Stopped,
+            });
         }
     }
 
@@ -634,6 +732,7 @@ mod tests {
         }
     }
     struct Fixture {
+        commands: Option<Sender<RuntimeCommand>>,
         supervisor: RuntimeSupervisor,
         events: Receiver<RuntimeEvent>,
         params: StartParams,
@@ -691,6 +790,7 @@ mod tests {
                 start_target: StartTarget::Blank,
             };
             Self {
+                commands: Some(channels.command_tx),
                 supervisor,
                 events: channels.event_rx,
                 params: StartParams::with_proxy(profile, core, proxy),
@@ -716,6 +816,193 @@ mod tests {
         }
     }
     const XRAY: &str = "#!/usr/bin/env python3\nimport json,socket,sys,time\nc=json.load(open(sys.argv[3]))\ns=socket.socket()\ns.bind(('127.0.0.1',c['inbounds'][0]['port']))\ns.listen()\ntime.sleep(60)\n";
+
+    struct CommandProbe {
+        sender: Sender<RuntimeCommand>,
+        command: RuntimeCommand,
+    }
+    impl CdpProbe for CommandProbe {
+        fn wait_ready(&self, _: u16, _: Duration) -> Result<CdpInfo, CdpError> {
+            self.sender.send(self.command.clone()).unwrap();
+            // Cancellation wins even if the same probe reports readiness.
+            Ok(CdpInfo::default())
+        }
+    }
+
+    #[test]
+    fn stop_during_cdp_readiness_rolls_back_without_started_or_failed() {
+        let mut f = Fixture::new(true, true, XRAY);
+        f.supervisor.cdp_ready_timeout = Duration::from_secs(30);
+        f.supervisor.cdp_probe = Box::new(CommandProbe {
+            sender: f.commands.as_ref().unwrap().clone(),
+            command: RuntimeCommand::Stop(f.params.profile.id),
+        });
+        let start = std::time::Instant::now();
+        f.start();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        assert!(!f.config().exists());
+        assert!(f.supervisor.active_sessions.is_empty());
+        assert!(!f.events.try_iter().any(|event| matches!(
+            event,
+            RuntimeEvent::Started { .. }
+                | RuntimeEvent::StateChanged {
+                    state: RuntimeState::Failed { .. },
+                    ..
+                }
+        )));
+    }
+
+    #[test]
+    fn stop_during_xray_wait_reaps_process_before_timeout() {
+        let mut f = Fixture::new(
+            true,
+            true,
+            "#!/bin/sh\necho $$ > \"$3.pid\"\nexec sleep 60\n",
+        );
+        f.supervisor.xray_ready_timeout = Duration::from_secs(30);
+        let marker = f.config().with_file_name("xray.json.pid");
+        let sender = f.commands.as_ref().unwrap().clone();
+        let id = f.params.profile.id;
+        let worker = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let pid = loop {
+                if let Ok(text) = std::fs::read_to_string(&marker)
+                    && let Ok(pid) = text.trim().parse::<u32>()
+                {
+                    break pid;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            sender.send(RuntimeCommand::Stop(id)).unwrap();
+            pid
+        });
+        let start = std::time::Instant::now();
+        f.start();
+        let pid = worker.join().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        assert!(!f.config().exists());
+        #[cfg(target_os = "linux")]
+        assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
+    }
+
+    #[test]
+    fn shutdown_during_start_exits_run_loop_and_discards_deferred_start() {
+        let mut f = Fixture::new(true, true, XRAY);
+        f.supervisor.cdp_probe = Box::new(CommandProbe {
+            sender: f.commands.as_ref().unwrap().clone(),
+            command: RuntimeCommand::ShutdownAll,
+        });
+        let mut next = f.params.clone();
+        next.profile.id = ProfileId::new();
+        let next_id = next.profile.id;
+        let sender = f.commands.as_ref().unwrap();
+        sender
+            .send(RuntimeCommand::Start(f.params.clone()))
+            .unwrap();
+        sender.send(RuntimeCommand::Start(next)).unwrap();
+        f.supervisor.run();
+        assert!(f.supervisor.shutting_down);
+        assert!(f.supervisor.pending_commands.is_empty());
+        assert!(f.supervisor.active_sessions.is_empty());
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        assert!(!f.config().exists());
+        assert!(
+            !f.supervisor
+                .snapshots
+                .read()
+                .unwrap()
+                .contains_key(&next_id)
+        );
+    }
+
+    #[test]
+    fn disconnected_command_channel_cancels_start() {
+        let mut f = Fixture::new(true, true, XRAY);
+        f.commands.take();
+        f.start();
+        assert!(f.supervisor.shutting_down);
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        assert!(!f.config().exists());
+    }
+
+    #[test]
+    fn restart_during_readiness_cancels_then_starts_again_without_recursion() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct RestartProbe {
+            sender: Sender<RuntimeCommand>,
+            params: StartParams,
+            calls: AtomicUsize,
+        }
+        impl CdpProbe for RestartProbe {
+            fn wait_ready(&self, _: u16, _: Duration) -> Result<CdpInfo, CdpError> {
+                let command = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    RuntimeCommand::Restart(self.params.clone())
+                } else {
+                    RuntimeCommand::ShutdownAll
+                };
+                self.sender.send(command).unwrap();
+                Ok(CdpInfo::default())
+            }
+        }
+        let mut f = Fixture::new(true, true, XRAY);
+        f.supervisor.cdp_probe = Box::new(RestartProbe {
+            sender: f.commands.as_ref().unwrap().clone(),
+            params: f.params.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        f.commands
+            .as_ref()
+            .unwrap()
+            .send(RuntimeCommand::Start(f.params.clone()))
+            .unwrap();
+        f.supervisor.run();
+        let events: Vec<_> = f.events.try_iter().collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::StateChanged {
+                        state: RuntimeState::Starting,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::Started { .. }))
+        );
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        assert!(!f.config().exists());
+    }
+
+    #[test]
+    fn stop_other_profile_removes_earlier_deferred_start_and_preserves_later_start() {
+        let mut f = Fixture::new(true, true, XRAY);
+        f.start();
+        let id = f.params.profile.id;
+        let sender = f.commands.as_ref().unwrap();
+        sender
+            .send(RuntimeCommand::Start(f.params.clone()))
+            .unwrap();
+        sender.send(RuntimeCommand::Stop(id)).unwrap();
+        sender
+            .send(RuntimeCommand::Start(f.params.clone()))
+            .unwrap();
+        assert!(!f.supervisor.poll_start_commands(ProfileId::new()));
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        assert!(!f.config().exists());
+        assert_eq!(f.supervisor.pending_commands.len(), 1);
+        assert!(
+            matches!(f.supervisor.pending_commands.front(), Some(RuntimeCommand::Start(p)) if p.profile_id() == id)
+        );
+    }
 
     #[test]
     fn starting_another_profile_still_reaps_existing_crashed_session() {

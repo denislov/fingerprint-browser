@@ -75,8 +75,15 @@ WebSocket metadata. Unix children run in independent process groups, allowing
 cleanup of descendants even after their leader exits (children that deliberately
 leave the group require stronger OS containment).
 
-Before declaring Phase 3 fully accepted, allow stop/shutdown commands to interrupt
-startup, reserve launch ports through startup, and wire runtime settings and
-services into the GPUI UI. Event consumers must keep draining the bounded event
-channel to avoid blocking the supervisor.
+Stop and shutdown commands now interrupt Xray/CDP readiness waits. Cancelling a
+start reclaims its children and configuration before publishing `Stopped`;
+restart queues a fresh launch after cleanup. Other starts remain deferred, while
+stops for running profiles are handled during the wait. Channel disconnection
+also cancels startup and shuts down the supervisor. Responsiveness is bounded by
+the current readiness probe (normally at most 100 ms), plus process cleanup;
+filesystem operations and process creation are still synchronous.
+
+Before declaring Phase 3 fully accepted, reserve launch ports through startup and
+wire runtime settings and services into the GPUI UI. Event consumers must keep
+draining the bounded event channel to avoid blocking the supervisor.
 Phase 4 then adds version detection and fingerprint capability compatibility.
