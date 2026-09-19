@@ -268,22 +268,48 @@ mod tests {
         move |_| VersionReport::from_banner(banner.map(str::to_string))
     }
 
-    fn temp_executable(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fp-core-detect-{}", CoreId::new()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join(name);
-        touching(&path);
-        path
+    /// A stand-in browser binary in its own directory.
+    ///
+    /// The directory goes away with the guard: a test run used to leave one
+    /// behind per test.
+    struct TempExecutable {
+        dir: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TempExecutable {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("fp-core-detect-{}", CoreId::new()));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let path = dir.join(name);
+            touching(&path);
+            Self { dir, path }
+        }
+
+        fn path(&self) -> PathBuf {
+            self.path.clone()
+        }
+
+        /// Removes the executable, as if the binary had been uninstalled.
+        fn uninstall(self) {
+            std::fs::remove_file(&self.path).expect("remove executable");
+        }
+    }
+
+    impl Drop for TempExecutable {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     #[test]
     fn an_empty_catalogue_registers_the_discovered_core() {
         let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
-        let executable = temp_executable("chrome");
+        let executable = TempExecutable::new("chrome");
 
         let notice = maintain_with(
             cores.as_ref(),
-            Some(executable.clone()),
+            Some(executable.path()),
             None,
             &probe_returning(Some("Chromium 148.0.7778.215")),
         );
@@ -294,17 +320,17 @@ mod tests {
         assert_eq!(stored[0].major, 148);
         assert_eq!(stored[0].version, "Chromium 148.0.7778.215");
         assert_eq!(stored[0].name, "chrome 148");
-        assert_eq!(stored[0].executable, executable);
+        assert_eq!(stored[0].executable, executable.path());
     }
 
     #[test]
     fn the_major_override_covers_a_silent_binary() {
         let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
-        let executable = temp_executable("chrome");
+        let executable = TempExecutable::new("chrome");
 
         let notice = maintain_with(
             cores.as_ref(),
-            Some(executable),
+            Some(executable.path()),
             Some(144),
             &probe_returning(None),
         );
@@ -317,11 +343,11 @@ mod tests {
     #[test]
     fn an_unreadable_version_is_reported_without_a_major() {
         let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
-        let executable = temp_executable("chrome");
+        let executable = TempExecutable::new("chrome");
 
         let notice = maintain_with(
             cores.as_ref(),
-            Some(executable.clone()),
+            Some(executable.path()),
             None,
             &probe_returning(None),
         );
@@ -348,10 +374,10 @@ mod tests {
     #[test]
     fn a_replaced_binary_updates_the_stored_major_and_name() {
         let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
-        let executable = temp_executable("chrome");
+        let executable = TempExecutable::new("chrome");
         maintain_with(
             cores.as_ref(),
-            Some(executable.clone()),
+            Some(executable.path()),
             None,
             &probe_returning(Some("Chromium 148.0.7778.215")),
         );
@@ -375,10 +401,10 @@ mod tests {
     #[test]
     fn a_custom_core_name_survives_a_version_change() {
         let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
-        let executable = temp_executable("chrome");
+        let executable = TempExecutable::new("chrome");
         maintain_with(
             cores.as_ref(),
-            Some(executable.clone()),
+            Some(executable.path()),
             None,
             &probe_returning(Some("Chromium 148.0.7778.215")),
         );
@@ -401,10 +427,10 @@ mod tests {
     #[test]
     fn an_unreadable_probe_keeps_the_stored_core() {
         let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
-        let executable = temp_executable("chrome");
+        let executable = TempExecutable::new("chrome");
         maintain_with(
             cores.as_ref(),
-            Some(executable),
+            Some(executable.path()),
             None,
             &probe_returning(Some("Chromium 148.0.7778.215")),
         );
@@ -418,14 +444,14 @@ mod tests {
     #[test]
     fn a_missing_executable_is_an_error_that_names_the_core() {
         let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
-        let executable = temp_executable("chrome");
+        let executable = TempExecutable::new("chrome");
         maintain_with(
             cores.as_ref(),
-            Some(executable.clone()),
+            Some(executable.path()),
             None,
             &probe_returning(Some("Chromium 148.0.7778.215")),
         );
-        std::fs::remove_file(&executable).expect("remove executable");
+        executable.uninstall();
 
         let notice = maintain_with(cores.as_ref(), None, None, &probe_returning(None));
 
