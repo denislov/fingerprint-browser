@@ -1,10 +1,39 @@
-use domain::{ProfileId, RuntimeState};
+use domain::{BrowserCore, BrowserProfile, ProfileId, ProxyProfile, RuntimeState};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartParams {
+    pub profile: BrowserProfile,
+    pub core: BrowserCore,
+    pub proxy: Option<ProxyProfile>,
+}
+
+impl StartParams {
+    pub fn new(profile: BrowserProfile, core: BrowserCore) -> Self {
+        Self {
+            profile,
+            core,
+            proxy: None,
+        }
+    }
+
+    pub fn with_proxy(profile: BrowserProfile, core: BrowserCore, proxy: ProxyProfile) -> Self {
+        Self {
+            profile,
+            core,
+            proxy: Some(proxy),
+        }
+    }
+
+    pub fn profile_id(&self) -> ProfileId {
+        self.profile.id
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeCommand {
-    Start(ProfileId),
+    Start(StartParams),
     Stop(ProfileId),
-    Restart(ProfileId),
+    Restart(StartParams),
     ShutdownAll,
 }
 

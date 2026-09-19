@@ -1,4 +1,5 @@
 use crate::error::RuntimeCommandError;
+use crate::events::StartParams;
 use domain::{ProfileId, RuntimeState};
 use std::time::SystemTime;
 
@@ -15,8 +16,8 @@ pub struct RuntimeSnapshot {
 }
 
 pub trait RuntimeFacade: Send + Sync {
-    fn start(&self, profile_id: ProfileId) -> Result<(), RuntimeCommandError>;
+    fn start(&self, params: StartParams) -> Result<(), RuntimeCommandError>;
     fn stop(&self, profile_id: ProfileId) -> Result<(), RuntimeCommandError>;
-    fn restart(&self, profile_id: ProfileId) -> Result<(), RuntimeCommandError>;
+    fn restart(&self, params: StartParams) -> Result<(), RuntimeCommandError>;
     fn snapshot(&self, profile_id: ProfileId) -> Option<RuntimeSnapshot>;
 }

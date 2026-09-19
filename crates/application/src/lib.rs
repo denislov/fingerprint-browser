@@ -1,15 +1,23 @@
 pub mod error;
 pub mod profile_service;
+pub mod runtime_service;
 
 pub use error::AppError;
 pub use profile_service::{DefaultProfileService, DeleteMode, NewProfile, ProfileService};
+pub use runtime_service::RuntimeService;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::CoreId;
+    use domain::{CoreId, RuntimeState};
+    use runtime::{
+        ChannelRuntimeFacade, RuntimeCommand, RuntimeEvent, RuntimeSupervisor,
+        RuntimeSupervisorChannels,
+    };
+    use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
     use storage::{CoreRepository, MemProfileRepository};
 
     #[test]
@@ -92,5 +100,86 @@ mod tests {
 
         let all = service.list().expect("list from sqlite");
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_runtime_service_orchestration() {
+        let storage = storage::SqliteStorage::in_memory().expect("sqlite in memory");
+        let profile_repo = Arc::new(storage.profiles());
+        let core_repo = Arc::new(storage.cores());
+        let proxy_repo = Arc::new(storage.proxies());
+
+        let channels = RuntimeSupervisorChannels::new(16);
+        let snapshots = Arc::new(RwLock::new(HashMap::new()));
+        let supervisor = RuntimeSupervisor::new(
+            channels.command_rx,
+            channels.event_tx,
+            Arc::clone(&snapshots),
+        );
+        let facade = Arc::new(ChannelRuntimeFacade::new(
+            channels.command_tx.clone(),
+            Arc::clone(&snapshots),
+        ));
+        let handle = supervisor.spawn();
+
+        let runtime_service = RuntimeService::new(
+            Arc::clone(&profile_repo) as Arc<dyn storage::ProfileRepository>,
+            Arc::clone(&core_repo) as Arc<dyn storage::CoreRepository>,
+            Arc::clone(&proxy_repo) as Arc<dyn storage::ProxyRepository>,
+            facade,
+        );
+
+        let core_id = CoreId::new();
+        let core = domain::BrowserCore {
+            id: core_id,
+            name: "Dummy Core".to_string(),
+            executable: PathBuf::from("dummy_browser_missing.exe"),
+            version: "128.0".to_string(),
+            major: 128,
+        };
+        core_repo.save(&core).expect("save core");
+
+        let profile_service = DefaultProfileService::new(profile_repo, PathBuf::from("data"));
+        let profile = profile_service
+            .create(NewProfile {
+                name: "Orchestrated Profile".to_string(),
+                core_id,
+                user_data_dir: None,
+                fingerprint: None,
+                proxy_id: None,
+                window: None,
+                start_target: None,
+            })
+            .expect("create profile");
+
+        // Start through runtime service
+        runtime_service
+            .start(profile.id)
+            .expect("start via runtime service");
+
+        // Verify supervisor received and processed start
+        let event = channels
+            .event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("received event");
+        assert!(matches!(
+            event,
+            RuntimeEvent::StateChanged {
+                state: RuntimeState::Starting,
+                ..
+            }
+        ));
+
+        // Stop through runtime service
+        runtime_service
+            .stop(profile.id)
+            .expect("stop via runtime service");
+
+        // Shutdown
+        channels
+            .command_tx
+            .send(RuntimeCommand::ShutdownAll)
+            .expect("shutdown");
+        handle.join().expect("join supervisor thread");
     }
 }

@@ -15,7 +15,7 @@ pub use error::{
     CapabilityError, CdpError, LaunchPlanError, PortError, ProcessError, ProxyError,
     RuntimeCommandError, RuntimeError,
 };
-pub use events::{RuntimeCommand, RuntimeComponent, RuntimeEvent};
+pub use events::{RuntimeCommand, RuntimeComponent, RuntimeEvent, StartParams};
 pub use facade::{RuntimeFacade, RuntimeSnapshot};
 pub use planner::{DefaultLaunchPlanner, LaunchContext, LaunchPlanner};
 pub use ports::{PortAllocator, TcpPortAllocator};
@@ -28,10 +28,13 @@ mod tests {
     use super::*;
     use domain::{
         BrowserBrand, BrowserCore, BrowserProfile, CoreCapabilities, CoreId, FingerprintProfile,
-        Platform, ProfileId, ProxyId, ProxyOutbound, ProxyProfile, Socks5Outbound, StartTarget,
-        WebRtcPolicy, WindowProfile,
+        Platform, ProfileId, ProxyId, ProxyOutbound, ProxyProfile, RuntimeState, Socks5Outbound,
+        StartTarget, WebRtcPolicy, WindowProfile,
     };
+    use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::{Arc, RwLock};
+    use std::time::Duration;
 
     fn test_profile() -> BrowserProfile {
         BrowserProfile {
@@ -204,5 +207,78 @@ mod tests {
             .expect("allocate loopback port");
         assert!(port1 > 0);
         assert!(port2 > 0);
+    }
+
+    #[test]
+    fn test_supervisor_start_nonexistent_executable_fails() {
+        let channels = RuntimeSupervisorChannels::new(16);
+        let snapshots = Arc::new(RwLock::new(HashMap::new()));
+        let supervisor = RuntimeSupervisor::new(
+            channels.command_rx,
+            channels.event_tx,
+            Arc::clone(&snapshots),
+        );
+
+        let facade = ChannelRuntimeFacade::new(channels.command_tx.clone(), Arc::clone(&snapshots));
+        let handle = supervisor.spawn();
+
+        let profile = test_profile();
+        let mut core = test_core();
+        core.executable = PathBuf::from("non_existent_chrome_binary_xyz123.exe");
+
+        let profile_id = profile.id;
+        facade
+            .start(StartParams::new(profile, core))
+            .expect("send start command");
+
+        // First event should be StateChanged(Starting)
+        let event1 = channels
+            .event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first event");
+        assert!(matches!(
+            event1,
+            RuntimeEvent::StateChanged {
+                state: RuntimeState::Starting,
+                ..
+            }
+        ));
+
+        // Next event is EffectiveLaunchArgs
+        let _event2 = channels
+            .event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("effective args");
+
+        // Next event should be StateChanged(Failed)
+        let event3 = channels
+            .event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("failed event");
+        match event3 {
+            RuntimeEvent::StateChanged {
+                profile_id: pid,
+                state: RuntimeState::Failed { message },
+            } => {
+                assert_eq!(pid, profile_id);
+                assert!(message.contains("failed to spawn executable"));
+            }
+            other => panic!("expected failed state, got {other:?}"),
+        }
+
+        // Test stop idempotent
+        facade.stop(profile_id).expect("send stop command");
+        let stop_event = channels
+            .event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stop event");
+        assert!(matches!(stop_event, RuntimeEvent::Stopped { .. }));
+
+        // Shutdown
+        channels
+            .command_tx
+            .send(RuntimeCommand::ShutdownAll)
+            .expect("shutdown");
+        handle.join().expect("join supervisor thread");
     }
 }
