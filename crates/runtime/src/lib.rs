@@ -32,7 +32,7 @@ pub use planner::{DefaultLaunchPlanner, LaunchContext, LaunchPlanner};
 pub use ports::{PortAllocator, PortReservation, TcpPortAllocator};
 pub use process::{
     DefaultProcessInspector, DefaultProcessTreeController, ProcessIdentity, ProcessInspector,
-    ProcessTreeController,
+    ProcessReading, ProcessTreeController,
 };
 pub use supervisor::{
     ChannelRuntimeFacade, RuntimeSupervisor, RuntimeSupervisorChannels, SupervisorComponents,

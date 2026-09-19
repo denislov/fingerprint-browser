@@ -10,11 +10,12 @@
 //!
 //! Nothing here trusts a pid. A record names a process by pid, but between a
 //! crash and the next start that pid can be recycled onto an unrelated process.
-//! A record is only acted on when the live process still reports the argument
-//! vector it was launched with, and - where the platform exposes it - the same
-//! kernel start time. A record whose process cannot be identified is reported
-//! and left alone: killing a stranger's process is worse than leaving our own
-//! behind, and the record stays readable either way.
+//! A record is only acted on when the live process is still the process instance
+//! the record captured - same pid, same kernel start time - or, where the
+//! platform cannot report a start time, when its command line still carries the
+//! arguments that were passed to spawn. A record whose process cannot be
+//! identified is reported and left alone: killing a stranger's process is worse
+//! than leaving our own behind, and the record stays readable either way.
 
 use crate::error::JournalError;
 use crate::process::{ProcessInspector, ProcessReading, ProcessTreeController};
@@ -344,25 +345,36 @@ fn verdict(record: &ProcessRecord, inspector: &dyn ProcessInspector) -> Verdict 
 
 /// Whether a live process is the one a record describes.
 ///
-/// The recorded arguments have to be the *tail* of the live command line, not
-/// all of it. An executable is not always the process that ends up running: a
-/// shebang script is started as `[/bin/sh, <script>, <args>...]`, and a wrapper
-/// that `exec`s the real binary leaves `[<real binary>, <args>...]`. Both are
-/// legitimately the process that was spawned, and neither can be recognised by
-/// comparing the head. The recorded arguments carry a per-profile path, which is
-/// what makes the tail specific; the kernel start time, where the platform
-/// reports it on both sides, is what stops a recycled pid from passing.
+/// The same pid *and* the same kernel start time is the same process instance:
+/// the kernel does not hand a recycled pid the start time of the process that
+/// died, so nothing else can be the process this record captured. That is the
+/// identity, and it is the one that survives a process rewriting its own command
+/// line - Chromium overwrites `/proc/self/cmdline` with a single string, so its
+/// arguments are no longer separable at all.
+///
+/// When a start time is missing on either side - a record written where the
+/// platform cannot report it - the command line is all there is, and it has to
+/// match: as the tail of the argument vector, or as the end of that single
+/// string.
 fn describes(live: &crate::process::ProcessIdentity, record: &ProcessRecord) -> bool {
+    match (record.start_time, live.start_time) {
+        (Some(recorded), Some(live)) => recorded == live,
+        _ => command_line_matches(live, record),
+    }
+}
+
+fn command_line_matches(live: &crate::process::ProcessIdentity, record: &ProcessRecord) -> bool {
     let args = record.args.as_slice();
-    !args.is_empty()
-        && live.argv.len() > args.len()
-        && live.argv[live.argv.len() - args.len()..] == *args
-        && match (record.start_time, live.start_time) {
-            (Some(recorded), Some(live)) => recorded == live,
-            // The platform could not report a start time on one side or the
-            // other; the arguments still have to match.
-            _ => true,
-        }
+    if args.is_empty() {
+        return false;
+    }
+    if live.argv.len() > args.len() && live.argv[live.argv.len() - args.len()..] == *args {
+        return true;
+    }
+    // A process that rewrote its command line leaves one field holding the whole
+    // line. The recorded arguments have to be the end of it, on a word boundary.
+    let joint = args.join(" ");
+    live.argv.len() == 1 && (live.argv[0] == joint || live.argv[0].ends_with(&format!(" {joint}")))
 }
 
 /// Returns whether the process had to be killed.
@@ -448,13 +460,30 @@ mod tests {
     }
 
     /// Spawns a child in its own process group.
+    ///
+    /// A test that writes an executable and execs it immediately can be told
+    /// `ETXTBSY` with nothing holding the file open any more; `execvp` retries
+    /// the same way. Production never writes the binary it launches.
     fn spawn_with(command: &mut Command, stdout: Stdio) -> std::process::Child {
         command
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(Stdio::null());
-        spawn_managed(command).unwrap()
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match spawn_managed(command) {
+                Ok(child) => return child,
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ETXTBSY)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("failed to spawn: {error}"),
+            }
+        }
     }
+
     /// A process has no command line between `fork` and `execve`.
     fn live_identity(pid: u32) -> ProcessIdentity {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -600,8 +629,11 @@ mod tests {
         let mut child = spawn_sleep();
         let mut record = record_for(profile_id, &child);
         // What a recycled pid looks like: the process is alive, but it is not
-        // the one the record describes.
+        // the one the record describes. The start time is left out the way a
+        // record written by a platform that cannot report one would, because
+        // that is when the command line has to decide on its own.
         record.browser.args = vec!["61".into()];
+        record.browser.start_time = None;
         write(&dir, &record).unwrap();
 
         let report = reclaim(
@@ -764,7 +796,10 @@ mod tests {
                 pid: child.id(),
                 executable: script,
                 args: vec!["run".into(), "-config".into(), "/tmp/xray.json".into()],
-                start_time: live.start_time,
+                // Written as a platform that cannot report a start time would:
+                // the command line is then the only thing carrying the identity,
+                // and it has to match through the interpreter.
+                start_time: None,
             },
             xray: None,
         };
@@ -782,6 +817,45 @@ mod tests {
         assert!(!report.reclaimed[0].forced, "{report:?}");
         child.wait().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Chromium overwrites `/proc/self/cmdline` with one string holding the
+    /// whole command line, so its arguments are no longer separate fields. The
+    /// recorded arguments then have to be the end of that string.
+    #[test]
+    fn a_command_line_rewritten_into_one_string_is_still_recognised() {
+        let record = ProcessRecord {
+            pid: 1,
+            executable: "/opt/chrome".into(),
+            args: vec!["--user-data-dir=/tmp/profile".into(), "about:blank".into()],
+            start_time: None,
+        };
+        let rewritten = crate::process::ProcessIdentity {
+            argv: vec!["/opt/chrome --user-data-dir=/tmp/profile about:blank".into()],
+            start_time: None,
+        };
+        assert!(command_line_matches(&rewritten, &record));
+        assert!(describes(&rewritten, &record));
+
+        let other = crate::process::ProcessIdentity {
+            argv: vec!["/opt/chrome --user-data-dir=/tmp/other about:blank".into()],
+            start_time: None,
+        };
+        assert!(!command_line_matches(&other, &record));
+
+        // A truncated line must not match: the arguments have to be the end.
+        let partial = crate::process::ProcessIdentity {
+            argv: vec!["/opt/chrome --user-data-dir=/tmp/profile".into()],
+            start_time: None,
+        };
+        assert!(!command_line_matches(&partial, &record));
+
+        // An empty record cannot be recognised at all.
+        let empty = ProcessRecord {
+            args: vec![],
+            ..record.clone()
+        };
+        assert!(!command_line_matches(&rewritten, &empty));
     }
 
     /// A record nobody can check - another platform, or an unreadable process -
@@ -829,13 +903,24 @@ mod tests {
         let profile_id = ProfileId::new();
         let mut child = spawn_sleep();
         let record = record_for(profile_id, &child);
+        // The live process is the instance the record captured.
         assert_eq!(confirm(&record, &DefaultProcessInspector), None);
 
-        let mut changed = record.clone();
-        changed.browser.args = vec!["61".into()];
-        let disagreement = confirm(&changed, &DefaultProcessInspector).unwrap();
+        // A pid the kernel handed to another process: same command line, a
+        // different instance.
+        let mut recycled = record.clone();
+        recycled.browser.start_time = recycled.browser.start_time.map(|started| started + 1);
+        let disagreement = confirm(&recycled, &DefaultProcessInspector).unwrap();
         assert!(disagreement.contains("browser"), "{disagreement}");
         assert!(disagreement.contains("now runs"), "{disagreement}");
+
+        // With no start time to compare, the command line has to decide, and it
+        // does not agree either.
+        let mut mismatched = record.clone();
+        mismatched.browser.start_time = None;
+        mismatched.browser.args = vec!["61".into()];
+        let disagreement = confirm(&mismatched, &DefaultProcessInspector).unwrap();
+        assert!(disagreement.contains("browser"), "{disagreement}");
 
         // A process nobody can be asked about is not a disagreement.
         assert_eq!(confirm(&record, &BlindInspector), None);

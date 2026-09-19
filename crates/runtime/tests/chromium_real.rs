@@ -31,6 +31,19 @@ impl LaunchPlanner for HeadlessPlanner {
     }
 }
 
+/// Headless, and with its debugging endpoint moved off the port the supervisor
+/// waits for, so a start can be held inside the readiness wait on purpose.
+struct UnreadyPlanner;
+impl LaunchPlanner for UnreadyPlanner {
+    fn build(&self, ctx: LaunchContext<'_>) -> Result<LaunchPlan, LaunchPlanError> {
+        let mut plan = HeadlessPlanner.build(ctx)?;
+        // The last occurrence wins, so the endpoint the supervisor probes is
+        // never opened and this browser stays "starting" until it is stopped.
+        plan.browser_args.push("--remote-debugging-port=0".into());
+        Ok(plan)
+    }
+}
+
 struct Harness {
     facade: ChannelRuntimeFacade,
     sender: crossbeam_channel::Sender<RuntimeCommand>,
@@ -40,6 +53,9 @@ struct Harness {
 }
 impl Harness {
     fn new() -> Self {
+        Self::with_planner(Box::new(HeadlessPlanner))
+    }
+    fn with_planner(planner: Box<dyn LaunchPlanner>) -> Self {
         let dir = std::env::temp_dir().join(format!("fp-chromium-{}", ProfileId::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let channels = RuntimeSupervisorChannels::new(128);
@@ -50,7 +66,7 @@ impl Harness {
             channels.event_tx,
             snapshots,
             SupervisorComponents {
-                planner: Box::new(HeadlessPlanner),
+                planner,
                 xray_executable: std::env::var_os("XRAY_BIN").expect("set XRAY_BIN").into(),
                 runtime_dir: dir.join("runtime"),
                 ..Default::default()
@@ -176,6 +192,43 @@ fn assert_loopback_listener(port: u16) {
     );
 }
 
+/// The pids of live processes holding a profile, asked of `/proc` rather than of
+/// a pid: a browser holds its profile through `--user-data-dir`, which is what
+/// this looks for.
+///
+/// Two shapes have to be handled. An ordinary process keeps its arguments as
+/// separate NUL-terminated fields; a process that rewrote its command line -
+/// Chromium does - leaves one field holding the whole line, so the flag has to be
+/// looked for there as a word.
+fn holders(profile_dir: &std::path::Path) -> Vec<u32> {
+    let needle = format!("--user-data-dir={}", profile_dir.display());
+    let mut holders = Vec::new();
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let fields = String::from_utf8_lossy(&cmdline)
+            .split('\0')
+            .filter(|field| !field.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let separated = fields.iter().any(|field| field == &needle);
+        let rewritten =
+            fields.len() == 1 && fields[0].split(' ').any(|word| word == needle.as_str());
+        if separated || rewritten {
+            holders.push(pid);
+        }
+    }
+    holders
+}
+
 fn assert_group_stopped(group: u32) {
     for entry in std::fs::read_dir("/proc").unwrap().flatten() {
         let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
@@ -271,6 +324,158 @@ impl Drop for Upstream {
         self.stop.store(true, Ordering::SeqCst);
         self.thread.take().unwrap().join().unwrap();
     }
+}
+
+#[test]
+#[ignore = "requires CHROMIUM_BIN and XRAY_BIN; launches real sandboxed headless Chromium"]
+fn a_start_cancelled_while_waiting_for_readiness_leaves_nothing_running() {
+    let h = Harness::with_planner(Box::new(UnreadyPlanner));
+    let profile = h.profile(314);
+    h.facade
+        .start(StartParams::new(profile.clone(), h.core.clone()))
+        .unwrap();
+
+    // The browser is spawned before readiness is waited for, so seeing it hold
+    // its profile proves the start is under way. Its debugging endpoint is not
+    // on the port the supervisor probes, so the start cannot have succeeded.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while holders(&profile.user_data_dir).is_empty() {
+        assert!(Instant::now() < deadline, "the browser never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        h.facade.snapshot(profile.id).unwrap().state,
+        RuntimeState::Starting
+    );
+
+    // The supervisor polls for commands while it waits for readiness, so this
+    // stop lands inside the start.
+    h.facade.stop(profile.id).unwrap();
+    h.wait(profile.id, RuntimeState::Stopped);
+
+    assert!(
+        holders(&profile.user_data_dir).is_empty(),
+        "a cancelled start left a browser behind: {:?}",
+        holders(&profile.user_data_dir)
+    );
+    assert!(
+        ::runtime::journal::read(&h.dir.join("runtime"), profile.id)
+            .unwrap()
+            .is_none(),
+        "a cancelled start left a session record to reclaim"
+    );
+}
+
+/// A supervisor killed outright - `SIGKILL`, a crash - leaves its browsers
+/// running and its record on disk. The next start has to stop them from that
+/// record alone, against the command line a real Chromium actually runs.
+#[test]
+#[ignore = "requires CHROMIUM_BIN; launches real sandboxed headless Chromium"]
+fn a_browser_left_by_a_killed_run_is_reclaimed() {
+    let dir = std::env::temp_dir().join(format!("fp-orphan-{}", ProfileId::new()));
+    let runtime_dir = dir.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).unwrap();
+    let profile = BrowserProfile {
+        id: ProfileId::new(),
+        name: "orphan acceptance".into(),
+        core_id: CoreId::new(),
+        user_data_dir: dir.join("profile"),
+        fingerprint: FingerprintProfile::new_random(99),
+        proxy_id: None,
+        window: WindowProfile::new(800, 600),
+        start_target: StartTarget::Blank,
+    };
+    let core = BrowserCore {
+        id: CoreId::new(),
+        name: "real Chromium".into(),
+        executable: std::env::var_os("CHROMIUM_BIN")
+            .expect("set CHROMIUM_BIN")
+            .into(),
+        version: "148".into(),
+        major: 148,
+    };
+    let capabilities = CoreCapabilities::for_major(148);
+    let reservation = TcpPortAllocator.reserve_loopback().unwrap();
+    let cdp_port = reservation.port();
+    let plan = DefaultLaunchPlanner
+        .build(LaunchContext {
+            profile: &profile,
+            core: &core,
+            proxy: None,
+            capabilities: &capabilities,
+            cdp_port,
+            socks_port: None,
+            xray_executable: None,
+            xray_config_dir: None,
+        })
+        .unwrap();
+    let args: Vec<String> = plan
+        .browser_args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    // Spawn what the supervisor would spawn, then let the handle go: this
+    // process is not the one that started the browser, which is exactly the
+    // situation the record exists for.
+    let mut command = std::process::Command::new(&plan.browser_executable);
+    command
+        .args(&plan.browser_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    drop(reservation);
+    let child = command.spawn().unwrap();
+    let browser_pid = child.id();
+    HttpCdpProbe
+        .wait_ready(cdp_port, Duration::from_secs(15))
+        .expect("a real browser should come up");
+
+    let record = SessionRecord {
+        profile_id: profile.id,
+        cdp_port,
+        socks_port: None,
+        started_at: journal::now_millis(),
+        browser: ProcessRecord::captured(
+            browser_pid,
+            &plan.browser_executable,
+            &args,
+            &DefaultProcessInspector,
+        ),
+        xray: None,
+    };
+    journal::write(&runtime_dir, &record).unwrap();
+    // The browser keeps running: dropping the handle does not stop it, which is
+    // what a killed supervisor leaves behind.
+    drop(child);
+
+    let reclaimed = reclaim_orphans(
+        &runtime_dir,
+        &DefaultProcessInspector,
+        &DefaultProcessTreeController,
+        Duration::from_secs(5),
+    );
+
+    assert_eq!(reclaimed.reclaimed.len(), 1, "{reclaimed:?}");
+    assert_eq!(reclaimed.reclaimed[0].browser_pid, browser_pid);
+    assert!(
+        !reclaimed.reclaimed[0].forced,
+        "a real browser should exit on request: {reclaimed:?}"
+    );
+    assert!(
+        holders(&profile.user_data_dir).is_empty(),
+        "the reclaimed browser is still holding its profile: {:?}",
+        holders(&profile.user_data_dir)
+    );
+    assert!(
+        journal::read(&runtime_dir, profile.id).unwrap().is_none(),
+        "a reclaimed session leaves no record"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

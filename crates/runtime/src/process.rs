@@ -14,11 +14,13 @@ pub(crate) fn spawn_managed(command: &mut Command) -> std::io::Result<Child> {
 /// What a live process reports about itself, read back rather than assumed.
 ///
 /// A pid is not evidence: between a crash and the next start it can be recycled
-/// onto an unrelated process. The argument vector and the kernel start time are
-/// what a session record is checked against before anything is signalled.
+/// onto an unrelated process. The kernel start time is what tells one instance
+/// apart from the next under the same pid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessIdentity {
-    /// The argument vector as the kernel holds it, `argv[0]` included.
+    /// The fields of `/proc/<pid>/cmdline`, `argv[0]` included. A process may
+    /// rewrite that file: Chromium replaces it with a single string holding the
+    /// whole command line, which arrives here as one entry containing spaces.
     pub argv: Vec<String>,
     /// Kernel start time in clock ticks since boot, where the platform exposes
     /// it. Together with the pid this survives pid recycling.
@@ -26,9 +28,10 @@ pub struct ProcessIdentity {
 }
 
 impl ProcessIdentity {
-    /// Everything that was handed to spawn, `argv[0]` excluded. An executable
-    /// that `exec`s a wrapper or a real binary keeps this vector, so this is the
-    /// part of a command line that a record can be compared against.
+    /// The arguments as the kernel holds them, `argv[0]` excluded. Empty for a
+    /// process that rewrote its command line: Chromium replaces
+    /// `/proc/self/cmdline` with one string holding the whole line, which lands
+    /// here as a single entry in [`Self::argv`].
     pub fn args(&self) -> &[String] {
         self.argv.get(1..).unwrap_or_default()
     }
