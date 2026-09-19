@@ -1,7 +1,8 @@
 use crate::error::LaunchPlanError;
+use crate::fingerprint_args::serialize_fingerprint_args;
 use domain::{
     BrowserCore, BrowserProfile, CoreCapabilities, LaunchPlan, ProxyProfile, StartTarget,
-    WebRtcPolicy, XrayLaunchPlan,
+    XrayLaunchPlan,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -63,59 +64,13 @@ impl LaunchPlanner for DefaultLaunchPlanner {
             args.push(format!("--proxy-server=socks5://127.0.0.1:{socks_port}").into());
         }
 
-        // 5. fingerprint seed
-        args.push(format!("--fingerprint={}", ctx.profile.fingerprint.seed).into());
+        // 5. fingerprint identity, locale, hardware, WebRTC and spoofing switches
+        args.extend(serialize_fingerprint_args(
+            &ctx.profile.fingerprint,
+            ctx.capabilities,
+        ));
 
-        // 6. identity
-        args.push(
-            format!(
-                "--fingerprint-brand={}",
-                ctx.profile.fingerprint.brand.as_arg_value()
-            )
-            .into(),
-        );
-        args.push(
-            format!(
-                "--fingerprint-platform={}",
-                ctx.profile.fingerprint.platform.as_arg_value()
-            )
-            .into(),
-        );
-
-        // 7. locale / timezone
-        args.push(format!("--lang={}", ctx.profile.fingerprint.language).into());
-        args.push(format!("--accept-lang={}", ctx.profile.fingerprint.accept_language).into());
-        args.push(format!("--timezone={}", ctx.profile.fingerprint.timezone).into());
-
-        // 8. hardware
-        if let Some(concurrency) = ctx.profile.fingerprint.hardware_concurrency {
-            args.push(format!("--fingerprint-hardware-concurrency={concurrency}").into());
-        }
-
-        // 9. WebRTC / spoofing switches
-        if ctx.profile.fingerprint.webrtc_policy == WebRtcPolicy::DisableNonProxiedUdp {
-            args.push("--disable-non-proxied-udp".into());
-        }
-
-        if ctx.capabilities.supports_canvas_noise_flag {
-            args.push("--fingerprinting-canvas-image-data-noise".into());
-            args.push("--fingerprinting-client-rects-noise".into());
-        }
-
-        if ctx.capabilities.supports_disable_spoofing
-            && !ctx.profile.fingerprint.disabled_spoofing.is_empty()
-        {
-            let features: Vec<String> = ctx
-                .profile
-                .fingerprint
-                .disabled_spoofing
-                .iter()
-                .map(|f| f.as_flag_name().to_string())
-                .collect();
-            args.push(format!("--disable-spoofing={}", features.join(",")).into());
-        }
-
-        // 10. window
+        // 6. window
         args.push(
             format!(
                 "--window-size={},{}",
@@ -124,7 +79,7 @@ impl LaunchPlanner for DefaultLaunchPlanner {
             .into(),
         );
 
-        // 11. start target
+        // 7. start target
         match &ctx.profile.start_target {
             StartTarget::Blank => args.push("about:blank".into()),
             StartTarget::Url(url) => args.push(url.as_str().into()),

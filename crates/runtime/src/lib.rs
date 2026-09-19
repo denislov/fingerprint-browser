@@ -3,6 +3,7 @@ pub mod cdp;
 pub mod error;
 pub mod events;
 pub mod facade;
+pub mod fingerprint_args;
 pub mod planner;
 pub mod ports;
 pub mod process;
@@ -17,6 +18,7 @@ pub use error::{
 };
 pub use events::{RuntimeCommand, RuntimeComponent, RuntimeEvent, StartParams};
 pub use facade::{RuntimeFacade, RuntimeSnapshot};
+pub use fingerprint_args::serialize_fingerprint_args;
 pub use planner::{DefaultLaunchPlanner, LaunchContext, LaunchPlanner};
 pub use ports::{PortAllocator, PortReservation, TcpPortAllocator};
 pub use process::{DefaultProcessTreeController, ProcessTreeController};
@@ -160,6 +162,48 @@ mod tests {
             args_str
                 .iter()
                 .any(|a| a == "--proxy-server=socks5://127.0.0.1:51234")
+        );
+    }
+
+    #[test]
+    fn test_planner_emits_brand_and_platform_versions() {
+        let mut profile = test_profile();
+        profile.fingerprint.brand_version = Some("144.0.7559.132".to_string());
+        profile.fingerprint.platform_version = Some("10.0.0".to_string());
+
+        let core = test_core();
+        let capabilities = CoreCapabilities::default_for_major(128);
+        let planner = DefaultLaunchPlanner::new();
+
+        let ctx = LaunchContext {
+            profile: &profile,
+            core: &core,
+            proxy: None,
+            capabilities: &capabilities,
+            cdp_port: 9222,
+            socks_port: None,
+            xray_executable: None,
+            xray_config_dir: None,
+        };
+
+        let plan = planner.build(ctx).expect("build launch plan");
+        let args_str: Vec<String> = plan
+            .browser_args
+            .iter()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+
+        assert!(
+            args_str
+                .iter()
+                .any(|a| a == "--fingerprint-brand-version=144.0.7559.132"),
+            "brand version must reach the launch plan, got {args_str:?}"
+        );
+        assert!(
+            args_str
+                .iter()
+                .any(|a| a == "--fingerprint-platform-version=10.0.0"),
+            "platform version must reach the launch plan, got {args_str:?}"
         );
     }
 
