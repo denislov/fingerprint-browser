@@ -193,12 +193,15 @@ Known limitations:
 cargo fmt --all --check
 cargo check --workspace
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings -A stable-features
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The existing `.cargo/config.toml` injects two feature attributes that are already
-stable on the installed compiler; `-A stable-features` bypasses only those legacy
-warnings. Strict `-D warnings` alone currently fails on that existing configuration.
+Strict `-D warnings` is the gate. The workspace used to carry a
+`.cargo/config.toml` that set `RUSTC_BOOTSTRAP` and injected
+`feature(cold_path, atomic_try_update)` into every crate; both features have been
+stable since Rust 1.95, no crate in the workspace uses them, and nothing in the
+dependency graph needs a nightly compiler. The file is gone and the checks above
+run clean on a stable toolchain (verified on rustc 1.96.0).
 
 Runtime lifecycle tests on Unix require Python 3 and permission to bind loopback
 ports. They use controlled child processes rather than a real browser/Xray pair.
