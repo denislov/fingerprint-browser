@@ -5,6 +5,7 @@
 //! the UI; commands go through [`RuntimeService`] into the supervisor channel.
 
 mod core_detect;
+mod core_editor;
 mod editor;
 mod proxy_editor;
 #[cfg(all(test, target_os = "linux"))]
@@ -14,7 +15,8 @@ mod ui;
 mod verifier;
 
 use application::{
-    DefaultProfileService, DefaultProxyService, ProfileService, ProxyService, RuntimeService,
+    CoreService, DefaultCoreService, DefaultProfileService, DefaultProxyService, ProfileService,
+    ProxyService, RuntimeService,
 };
 use gpui_kit::component::Root;
 use gpui_kit::*;
@@ -90,8 +92,17 @@ fn main() {
         Arc::clone(&proxy_repo),
         Arc::clone(&profile_repo),
     ));
+    let core_service: Arc<dyn CoreService> = Arc::new(DefaultCoreService::new(
+        Arc::clone(&core_repo),
+        Arc::clone(&profile_repo),
+    ));
 
-    let mut app_state = AppState::new(profile_service, runtime_service, core_repo, proxy_service);
+    let mut app_state = AppState::new(
+        profile_service,
+        runtime_service,
+        core_service,
+        proxy_service,
+    );
     let _ = app_state.load();
     if let Some((message, error)) = core_notice {
         app_state.push_notice(message, error);

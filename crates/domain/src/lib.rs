@@ -10,7 +10,7 @@ pub mod start_target;
 pub mod validation;
 pub mod window;
 
-pub use core::{BrowserCore, CoreCapabilities, FingerprintGeneration};
+pub use core::{BrowserCore, CoreCapabilities, FingerprintGeneration, suggested_name};
 pub use error::{DomainError, ValidationError};
 pub use fingerprint::{BrowserBrand, FingerprintProfile, Platform, SpoofingFeature, WebRtcPolicy};
 pub use id::{CoreId, ProfileId, ProxyId};

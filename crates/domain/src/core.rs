@@ -1,7 +1,7 @@
 use crate::fingerprint::BrowserBrand;
 use crate::id::CoreId;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserCore {
@@ -10,6 +10,41 @@ pub struct BrowserCore {
     pub executable: PathBuf,
     pub version: String,
     pub major: u32,
+}
+
+/// The name a core gets when the user does not choose one: `<binary> <major>`.
+///
+/// A core whose version could not be read says so instead of guessing a major.
+pub fn suggested_name(executable: &Path, major: u32) -> String {
+    let stem = executable
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "browser".to_string());
+    if major == 0 {
+        format!("{stem} (version unknown)")
+    } else {
+        format!("{stem} {major}")
+    }
+}
+
+impl BrowserCore {
+    /// Whether the name is still the one this binary and major suggest.
+    ///
+    /// Used to decide if a detected major change may rewrite the name: a name
+    /// the user chose is theirs and is never rewritten.
+    pub fn has_suggested_name(&self) -> bool {
+        self.name == suggested_name(&self.executable, self.major)
+    }
+
+    /// The capability table for this core, or `None` when the version was never
+    /// detected.
+    ///
+    /// Major `0` means "no version was read". It is not a generation, so it has
+    /// no capability table: callers must refuse rather than assume one, or a
+    /// profile would launch claiming switches nobody verified for this engine.
+    pub fn capabilities(&self) -> Option<CoreCapabilities> {
+        (self.major > 0).then(|| CoreCapabilities::for_major(self.major))
+    }
 }
 
 /// Which fingerprint-chromium switch generation a core belongs to.
@@ -110,6 +145,28 @@ impl CoreCapabilities {
         self.generation == FingerprintGeneration::Chrome144Plus
     }
 
+    /// Which switch generation this is, as the window writes it.
+    pub fn generation_label(&self) -> String {
+        match self.generation {
+            FingerprintGeneration::Legacy => format!(
+                "Chrome {} and older",
+                FingerprintGeneration::PIVOT_MAJOR - 1
+            ),
+            FingerprintGeneration::Chrome144Plus => {
+                format!("Chrome {}+", FingerprintGeneration::PIVOT_MAJOR)
+            }
+        }
+    }
+
+    /// Whether the switches this generation does not carry were verified for it.
+    pub fn noise_label(&self) -> &'static str {
+        if self.supports_canvas_noise {
+            "noise switches verified"
+        } else {
+            "noise switches not offered"
+        }
+    }
+
     pub fn supports_brand(&self, brand: BrowserBrand) -> bool {
         self.supported_brands.contains(&brand)
     }
@@ -176,6 +233,17 @@ mod tests {
                 "{brand} is ignored by the engine and must not be claimed"
             );
         }
+    }
+
+    #[test]
+    fn the_generation_is_written_the_same_way_everywhere() {
+        let modern = CoreCapabilities::for_major(148);
+        assert_eq!(modern.generation_label(), "Chrome 144+");
+        assert_eq!(modern.noise_label(), "noise switches verified");
+
+        let legacy = CoreCapabilities::for_major(128);
+        assert_eq!(legacy.generation_label(), "Chrome 143 and older");
+        assert_eq!(legacy.noise_label(), "noise switches not offered");
     }
 
     #[test]

@@ -100,6 +100,18 @@ tab of its own and reports every claim the browser did not reproduce, with a
 per-row badge so the answer is visible without selecting anything. A reading
 that fails is reported as unreadable, never as confirmed.
 
+Browser cores have a page of their own. A core is added by pointing at a
+fingerprint-chromium binary; the version is read from it with `--version` rather
+than typed, because the detected major is what decides which switches a profile
+may claim, and each row says which generation it belongs to and whether the
+noise switches were verified for it. A binary that does not report a version is
+refused while the form is open, with the environment override named as the way
+to record it anyway. Re-pointing a core at another binary, or pressing
+Re-detect after replacing one in place, re-reads the version instead of keeping
+the old major; a core whose version was never read has no capability table and
+cannot be launched or verified with. Removing a core that a profile still uses
+is refused by name.
+
 Proxies have a page of their own. A proxy can be created, edited and deleted,
 and assigned to a profile from the profile editor; the row says which profiles
 use it. Only SOCKS5 and HTTP can be created, because those are the two outbounds

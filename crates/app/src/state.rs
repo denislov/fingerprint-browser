@@ -6,16 +6,17 @@
 //! [`RuntimeService::snapshot`], which is the documented reconciliation path.
 
 use application::{
-    AppError, DeleteMode, NewProfile, NewProxy, ProfileService, ProxyService, RuntimeService,
+    AppError, CoreService, DeleteMode, NewProfile, NewProxy, ProfileService, ProxyService,
+    RuntimeService,
 };
 use domain::{
-    BrowserProfile, CoreCapabilities, CoreId, FingerprintProfile, ProfileId, ProxyId,
+    BrowserCore, BrowserProfile, CoreCapabilities, CoreId, FingerprintProfile, ProfileId, ProxyId,
     ProxyOutbound, ProxyProfile, RuntimeState,
 };
 use runtime::{Discrepancy, RuntimeSnapshot};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use storage::CoreRepository;
 
 /// A user-facing message shown in the window banner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,7 +227,7 @@ impl Page {
 
     /// Whether the page has been built yet.
     pub fn is_ready(self) -> bool {
-        matches!(self, Self::Profiles | Self::Proxies)
+        !matches!(self, Self::Settings)
     }
 }
 
@@ -256,10 +257,47 @@ impl ProxyRow {
     }
 }
 
+/// One row of the browser-core list, with who is using it.
+#[derive(Clone)]
+pub struct CoreRow {
+    pub core: BrowserCore,
+    pub used_by: Vec<String>,
+    /// False when the executable is no longer on disk.
+    pub present: bool,
+}
+
+impl CoreRow {
+    pub fn is_used(&self) -> bool {
+        !self.used_by.is_empty()
+    }
+
+    pub fn usage_label(&self) -> String {
+        match self.used_by.len() {
+            0 => "not used".to_string(),
+            1 => format!("used by {}", self.used_by[0]),
+            count => format!("used by {count} profiles"),
+        }
+    }
+
+    /// Which switch generation this core belongs to, as the page shows it.
+    ///
+    /// `None` for a core whose version was never read: there is no generation,
+    /// which is exactly what the launch path refuses on.
+    pub fn generation_label(&self) -> Option<String> {
+        self.core.capabilities().map(|capabilities| {
+            format!(
+                "{} · {}",
+                capabilities.generation_label(),
+                capabilities.noise_label()
+            )
+        })
+    }
+}
+
 pub struct AppState {
     profiles: Arc<dyn ProfileService>,
     runtime: Arc<RuntimeService>,
-    cores: Arc<dyn CoreRepository>,
+    cores: Arc<dyn CoreService>,
     proxies: Arc<dyn ProxyService>,
     page: Page,
     rows: Vec<ProfileRow>,
@@ -272,7 +310,7 @@ impl AppState {
     pub fn new(
         profiles: Arc<dyn ProfileService>,
         runtime: Arc<RuntimeService>,
-        cores: Arc<dyn CoreRepository>,
+        cores: Arc<dyn CoreService>,
         proxies: Arc<dyn ProxyService>,
     ) -> Self {
         Self {
@@ -394,8 +432,9 @@ impl AppState {
 
     pub fn set_page(&mut self, page: Page) {
         self.page = page;
-        if page == Page::Proxies {
-            // Usage is derived from the profiles, so re-read both.
+        // The usage lists on the proxy and core pages are derived from the
+        // profiles, so the rows are re-read when either page is opened.
+        if matches!(page, Page::Proxies | Page::Cores) {
             let _ = self.load_rows();
         }
     }
@@ -469,6 +508,70 @@ impl AppState {
             .unwrap_or_else(|| id.to_string());
         self.record(self.proxies.delete(id))?;
         self.notice = Some(Notice::info(format!("Deleted proxy {name}")));
+        Ok(())
+    }
+
+    /// Every core with the profiles that use it, for the Browser Cores page.
+    pub fn core_rows(&self) -> Result<Vec<CoreRow>, AppError> {
+        let usage = self.cores.usage()?;
+        Ok(self
+            .cores
+            .list()?
+            .into_iter()
+            .map(|core| CoreRow {
+                present: core.executable.is_file(),
+                used_by: usage.get(&core.id).cloned().unwrap_or_default(),
+                core,
+            })
+            .collect())
+    }
+
+    pub fn core(&self, id: CoreId) -> Option<BrowserCore> {
+        self.cores.get(id).ok().flatten()
+    }
+
+    /// Registers a browser binary, reading its version rather than trusting one.
+    pub fn add_core(&mut self, name: Option<String>, path: PathBuf) -> Result<CoreId, AppError> {
+        let core = self.record(self.cores.add(name, path))?;
+        let id = core.id;
+        self.notice = Some(Notice::info(format!(
+            "Added {} ({}, major {})",
+            core.name, core.version, core.major
+        )));
+        Ok(id)
+    }
+
+    /// Saves a core, re-reading the version when its executable changed.
+    pub fn update_core(&mut self, core: BrowserCore) -> Result<(), AppError> {
+        let saved = self.record(self.cores.update(core))?;
+        self.notice = Some(Notice::info(format!(
+            "Saved {} ({}, major {})",
+            saved.name, saved.version, saved.major
+        )));
+        // The rows carry display names that came from this core.
+        self.load_rows()?;
+        Ok(())
+    }
+
+    /// Re-reads a core's version, for a binary that was replaced in place.
+    pub fn redetect_core(&mut self, id: CoreId) -> Result<(), AppError> {
+        let refreshed = self.record(self.cores.redetect(id))?;
+        self.notice = Some(Notice::info(format!(
+            "{} is {} (major {})",
+            refreshed.name, refreshed.version, refreshed.major
+        )));
+        self.load_rows()?;
+        Ok(())
+    }
+
+    /// Removes a core. Refused while a profile still launches with it.
+    pub fn delete_core(&mut self, id: CoreId) -> Result<(), AppError> {
+        let name = self
+            .core(id)
+            .map(|core| core.name)
+            .unwrap_or_else(|| id.to_string());
+        self.record(self.cores.delete(id))?;
+        self.notice = Some(Notice::info(format!("Deleted core {name}")));
         Ok(())
     }
 
@@ -627,11 +730,21 @@ impl AppState {
             .cores
             .get(row.profile.core_id)?
             .ok_or_else(|| AppError::Other(format!("core {} not found", row.profile.core_id)))?;
+        // A core whose version was never read has no capability table, and
+        // asking for one would be asking what the engine may claim. This is the
+        // same refusal the launch path makes.
+        let capabilities = core.capabilities().ok_or_else(|| {
+            AppError::Conflict(format!(
+                "{} has no detected version, so there are no switches to check against; \
+                 give it a version before verifying",
+                core.name
+            ))
+        })?;
         Ok(VerificationJob {
             profile_id: id,
             port,
             profile: row.profile.fingerprint.clone(),
-            capabilities: CoreCapabilities::for_major(core.major),
+            capabilities,
         })
     }
 
@@ -657,7 +770,8 @@ pub(crate) mod testing {
     use domain::{ProfileId, RuntimeState};
     use runtime::{RuntimeCommandError, RuntimeFacade, RuntimeSnapshot, StartParams};
     use std::collections::HashMap;
-    use std::sync::{Mutex, RwLock};
+    use std::sync::{Arc, Mutex, RwLock};
+    use storage::{MemCoreRepository, MemProfileRepository};
 
     /// Synchronous stand-in for the supervisor channel façade.
     ///
@@ -760,6 +874,66 @@ pub(crate) mod testing {
         }
     }
 
+    /// The core service over in-memory storage, with a probe that reads the
+    /// banner out of the file instead of spawning anything.
+    ///
+    /// Tests that need a specific version write the banner into the file they
+    /// pass to `add`.
+    pub fn core_service(
+        cores: Arc<MemCoreRepository>,
+        profiles: Arc<MemProfileRepository>,
+    ) -> Arc<dyn application::CoreService> {
+        Arc::new(application::DefaultCoreService::with_probe(
+            cores,
+            profiles,
+            Box::new(|path: &std::path::Path| {
+                let banner = std::fs::read_to_string(path).unwrap_or_default();
+                let banner = banner.trim();
+                runtime::version::VersionReport::from_banner(
+                    (!banner.is_empty()).then(|| banner.to_string()),
+                )
+            }),
+        ))
+    }
+
+    /// A browser binary on disk: the file holds the version it reports.
+    ///
+    /// The directory goes away with the guard, so a test run leaves nothing
+    /// behind.
+    pub struct CoreBinary {
+        dir: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+
+    impl CoreBinary {
+        pub fn new(dir: &str, banner: Option<&str>) -> Self {
+            let dir = std::env::temp_dir().join(format!("fp-app-core-{dir}"));
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let path = dir.join("chrome");
+            Self::write(&path, banner);
+            Self { dir, path }
+        }
+
+        pub fn path_buf(&self) -> std::path::PathBuf {
+            self.path.clone()
+        }
+
+        /// Replaces the file behind the same path, as a reinstall would.
+        pub fn replace(&self, banner: Option<&str>) {
+            Self::write(&self.path, banner);
+        }
+
+        fn write(path: &std::path::Path, banner: Option<&str>) {
+            std::fs::write(path, banner.unwrap_or("")).expect("write binary");
+        }
+    }
+
+    impl Drop for CoreBinary {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
     pub fn core(id: domain::CoreId) -> domain::BrowserCore {
         domain::BrowserCore {
             id,
@@ -774,13 +948,13 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::testing::{FakeRuntime, core};
+    use crate::state::testing::{CoreBinary, FakeRuntime, core, core_service};
     use application::{DefaultProfileService, DefaultProxyService};
     use domain::CoreId;
     use std::path::PathBuf;
     use storage::{
-        MemCoreRepository, MemProfileRepository, MemProxyRepository, ProfileRepository as _,
-        ProxyRepository as _,
+        CoreRepository as _, MemCoreRepository, MemProfileRepository, MemProxyRepository,
+        ProfileRepository as _, ProxyRepository as _,
     };
 
     struct Fixture {
@@ -813,7 +987,8 @@ mod tests {
             profile_repo.clone(),
         ));
 
-        let state = AppState::new(service, runtime_service, core_repo.clone(), proxy_service);
+        let core_service = core_service(core_repo.clone(), profile_repo.clone());
+        let state = AppState::new(service, runtime_service, core_service, proxy_service);
 
         Fixture {
             state,
@@ -1093,6 +1268,162 @@ mod tests {
                     || notice.message.contains("keep")),
             "the banner says when the change takes effect"
         );
+    }
+
+    #[test]
+    fn an_added_core_carries_the_version_its_binary_reported() {
+        let mut fixture = fixture();
+        let binary = CoreBinary::new("add", Some("Chromium 148.0.7778.215"));
+
+        let id = fixture
+            .state
+            .add_core(None, binary.path_buf())
+            .expect("add");
+
+        let rows = fixture.state.core_rows().expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].core.id, id);
+        assert_eq!(rows[0].core.version, "Chromium 148.0.7778.215");
+        assert_eq!(rows[0].core.major, 148);
+        assert!(rows[0].present, "the binary is on disk");
+        assert_eq!(rows[0].usage_label(), "not used");
+        assert_eq!(
+            rows[0].generation_label().as_deref(),
+            Some("Chrome 144+ · noise switches verified")
+        );
+    }
+
+    /// The pivot made visible: a core below it is labelled as not offering the
+    /// switches this project only verified from 144.
+    #[test]
+    fn a_legacy_core_says_the_noise_switches_are_not_offered() {
+        let mut fixture = fixture();
+        let binary = CoreBinary::new("legacy", Some("Chromium 128.0.0.0"));
+        fixture
+            .state
+            .add_core(Some("Old".to_string()), binary.path_buf())
+            .expect("add");
+
+        let rows = fixture.state.core_rows().expect("rows");
+        assert_eq!(rows[0].core.name, "Old");
+        assert_eq!(rows[0].core.major, 128);
+        assert_eq!(
+            rows[0].generation_label().as_deref(),
+            Some("Chrome 143 and older · noise switches not offered")
+        );
+    }
+
+    #[test]
+    fn a_binary_without_a_usable_version_is_refused_and_reported() {
+        let mut fixture = fixture();
+        let binary = CoreBinary::new("silent", None);
+
+        let error = fixture.state.add_core(None, binary.path_buf()).unwrap_err();
+
+        assert!(error.to_string().contains("--version"), "{error}");
+        assert!(fixture.state.core_rows().expect("rows").is_empty());
+        assert!(fixture.state.notice().is_some_and(|notice| notice.error));
+    }
+
+    /// A core whose version was never read has no capability table. Asking for
+    /// one used to reach `CoreCapabilities::for_major(0)`, which is a debug
+    /// assertion: in a debug build the window would have panicked.
+    #[test]
+    fn verifying_through_a_core_without_a_version_is_refused_not_asserted() {
+        let mut fixture = fixture();
+        let unknown = domain::BrowserCore {
+            id: CoreId::new(),
+            name: "unknown 0".to_string(),
+            executable: PathBuf::from("/tmp/whatever/chrome"),
+            version: "unknown".to_string(),
+            major: 0,
+        };
+        fixture.cores.save(&unknown).expect("save core");
+        fixture.state.load().expect("load");
+        let id = fixture.state.create_profile("unreadable").expect("create");
+        fixture.runtime.set_state(id, RuntimeState::Running);
+        fixture.runtime.set_cdp_port(id, 9333);
+        fixture.state.refresh_runtime();
+
+        let error = fixture.state.begin_verification(id).unwrap_err();
+        assert!(error.to_string().contains("no detected version"), "{error}");
+        assert_eq!(
+            fixture.state.core_rows().expect("rows")[0].generation_label(),
+            None,
+            "there is no generation to show"
+        );
+    }
+
+    #[test]
+    fn re_detecting_a_replaced_binary_updates_the_major_and_the_label() {
+        let mut fixture = fixture();
+        let binary = CoreBinary::new("redetect", Some("Chromium 148.0.7778.215"));
+        let id = fixture
+            .state
+            .add_core(None, binary.path_buf())
+            .expect("add");
+
+        // The same path now answers with another build.
+        binary.replace(Some("Chromium 128.0.0.0"));
+        fixture.state.redetect_core(id).expect("redetect");
+
+        let rows = fixture.state.core_rows().expect("rows");
+        assert_eq!(rows[0].core.major, 128);
+        assert_eq!(
+            rows[0].generation_label().as_deref(),
+            Some("Chrome 143 and older · noise switches not offered")
+        );
+        assert!(
+            fixture
+                .state
+                .notice()
+                .is_some_and(|notice| notice.message.contains("128")),
+            "the banner says what it found"
+        );
+    }
+
+    #[test]
+    fn renaming_a_core_keeps_its_version() {
+        let mut fixture = fixture();
+        let binary = CoreBinary::new("rename", Some("Chromium 148.0.7778.215"));
+        let id = fixture
+            .state
+            .add_core(None, binary.path_buf())
+            .expect("add");
+
+        let mut core = fixture.state.core(id).expect("stored");
+        core.name = "Work browser".to_string();
+        fixture.state.update_core(core).expect("update");
+
+        let rows = fixture.state.core_rows().expect("rows");
+        assert_eq!(rows[0].core.name, "Work browser");
+        assert_eq!(rows[0].core.major, 148);
+    }
+
+    #[test]
+    fn a_core_a_profile_launches_with_cannot_be_deleted() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let core_id = fixture.state.core_rows().expect("rows")[0].core.id;
+        fixture.state.create_profile("Uses it").expect("create");
+
+        let error = fixture.state.delete_core(core_id).unwrap_err();
+        assert!(error.to_string().contains("Uses it"), "{error}");
+        assert_eq!(fixture.state.core_rows().expect("rows").len(), 1);
+    }
+
+    #[test]
+    fn an_unused_core_is_deleted() {
+        let mut fixture = fixture();
+        let binary = CoreBinary::new("unused", Some("Chromium 148.0.7778.215"));
+        let id = fixture
+            .state
+            .add_core(None, binary.path_buf())
+            .expect("add");
+        fixture.state.delete_core(id).expect("delete");
+        assert!(fixture.state.core_rows().expect("rows").is_empty());
+        assert!(!fixture.state.has_core());
     }
 
     #[test]

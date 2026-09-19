@@ -1,8 +1,10 @@
+pub mod core_service;
 pub mod error;
 pub mod profile_service;
 pub mod proxy_service;
 pub mod runtime_service;
 
+pub use core_service::{CoreService, DefaultCoreService, VersionProbe};
 pub use error::AppError;
 pub use profile_service::{DefaultProfileService, DeleteMode, NewProfile, ProfileService};
 pub use proxy_service::{DefaultProxyService, NewProxy, ProxyService};

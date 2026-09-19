@@ -195,6 +195,44 @@ xray 子进程的配置 outbound 正是表单里填的 `10.0.0.1:1080`，浏览�
    而测试点的正是那个串，所以测试全绿。现在 id 与标签分开，映射由 `proxy_chip` 这个纯函数产出并有测试。
 2. 协议说明文字在 640px 对话框里被裁切：gpui 的单行文本不会自动换行，长句要在源码里断行。
 
+### 第七批：Browser Cores 页面
+
+进度（2026-09-20）：已完成。Settings 仍为 `(soon)`。
+
+- `application::CoreService`（新）：`add`/`update`/`redetect`/`delete`/`get`/`list`/`usage`。
+  **版本一律靠探测**：`add` 对二进制跑 `--version`，存回它自己报的 banner 与 major，
+  表单里没有版本输入框。读不出 major（或 major 为 0）就当场拒绝并给出出路
+  （`FP_BROWSER_CHROMIUM_MAJOR`），而不是先存下来到启动时才失败。
+  这与 bootstrap 的自动发现有意不同：开机时没有可改的东西，所以那里保留记录并只用警告说明。
+- **改指向 = 重新探测**：把某个 core 指到另一个二进制时重新读版本；原地换了二进制用
+  Re-detect 按钮重读。自动生成的 `<binary> <major>` 名字跟着新 major 走，
+  用户起过的名字永不被改写（`renamed_for` 三条规则各有测试）。
+- **在用 core 不可删**（`profiles.core_id` 没有级联），拒绝并点名持有它的 profile。
+- 能力表在行上可见：`Chrome 144+ · noise switches verified`（绿）/
+  `Chrome 143 and older · noise switches not offered`（琥珀）/ 无版本（红）。
+  措辞收进 `CoreCapabilities::generation_label/noise_label`，行与对话框共用，不会各写一套。
+- 顺手修掉一个**潜在 panic**：`AppState::verification_job` 直接调
+  `CoreCapabilities::for_major(core.major)`，而该函数对 0 是 `debug_assert`。
+  开机自动发现保留 major=0 的 core 时，debug 构建里点"Verify fingerprint"会 panic。
+  现在改为 `BrowserCore::capabilities() -> Option<…>`（major 0 返回 None），
+  UI 侧拒绝并说明"没有探测到版本，没有可对照的开关表"。
+
+真机验收：页面显示两个内核——本机 148（绿）与自造的谎报 128 的包装脚本（琥珀，能力表差异可见）；
+添加不报版本的脚本被拒且对话框不关（提示分两行完整显示）；建 profile 后该 148 内核行显示
+`used by Profile 1`；删除在用内核被拒（红字点名）；把 128 包装脚本改成报 148 后点 Re-detect，
+名字与版本与能力标签一起翻新（`chrome 128` → `chrome 148`，琥珀 → 绿）。
+
+真机又抓到一个 headless 漏掉的缺陷：**Cores 页上同时渲染了 profiles 页的内容**
+（空提示、列表、详情面板）。原因是页面分支写成了 `page != Page::Proxies`，
+把 Cores 也放了进去。现在改成 `page == Page::Profiles`，并在测试里断言
+"另一页的容器不存在"，而不是只断言"这一页存在"。
+
+另外修掉两类**测试卫生**问题（与上一批同一性质）：新增的 `TempBinary` / `CoreBinary`
+测试助手原先会留下临时目录（一轮 27 个），现在都用 RAII guard，一次全量测试后残留为 0。
+
+同一轮还统一了**错误文案的渲染**：三个编辑器的错误框按 `; ` 分行，每行一句，
+因为 gpui 不会自动换行，长句会被裁掉半句。
+
 ### 第四批：窗口内的指纹验证动作
 
 进度（2026-09-20）：已完成。
@@ -426,6 +464,49 @@ a proxy chip is labelled with its name alone
 the proxy the profile is on is what the form offers
 choosing a proxy and choosing direct change the assignment
 an assignment to a missing proxy is kept and shown
+```
+
+### Browser cores
+
+```text
+the generation is written the same way everywhere
+adding a core stores what the binary reported
+a chosen name is kept
+a binary without a version is refused with the way out
+major zero is not a version
+a path that is not a file is refused before the probe
+the same binary is not registered twice
+renaming a core does not probe again
+pointing a core at another binary re reads the version
+pointing a core at a silent binary is refused and changes nothing
+a re pointed core is renamed by its own rule
+updating a core that is gone is not found
+redetecting re reads a replaced binary
+redetecting keeps a chosen name
+redetecting a missing binary is refused and keeps the record
+a core in use cannot be deleted
+an unused core is deleted
+usage names the profiles per core
+an added core carries the version its binary reported
+a legacy core says the noise switches are not offered
+a binary without a usable version is refused and reported
+verifying through a core without a version is refused not asserted
+re detecting a replaced binary updates the major and the label
+renaming a core keeps its version
+a core a profile launches with cannot be deleted
+an unused core is deleted
+the sidebar switches to the cores page
+a core can be added from the window
+a refused core form says why and stays open
+deleting a core in use is refused in the window
+re detecting from the window reports what it found
+the form opens on a stored core
+a renamed core keeps its version
+a blank name leaves the name alone
+re pointing a core takes the new path
+a new form has no core to build
+an empty path is refused by the form
+the edited path is what a new core would use
 ```
 
 ### Fingerprint acceptance (real binary, opt-in)

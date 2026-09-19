@@ -4,12 +4,13 @@
 //! dirty; the snapshot itself stays the single source of truth, exactly as the
 //! runtime façade contract requires.
 
+use crate::core_editor::CoreEditor;
 use crate::editor::ProfileEditor;
 use crate::proxy_editor::ProxyEditor;
-use crate::state::{AppState, Page, ProfileRow, ProxyRow, Verification};
+use crate::state::{AppState, CoreRow, Page, ProfileRow, ProxyRow, Verification};
 use crate::verifier::FingerprintVerifier;
 use crossbeam_channel::{Receiver, Sender};
-use domain::{ProfileId, ProxyId, RuntimeState};
+use domain::{CoreId, ProfileId, ProxyId, RuntimeState};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::Root;
 use gpui_kit::component::WindowExt as _;
@@ -40,6 +41,8 @@ pub struct AppView {
     editor: Option<Entity<ProfileEditor>>,
     /// The proxy editor behind the open dialog, if any.
     proxy_editor: Option<Entity<ProxyEditor>>,
+    /// The browser-core editor behind the open dialog, if any.
+    core_editor: Option<Entity<CoreEditor>>,
     verifier: Arc<dyn FingerprintVerifier>,
     verifications: Receiver<(ProfileId, Result<Vec<Discrepancy>, String>)>,
     verification_tx: Sender<(ProfileId, Result<Vec<Discrepancy>, String>)>,
@@ -61,6 +64,7 @@ impl AppView {
         Self {
             editor: None,
             proxy_editor: None,
+            core_editor: None,
             verifier,
             verifications,
             verification_tx,
@@ -92,6 +96,12 @@ impl AppView {
     #[cfg(test)]
     pub fn proxy_editor(&self) -> Option<Entity<ProxyEditor>> {
         self.proxy_editor.clone()
+    }
+
+    /// The browser-core editor behind the open dialog.
+    #[cfg(test)]
+    pub fn core_editor(&self) -> Option<Entity<CoreEditor>> {
+        self.core_editor.clone()
     }
 
     fn on_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -208,40 +218,37 @@ impl AppView {
                         .child(DialogAction::new().child(Button::new("ok").label("Save"))),
                 )
                 .on_ok(move |_, _, cx| {
-                    match editor.read(cx).build_profile(cx) {
-                        Ok(profile) => {
-                            let saved = view
-                                .update(cx, |view, _| match view.state.update_profile(profile) {
-                                    Ok(()) => {
-                                        view.state.push_notice("Saved.", false);
-                                        true
-                                    }
-                                    Err(error) => {
-                                        view.state.push_notice(error.to_string(), true);
-                                        false
-                                    }
-                                })
-                                .unwrap_or(false);
-                            if saved {
-                                accepted.update(cx, |editor, cx| {
-                                    editor.set_error(None);
-                                    cx.notify();
-                                });
-                            } else {
-                                accepted.update(cx, |editor, cx| {
-                                    editor.set_error(Some(
-                                        "the profile could not be saved".to_string(),
-                                    ));
-                                    cx.notify();
-                                });
-                            }
-                            saved
-                        }
-                        Err(error) => {
-                            // Keep the dialog open: the form is where the
-                            // mistake is, not the window behind it.
+                    // Both ways of refusing end the same way: the dialog stays
+                    // open and says why. A refusal from the service is shown in
+                    // the form as well as the banner, because the form is where
+                    // the mistake is.
+                    let saved: Result<(), String> = match editor.read(cx).build_profile(cx) {
+                        Ok(profile) => view
+                            .update(cx, |view, _| match view.state.update_profile(profile) {
+                                Ok(()) => {
+                                    view.state.push_notice("Saved.", false);
+                                    Ok(())
+                                }
+                                Err(error) => {
+                                    let message = error.to_string();
+                                    view.state.push_notice(message.clone(), true);
+                                    Err(message)
+                                }
+                            })
+                            .unwrap_or_else(|_| Err("the window is gone".to_string())),
+                        Err(error) => Err(error),
+                    };
+                    match saved {
+                        Ok(()) => {
                             accepted.update(cx, |editor, cx| {
-                                editor.set_error(Some(error));
+                                editor.set_error(None);
+                                cx.notify();
+                            });
+                            true
+                        }
+                        Err(message) => {
+                            accepted.update(cx, |editor, cx| {
+                                editor.set_error(Some(message));
                                 cx.notify();
                             });
                             false
@@ -301,6 +308,153 @@ impl AppView {
         cx.notify();
     }
 
+    /// Opens the form for a new core, or for one that is already registered.
+    ///
+    /// Adding goes through the service, which probes the binary: the version a
+    /// core claims decides what the engine may be asked to spoof, so it is read
+    /// rather than typed.
+    fn on_edit_core(&mut self, id: Option<CoreId>, window: &mut Window, cx: &mut Context<Self>) {
+        let editing = id.and_then(|id| self.state.core(id));
+        if id.is_some() && editing.is_none() {
+            self.state
+                .push_notice("that browser core is no longer there".to_string(), true);
+            cx.notify();
+            return;
+        }
+        let core_editor = cx.new(|cx| match &editing {
+            Some(core) => CoreEditor::for_core(core, window, cx),
+            None => CoreEditor::new(window, cx),
+        });
+        self.core_editor = Some(core_editor.clone());
+        let view = cx.entity().downgrade();
+        let accepted = core_editor.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let core_editor = core_editor.clone();
+            let view = view.clone();
+            let accepted = accepted.clone();
+            let title = core_editor.read(cx).title();
+            dialog
+                .title(title)
+                .w(px(680.0))
+                .content({
+                    let core_editor = core_editor.clone();
+                    move |content, _, _| content.child(core_editor.clone())
+                })
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                        )
+                        .child(DialogAction::new().child(Button::new("ok").label("Save"))),
+                )
+                .on_ok(move |_, _, cx| {
+                    let editing = core_editor.read(cx).is_edit();
+                    let name = core_editor.read(cx).name(cx);
+                    let path = core_editor.read(cx).executable(cx);
+                    let built = if editing {
+                        core_editor.read(cx).build_core(cx).map(Some)
+                    } else if path.as_os_str().is_empty() {
+                        Err("the executable path cannot be empty".to_string())
+                    } else {
+                        Ok(None)
+                    };
+
+                    let saved: Result<(), String> = match built {
+                        Ok(core) => view
+                            .update(cx, |view, _| {
+                                let result = match core {
+                                    Some(core) => view.state.update_core(core),
+                                    None => view.state.add_core(name, path).map(|_| ()),
+                                };
+                                match result {
+                                    Ok(()) => Ok(()),
+                                    Err(error) => {
+                                        let message = error.to_string();
+                                        view.state.push_notice(message.clone(), true);
+                                        Err(message)
+                                    }
+                                }
+                            })
+                            .unwrap_or_else(|_| Err("the window is gone".to_string())),
+                        Err(error) => Err(error),
+                    };
+                    match saved {
+                        Ok(()) => {
+                            accepted.update(cx, |editor, cx| {
+                                editor.set_error(None);
+                                cx.notify();
+                            });
+                            true
+                        }
+                        Err(message) => {
+                            accepted.update(cx, |editor, cx| {
+                                editor.set_error(Some(message));
+                                cx.notify();
+                            });
+                            false
+                        }
+                    }
+                })
+        });
+    }
+
+    /// Re-reads a core's version - for a binary that was replaced in place.
+    fn on_redetect_core(&mut self, id: CoreId, cx: &mut Context<Self>) {
+        let _ = self.state.redetect_core(id);
+        cx.notify();
+    }
+
+    /// Removing a core is refused while a profile still launches with it.
+    fn on_delete_core(&mut self, id: CoreId, window: &mut Window, cx: &mut Context<Self>) {
+        let (name, version, used_by) = match self.state.core(id) {
+            Some(core) => {
+                let used_by = self
+                    .state
+                    .core_rows()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|row| row.core.id == id)
+                    .map(|row| row.used_by)
+                    .unwrap_or_default();
+                (core.name, core.version, used_by)
+            }
+            None => (id.to_string(), String::new(), Vec::new()),
+        };
+        let description = if used_by.is_empty() {
+            format!("\"{name}\" ({version}) will be removed.")
+        } else {
+            format!(
+                "\"{name}\" is used by {}. Point those profiles at another core first.",
+                used_by.join(", ")
+            )
+        };
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            let description = description.clone();
+            alert
+                .title("Delete browser core")
+                .description(description)
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Delete")
+                        .cancel_text("Keep")
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            if let Some(view) = view.upgrade() {
+                                view.update(cx, |view, cx| {
+                                    let _ = view.state.delete_core(id);
+                                    cx.notify();
+                                });
+                            }
+                            true
+                        })
+                        .on_cancel(|_, _, _| true),
+                )
+        });
+        cx.notify();
+    }
+
     /// Opens the form for a new proxy, or for one that is already stored.
     fn on_edit_proxy(&mut self, id: Option<ProxyId>, window: &mut Window, cx: &mut Context<Self>) {
         let editing = id.and_then(|id| self.state.proxy(id));
@@ -337,8 +491,9 @@ impl AppView {
                         .child(DialogAction::new().child(Button::new("ok").label("Save"))),
                 )
                 .on_ok(move |_, _, cx| {
-                    let built = proxy_editor.read(cx).build_proxy(cx);
-                    let saved = match built {
+                    // A refusal from the service is shown in the form as well as
+                    // the banner: the form is where the mistake is.
+                    let saved: Result<(), String> = match proxy_editor.read(cx).build_proxy(cx) {
                         Ok(proxy) => {
                             let existing = proxy_editor.read(cx).is_edit();
                             view.update(cx, |view, _| {
@@ -350,37 +505,34 @@ impl AppView {
                                         .map(|_| ())
                                 };
                                 match result {
-                                    Ok(()) => true,
+                                    Ok(()) => Ok(()),
                                     Err(error) => {
-                                        view.state.push_notice(error.to_string(), true);
-                                        false
+                                        let message = error.to_string();
+                                        view.state.push_notice(message.clone(), true);
+                                        Err(message)
                                     }
                                 }
                             })
-                            .unwrap_or(false)
+                            .unwrap_or_else(|_| Err("the window is gone".to_string()))
                         }
-                        Err(error) => {
-                            // Keep the dialog open: the form is where the
-                            // mistake is, not the window behind it.
+                        Err(error) => Err(error),
+                    };
+                    match saved {
+                        Ok(()) => {
                             accepted.update(cx, |editor, cx| {
-                                editor.set_error(Some(error));
+                                editor.set_error(None);
                                 cx.notify();
                             });
-                            return false;
+                            true
                         }
-                    };
-                    if saved {
-                        accepted.update(cx, |editor, cx| {
-                            editor.set_error(None);
-                            cx.notify();
-                        });
-                    } else {
-                        accepted.update(cx, |editor, cx| {
-                            editor.set_error(Some("the proxy could not be saved".to_string()));
-                            cx.notify();
-                        });
+                        Err(message) => {
+                            accepted.update(cx, |editor, cx| {
+                                editor.set_error(Some(message));
+                                cx.notify();
+                            });
+                            false
+                        }
                     }
-                    saved
                 })
         });
     }
@@ -542,6 +694,7 @@ impl Render for AppView {
                     .child({
                         let page = self.state.page();
                         let proxy_rows = self.state.proxy_rows().unwrap_or_default();
+                        let core_rows = self.state.core_rows().unwrap_or_default();
                         div()
                             .flex()
                             .flex_col()
@@ -552,13 +705,17 @@ impl Render for AppView {
                             .gap_4()
                             .child(match page {
                                 Page::Proxies => proxies_header(cx),
+                                Page::Cores => cores_header(cx),
                                 _ => profiles_header(cx),
                             })
                             .children(notice.map(|notice| notice_banner(notice, cx)))
                             .when(page == Page::Proxies, |this| {
                                 this.child(proxies_body(&proxy_rows, cx))
                             })
-                            .when(page != Page::Proxies, |this| {
+                            .when(page == Page::Cores, |this| {
+                                this.child(cores_body(&core_rows, cx))
+                            })
+                            .when(page == Page::Profiles, |this| {
                                 this.child(
                                     div()
                                         .id("profiles-scroll")
@@ -804,6 +961,162 @@ fn proxies_body(rows: &[ProxyRow], cx: &mut Context<AppView>) -> impl IntoElemen
                                 .outline()
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.on_delete_proxy(id, window, cx)
+                                })),
+                        ),
+                )
+        }))
+}
+
+fn cores_header(cx: &mut Context<AppView>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Browser Cores"),
+                )
+                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                    "Each core is a fingerprint-chromium binary; its detected version decides which switches a profile may claim.",
+                )),
+        )
+        .child(
+            Button::new("new-core")
+                .label("Add Core")
+                .primary()
+                .on_click(cx.listener(|this, _, window, cx| this.on_edit_core(None, window, cx))),
+        )
+}
+
+fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
+    div()
+        .id("cores-scroll")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .gap_2()
+        .overflow_y_scroll()
+        .when(rows.is_empty(), |this| {
+            this.child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .bg(rgb(PANEL))
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child(
+                        "No browser core yet. Add a fingerprint-chromium binary to launch profiles with it.",
+                    ),
+            )
+        })
+        // Built inline: a helper returning a borrowed type cannot escape the
+        // closure that owns the context.
+        .children(rows.iter().enumerate().map(|(index, row)| {
+            let id = row.core.id;
+            div()
+                .id(format!("core-{index}"))
+                .test_support()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .px_4()
+                .py_3()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(row.core.name.clone()),
+                                )
+                                .when(!row.present, |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0xfca5a5))
+                                            .child("executable missing"),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(format!("{} · major {}", row.core.version, row.core.major)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(match row.generation_label() {
+                                    Some(label) if label.contains("verified") => 0x86efac,
+                                    Some(_) => 0xfbbf24,
+                                    None => 0xfca5a5,
+                                }))
+                                .child(row.generation_label().unwrap_or_else(|| {
+                                    "no detected version: no switches can be claimed".to_string()
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x71717a))
+                                .child(row.core.executable.to_string_lossy().to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(if row.is_used() { 0x86efac } else { 0x71717a }))
+                                .child(row.usage_label()),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new(format!("redetect-core-{index}"))
+                                .label("Re-detect")
+                                .outline()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.on_redetect_core(id, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("edit-core-{index}"))
+                                .label("Edit")
+                                .outline()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.on_edit_core(Some(id), window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("delete-core-{index}"))
+                                .label("Delete")
+                                .outline()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.on_delete_core(id, window, cx)
                                 })),
                         ),
                 )
@@ -1393,9 +1706,10 @@ mod tests {
             proxy_repo.clone(),
             runtime.clone(),
         ));
+        let cores = crate::state::testing::core_service(core_repo.clone(), profile_repo.clone());
         let proxies: Arc<dyn ProxyService> =
             Arc::new(DefaultProxyService::new(proxy_repo, profile_repo));
-        let state = AppState::new(profiles, runtime_service, core_repo, proxies);
+        let state = AppState::new(profiles, runtime_service, cores, proxies);
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
 
         let view = cx.new(|cx| {
@@ -1728,6 +2042,10 @@ mod tests {
             cx.update(|window, _| window.try_find("new-proxy").is_some()),
             "the proxies page is shown"
         );
+        assert!(
+            cx.update(|window, _| window.try_find("profiles-scroll").is_none()),
+            "the profiles body is not rendered on the proxies page"
+        );
         assert_eq!(
             view.read_with(cx, |view, _| view.state().page()),
             crate::state::Page::Proxies
@@ -1926,6 +2244,224 @@ mod tests {
         );
     }
 
+    #[gpui_kit::test]
+    fn the_sidebar_switches_to_the_cores_page(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        assert!(
+            cx.update(|window, _| window.try_find("cores-scroll").is_none()),
+            "the cores page is not shown first"
+        );
+
+        cx.update(|window, cx| window.click("nav-Browser Cores", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("new-core").is_some()),
+            "the cores page is shown"
+        );
+        // Only one page is rendered at a time: the profiles list and its
+        // details panel used to follow the cores page onto the screen.
+        assert!(
+            cx.update(|window, _| window.try_find("profiles-scroll").is_none()),
+            "the profiles body is not rendered on the cores page"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("new-profile").is_none()),
+            "the profiles header is not rendered on the cores page"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().page()),
+            crate::state::Page::Cores
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_core_can_be_added_from_the_window(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+        let binary =
+            crate::state::testing::CoreBinary::new("ui-add", Some("Chromium 148.0.7778.215"));
+        let path = binary.path_buf();
+
+        cx.update(|window, cx| window.click("nav-Browser Cores", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("new-core", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("core-executable").is_some()),
+            "the core form opens"
+        );
+
+        let editor = view
+            .read_with(cx, |view, _| view.core_editor())
+            .expect("a core editor");
+        let executable = editor.read_with(cx, |editor, _| editor.executable_input());
+        cx.update(|window, cx| {
+            executable.update(cx, |state, cx| {
+                state.set_value(path.to_string_lossy().to_string(), window, cx)
+            });
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        let rows = view.read_with(cx, |view, _| view.state().core_rows().expect("rows"));
+        assert_eq!(rows.len(), 2, "the seeded core plus the added one");
+        let added = rows
+            .iter()
+            .find(|row| row.core.executable == path)
+            .expect("the added core is listed");
+        assert_eq!(added.core.major, 148);
+        assert_eq!(added.core.version, "Chromium 148.0.7778.215");
+        assert!(
+            cx.update(|window, _| window.try_find("core-executable").is_none()),
+            "saving closes the dialog"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_core_form_says_why_and_stays_open(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+        // A file that answers nothing when asked for --version.
+        let binary = crate::state::testing::CoreBinary::new("ui-silent", None);
+        let path = binary.path_buf();
+
+        cx.update(|window, cx| window.click("nav-Browser Cores", cx));
+        settle(cx);
+        let before = view.read_with(cx, |view, _| view.state().core_rows().expect("rows").len());
+        cx.update(|window, cx| window.click("new-core", cx));
+        settle(cx);
+
+        let editor = view
+            .read_with(cx, |view, _| view.core_editor())
+            .expect("a core editor");
+        let executable = editor.read_with(cx, |editor, _| editor.executable_input());
+        cx.update(|window, cx| {
+            executable.update(cx, |state, cx| {
+                state.set_value(path.to_string_lossy().to_string(), window, cx)
+            });
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("core-executable").is_some()),
+            "a refused save leaves the form open"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("core-error").is_some()),
+            "the form says what is wrong"
+        );
+        let shown = editor
+            .read_with(cx, |editor, _| editor.error().map(str::to_string))
+            .expect("the reason is recorded on the form");
+        assert!(shown.contains("--version"), "{shown}");
+        assert!(
+            shown.contains("FP_BROWSER_CHROMIUM_MAJOR"),
+            "the refusal says how to record it anyway: {shown}"
+        );
+        assert!(
+            shown.split("; ").count() == 2,
+            "the message is written as two clauses, one line each: {shown}"
+        );
+        let notice = view
+            .read_with(cx, |view, _| view.state().notice().cloned())
+            .expect("the refusal is shown");
+        assert!(notice.error, "the refusal is an error");
+        assert!(notice.message.contains("--version"), "{}", notice.message);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().core_rows().expect("rows").len()),
+            before,
+            "nothing was stored"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn deleting_a_core_in_use_is_refused_in_the_window(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        // The fixture seeds one core; a profile is created against it.
+        cx.update(|window, cx| window.click("new-profile", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("nav-Browser Cores", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("delete-core-0", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().core_rows().expect("rows").len()),
+            1,
+            "the core is still there"
+        );
+        let notice = view
+            .read_with(cx, |view, _| view.state().notice().cloned())
+            .expect("the refusal is shown");
+        assert!(notice.error);
+        assert!(
+            notice.message.contains("Profile 1"),
+            "the message names the profile holding it: {}",
+            notice.message
+        );
+    }
+
+    #[gpui_kit::test]
+    fn re_detecting_from_the_window_reports_what_it_found(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+        let binary =
+            crate::state::testing::CoreBinary::new("ui-redetect", Some("Chromium 148.0.7778.215"));
+        let path = binary.path_buf();
+
+        cx.update(|window, cx| window.click("nav-Browser Cores", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("new-core", cx));
+        settle(cx);
+        let editor = view
+            .read_with(cx, |view, _| view.core_editor())
+            .expect("a core editor");
+        let executable = editor.read_with(cx, |editor, _| editor.executable_input());
+        cx.update(|window, cx| {
+            executable.update(cx, |state, cx| {
+                state.set_value(path.to_string_lossy().to_string(), window, cx)
+            });
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        // The binary behind that path is replaced by an older build.
+        binary.replace(Some("Chromium 128.0.0.0"));
+        // The listing order is not part of the contract, so the button is found
+        // by the row it belongs to.
+        let index = view
+            .read_with(cx, |view, _| view.state().core_rows().expect("rows"))
+            .iter()
+            .position(|row| row.core.executable == path)
+            .expect("the added core is listed");
+        cx.update(|window, cx| window.click(format!("redetect-core-{index}"), cx));
+        settle(cx);
+
+        let rows = view.read_with(cx, |view, _| view.state().core_rows().expect("rows"));
+        let redetected = rows
+            .iter()
+            .find(|row| row.core.executable == path)
+            .expect("the core is listed");
+        assert_eq!(redetected.core.major, 128);
+        assert_eq!(
+            redetected.generation_label().as_deref(),
+            Some("Chrome 143 and older · noise switches not offered")
+        );
+    }
+
     /// Draws enough frames for a layer to mount and then paint at rest.
     fn settle(cx: &mut gpui_kit::VisualTestContext) {
         cx.run_until_parked();
@@ -2068,9 +2604,10 @@ mod tests {
             proxy_repo.clone(),
             runtime,
         ));
+        let cores = crate::state::testing::core_service(core_repo.clone(), profile_repo.clone());
         let proxies: Arc<dyn ProxyService> =
             Arc::new(DefaultProxyService::new(proxy_repo, profile_repo));
-        let state = AppState::new(profiles, runtime_service, core_repo, proxies);
+        let state = AppState::new(profiles, runtime_service, cores, proxies);
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
         let view = cx.new(|cx| {
             let mut view = AppView::new(state, event_rx, Arc::new(FakeVerifier::passing()));

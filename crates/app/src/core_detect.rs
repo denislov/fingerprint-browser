@@ -5,7 +5,7 @@
 //! This module owns the product decisions around it: where to look for a core,
 //! what to name it, and how a replaced binary is noticed.
 
-use domain::{BrowserCore, CoreId};
+use domain::{BrowserCore, CoreId, suggested_name};
 use runtime::version::{DEFAULT_TIMEOUT as VERSION_TIMEOUT, VersionReport};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -99,7 +99,7 @@ fn register(
 
     let core = BrowserCore {
         id: CoreId::new(),
-        name: display_name(executable, major),
+        name: suggested_name(executable, major),
         executable: executable.to_path_buf(),
         version,
         major,
@@ -201,8 +201,8 @@ fn refresh(
 /// Keeps an auto-generated name in step with the detected major, but never
 /// rewrites a name the user chose.
 fn refreshed_name(core: &BrowserCore, major: u32) -> String {
-    if core.name == display_name(&core.executable, core.major) {
-        display_name(&core.executable, major)
+    if core.name == suggested_name(&core.executable, core.major) {
+        suggested_name(&core.executable, major)
     } else {
         core.name.clone()
     }
@@ -214,18 +214,6 @@ fn existing_file(path: &Path) -> Option<PathBuf> {
 
 fn env_major() -> Option<u32> {
     std::env::var(MAJOR_ENV).ok()?.trim().parse().ok()
-}
-
-fn display_name(executable: &Path, major: u32) -> String {
-    let stem = executable
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().to_string())
-        .unwrap_or_else(|| "browser".to_string());
-    if major == 0 {
-        format!("{stem} (version unknown)")
-    } else {
-        format!("{stem} {major}")
-    }
 }
 
 fn relative_candidates() -> Vec<PathBuf> {
@@ -464,11 +452,11 @@ mod tests {
     #[test]
     fn names_the_core_from_the_executable_and_major() {
         assert_eq!(
-            display_name(Path::new("/tmp/tools/chrome"), 148),
+            suggested_name(Path::new("/tmp/tools/chrome"), 148),
             "chrome 148"
         );
         assert_eq!(
-            display_name(Path::new("/tmp/tools/chrome"), 0),
+            suggested_name(Path::new("/tmp/tools/chrome"), 0),
             "chrome (version unknown)"
         );
     }

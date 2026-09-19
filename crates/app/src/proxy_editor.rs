@@ -344,7 +344,13 @@ impl Render for ProxyEditor {
                     .bg(rgb(0x2a1a1a))
                     .text_xs()
                     .text_color(rgb(0xfca5a5))
-                    .child(error),
+                    // One line per clause: gpui does not wrap a single line, and
+                    // a refusal that runs off the edge is a refusal half read.
+                    .children(
+                        error
+                            .split("; ")
+                            .map(|clause| div().child(clause.to_string())),
+                    ),
             );
         }
         form
