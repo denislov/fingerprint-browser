@@ -18,7 +18,7 @@ pub use error::{
 pub use events::{RuntimeCommand, RuntimeComponent, RuntimeEvent, StartParams};
 pub use facade::{RuntimeFacade, RuntimeSnapshot};
 pub use planner::{DefaultLaunchPlanner, LaunchContext, LaunchPlanner};
-pub use ports::{PortAllocator, TcpPortAllocator};
+pub use ports::{PortAllocator, PortReservation, TcpPortAllocator};
 pub use process::{DefaultProcessTreeController, ProcessTreeController};
 pub use supervisor::{ChannelRuntimeFacade, RuntimeSupervisor, RuntimeSupervisorChannels};
 pub use xray::{DefaultXrayConfigBuilder, XrayConfigBuilder};

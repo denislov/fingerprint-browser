@@ -314,7 +314,10 @@ ShutdownAll 和命令通道断开会取消启动、清理已有会话并退出�
 Restart 当前启动项先取消，再通过待处理队列重新启动，避免递归启动。
 其他 Start/Restart 延后执行；Stop 可立即处理其他运行会话，并移除该 Profile 之前排队的启动请求。
 每次最多处理 64 条命令，避免持续命令流饿死 readiness 和崩溃轮询。
-上述响应时间不涵盖同步文件操作、进程创建及事件通道被消费者阻塞的情况。
+上述响应时间不涵盖同步文件操作和进程创建。事件发送使用 try_send，不因 UI 消费暂停而阻塞监督器。
+
+CDP 和 SOCKS TCP 端口在规划阶段由监听句柄预留，直到对应子进程 spawn 前释放；错误返回会自动释放句柄。
+由于 Chromium/Xray 自行绑定端口，释放到绑定仍存在竞争窗口，并非原子交接；需结合 readiness 和进程退出检查识别启动失败。
 
 个人使用实例数通常有限，这比引入复杂 async runtime 更容易验证。
 
@@ -355,4 +358,5 @@ Xray 也可以放入独立 Job，或由同一 RuntimeSession 管理。
 4. Xray crash 时不得让 Chromium 静默转为非预期网络路径。
 5. RuntimeSession 删除前必须完成子进程回收。
 6. 动态端口不持久化到 Profile。
-7. UI 状态以 Supervisor event 为准。
+7. UI 状态以 Supervisor snapshot 为准；event 仅作非阻塞更新通知，需定期和重连时读取快照。
+8. 事件队列满或断开时允许丢弃通知，快照保留最后错误、警告、启动参数和累计 dropped_events；停止不清空诊断，下次启动清空诊断。

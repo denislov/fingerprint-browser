@@ -13,6 +13,11 @@ pub struct RuntimeSnapshot {
     pub socks_port: Option<u16>,
     pub started_at: Option<SystemTime>,
     pub effective_args: Vec<String>,
+    /// Latest diagnostics survive stop and event delivery loss until the next start.
+    pub last_error: Option<String>,
+    pub last_warning: Option<String>,
+    /// Cumulative notification loss; consumers must reconcile from snapshots.
+    pub dropped_events: u64,
 }
 
 pub trait RuntimeFacade: Send + Sync {

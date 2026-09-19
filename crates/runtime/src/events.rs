@@ -73,3 +73,16 @@ pub enum RuntimeEvent {
         message: String,
     },
 }
+
+impl RuntimeEvent {
+    pub fn profile_id(&self) -> ProfileId {
+        match self {
+            Self::StateChanged { profile_id, .. }
+            | Self::EffectiveLaunchArgs { profile_id, .. }
+            | Self::Started { profile_id, .. }
+            | Self::Stopped { profile_id }
+            | Self::Crashed { profile_id, .. }
+            | Self::Warning { profile_id, .. } => *profile_id,
+        }
+    }
+}

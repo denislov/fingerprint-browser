@@ -239,7 +239,7 @@ impl RuntimeSupervisor {
         let profile_id = params.profile.id;
 
         if self.active_sessions.contains_key(&profile_id) {
-            let _ = self.event_tx.send(RuntimeEvent::Warning {
+            self.emit(RuntimeEvent::Warning {
                 profile_id,
                 message: format!("profile {profile_id} is already running"),
             });
@@ -248,7 +248,7 @@ impl RuntimeSupervisor {
 
         // Set state to Starting
         self.set_snapshot_state(profile_id, RuntimeState::Starting);
-        let _ = self.event_tx.send(RuntimeEvent::StateChanged {
+        self.emit(RuntimeEvent::StateChanged {
             profile_id,
             state: RuntimeState::Starting,
         });
@@ -259,7 +259,7 @@ impl RuntimeSupervisor {
         }
 
         // 1. Allocate CDP port
-        let cdp_port = match self.port_allocator.allocate_loopback() {
+        let cdp_reservation = match self.port_allocator.reserve_loopback() {
             Ok(p) => p,
             Err(e) => {
                 self.fail_start(profile_id, format!("port allocation failed: {e}"));
@@ -268,8 +268,8 @@ impl RuntimeSupervisor {
         };
 
         // 2. Allocate SOCKS port if proxy present
-        let socks_port = match &params.proxy {
-            Some(_) => match self.port_allocator.allocate_loopback() {
+        let mut socks_reservation = match &params.proxy {
+            Some(_) => match self.port_allocator.reserve_loopback() {
                 Ok(p) => Some(p),
                 Err(e) => {
                     self.fail_start(profile_id, format!("socks port allocation failed: {e}"));
@@ -278,6 +278,10 @@ impl RuntimeSupervisor {
             },
             None => None,
         };
+        let cdp_port = cdp_reservation.port();
+        let socks_port = socks_reservation
+            .as_ref()
+            .map(|reservation| reservation.port());
 
         // 3. Resolve capabilities
         let capabilities = match self.capability_resolver.resolve(&params.core) {
@@ -314,7 +318,7 @@ impl RuntimeSupervisor {
             .map(|a| a.to_string_lossy().to_string())
             .collect();
 
-        let _ = self.event_tx.send(RuntimeEvent::EffectiveLaunchArgs {
+        self.emit(RuntimeEvent::EffectiveLaunchArgs {
             profile_id,
             args: effective_args.clone(),
         });
@@ -337,6 +341,8 @@ impl RuntimeSupervisor {
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());
+                // Xray binds its own socket; release only at the handoff.
+                drop(socks_reservation.take());
                 let mut child = crate::process::spawn_managed(&mut command)
                     .map_err(|e| format!("Xray spawn failed: {e}"))?;
                 if let Err(e) = crate::xray::wait_ready(
@@ -384,6 +390,7 @@ impl RuntimeSupervisor {
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
 
+        drop(cdp_reservation);
         let mut child = match crate::process::spawn_managed(&mut cmd) {
             Ok(c) => c,
             Err(e) => {
@@ -442,6 +449,9 @@ impl RuntimeSupervisor {
                     if cancelled {
                         break Err("startup cancelled".to_string());
                     }
+                    if !matches!(child.try_wait(), Ok(None)) {
+                        break Err("browser exited during CDP readiness".into());
+                    }
                     // Recheck Xray after the probe before advertising Running.
                     if let Some(xray) = xray.as_mut()
                         && !matches!(xray.try_wait(), Ok(None))
@@ -480,16 +490,19 @@ impl RuntimeSupervisor {
                     socks_port,
                     started_at: Some(SystemTime::now()),
                     effective_args,
+                    last_error: None,
+                    last_warning: None,
+                    dropped_events: 0,
                 });
 
-                let _ = self.event_tx.send(RuntimeEvent::Started {
+                self.emit(RuntimeEvent::Started {
                     profile_id,
                     browser_pid,
                     xray_pid,
                     cdp_port,
                     socks_port,
                 });
-                let _ = self.event_tx.send(RuntimeEvent::StateChanged {
+                self.emit(RuntimeEvent::StateChanged {
                     profile_id,
                     state: RuntimeState::Running,
                 });
@@ -545,7 +558,7 @@ impl RuntimeSupervisor {
                     self.stop_profile(id);
                 }
                 RuntimeCommand::Start(params) if params.profile_id() == starting => {
-                    let _ = self.event_tx.send(RuntimeEvent::Warning {
+                    self.emit(RuntimeEvent::Warning {
                         profile_id: starting,
                         message: format!("profile {starting} is already starting"),
                     });
@@ -566,9 +579,7 @@ impl RuntimeSupervisor {
             message: message.clone(),
         };
         self.set_snapshot_state(profile_id, state.clone());
-        let _ = self
-            .event_tx
-            .send(RuntimeEvent::StateChanged { profile_id, state });
+        self.emit(RuntimeEvent::StateChanged { profile_id, state });
     }
 
     fn stop_profile(&mut self, profile_id: ProfileId) {
@@ -576,7 +587,7 @@ impl RuntimeSupervisor {
             session.stopping = true;
 
             self.set_snapshot_state(profile_id, RuntimeState::Stopping);
-            let _ = self.event_tx.send(RuntimeEvent::StateChanged {
+            self.emit(RuntimeEvent::StateChanged {
                 profile_id,
                 state: RuntimeState::Stopping,
             });
@@ -588,15 +599,15 @@ impl RuntimeSupervisor {
             Self::remove_config(session.xray_config.as_deref());
 
             self.set_snapshot_state(profile_id, RuntimeState::Stopped);
-            let _ = self.event_tx.send(RuntimeEvent::Stopped { profile_id });
-            let _ = self.event_tx.send(RuntimeEvent::StateChanged {
+            self.emit(RuntimeEvent::Stopped { profile_id });
+            self.emit(RuntimeEvent::StateChanged {
                 profile_id,
                 state: RuntimeState::Stopped,
             });
         } else {
             self.set_snapshot_state(profile_id, RuntimeState::Stopped);
-            let _ = self.event_tx.send(RuntimeEvent::Stopped { profile_id });
-            let _ = self.event_tx.send(RuntimeEvent::StateChanged {
+            self.emit(RuntimeEvent::Stopped { profile_id });
+            self.emit(RuntimeEvent::StateChanged {
                 profile_id,
                 state: RuntimeState::Stopped,
             });
@@ -626,16 +637,46 @@ impl RuntimeSupervisor {
                 message: message.clone(),
             };
             self.set_snapshot_state(profile_id, state.clone());
-            let _ = self.event_tx.send(RuntimeEvent::Crashed {
+            self.emit(RuntimeEvent::Crashed {
                 profile_id,
                 component,
                 message,
             });
-            let _ = self
-                .event_tx
-                .send(RuntimeEvent::StateChanged { profile_id, state });
+            self.emit(RuntimeEvent::StateChanged { profile_id, state });
             // Always reclaim both components before publishing Stopped.
             self.stop_profile(profile_id);
+        }
+    }
+
+    /// Events are bounded best-effort notifications; snapshots are authoritative.
+    /// Never let a slow or disconnected UI stall child-process management.
+    fn emit(&self, event: RuntimeEvent) {
+        let id = event.profile_id();
+        if let Ok(mut snapshots) = self.snapshots.write()
+            && let Some(snapshot) = snapshots.get_mut(&id)
+        {
+            match &event {
+                RuntimeEvent::EffectiveLaunchArgs { args, .. } => {
+                    snapshot.effective_args = args.clone()
+                }
+                RuntimeEvent::Warning { message, .. } => {
+                    snapshot.last_warning = Some(message.clone())
+                }
+                RuntimeEvent::Crashed { message, .. }
+                | RuntimeEvent::StateChanged {
+                    state: RuntimeState::Failed { message },
+                    ..
+                } => {
+                    snapshot.last_error = Some(message.clone());
+                }
+                _ => {}
+            }
+        }
+        if self.event_tx.try_send(event).is_err()
+            && let Ok(mut snapshots) = self.snapshots.write()
+            && let Some(snapshot) = snapshots.get_mut(&id)
+        {
+            snapshot.dropped_events = snapshot.dropped_events.saturating_add(1);
         }
     }
 
@@ -666,6 +707,11 @@ impl RuntimeSupervisor {
     fn set_snapshot_state(&self, profile_id: ProfileId, state: RuntimeState) {
         if let Ok(mut lock) = self.snapshots.write() {
             if let Some(s) = lock.get_mut(&profile_id) {
+                if state == RuntimeState::Starting {
+                    s.last_error = None;
+                    s.last_warning = None;
+                    s.effective_args.clear();
+                }
                 if matches!(state, RuntimeState::Stopped | RuntimeState::Failed { .. }) {
                     s.browser_pid = None;
                     s.xray_pid = None;
@@ -686,14 +732,22 @@ impl RuntimeSupervisor {
                         socks_port: None,
                         started_at: None,
                         effective_args: Vec::new(),
+                        last_error: None,
+                        last_warning: None,
+                        dropped_events: 0,
                     },
                 );
             }
         }
     }
 
-    fn update_full_snapshot(&self, snapshot: RuntimeSnapshot) {
+    fn update_full_snapshot(&self, mut snapshot: RuntimeSnapshot) {
         if let Ok(mut lock) = self.snapshots.write() {
+            if let Some(previous) = lock.get(&snapshot.profile_id) {
+                snapshot.dropped_events = previous.dropped_events;
+                snapshot.last_error = previous.last_error.clone();
+                snapshot.last_warning = previous.last_warning.clone();
+            }
             lock.insert(snapshot.profile_id, snapshot);
         }
     }
@@ -816,6 +870,93 @@ mod tests {
         }
     }
     const XRAY: &str = "#!/usr/bin/env python3\nimport json,socket,sys,time\nc=json.load(open(sys.argv[3]))\ns=socket.socket()\ns.bind(('127.0.0.1',c['inbounds'][0]['port']))\ns.listen()\ntime.sleep(60)\n";
+
+    #[test]
+    fn full_event_queue_does_not_block_stop_crash_or_shutdown() {
+        let mut f = Fixture::new(true, true, XRAY);
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        f.supervisor.event_tx = sender;
+        f.events = receiver;
+        f.start();
+        assert_eq!(f.snapshot().state, RuntimeState::Running);
+        assert!(f.snapshot().dropped_events > 0);
+        assert!(!f.snapshot().effective_args.is_empty());
+        f.start();
+        assert!(f.snapshot().last_warning.is_some());
+        f.supervisor.stop_profile(f.params.profile.id);
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        assert!(!f.config().exists());
+        f.start();
+        assert!(f.snapshot().last_warning.is_none());
+        let child = f
+            .supervisor
+            .active_sessions
+            .get_mut(&f.params.profile.id)
+            .unwrap()
+            .xray
+            .as_mut()
+            .unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        f.supervisor.poll_active_sessions();
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        assert!(f.snapshot().last_error.as_ref().unwrap().contains("Xray"));
+        assert!(!f.config().exists());
+        f.start();
+        assert!(f.snapshot().last_error.is_none());
+        assert!(!f.supervisor.handle_command(RuntimeCommand::ShutdownAll));
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        assert!(f.supervisor.active_sessions.is_empty());
+        assert!(!f.config().exists());
+    }
+
+    #[test]
+    fn disconnected_event_receiver_preserves_failure_diagnostics() {
+        let mut f = Fixture::new(false, true, XRAY);
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        drop(receiver);
+        f.supervisor.event_tx = sender;
+        f.start();
+        let snapshot = f.snapshot();
+        assert!(matches!(snapshot.state, RuntimeState::Failed { .. }));
+        assert!(
+            snapshot
+                .last_error
+                .unwrap()
+                .contains("failed to spawn executable")
+        );
+        assert!(!snapshot.effective_args.is_empty());
+        assert!(snapshot.dropped_events >= 3);
+        assert!(!f.config().exists());
+    }
+
+    #[test]
+    fn startup_holds_distinct_ports_and_releases_them_on_planning_failure() {
+        use std::net::TcpListener;
+        use std::sync::Mutex;
+        struct CheckingPlanner(Arc<Mutex<Vec<u16>>>);
+        impl LaunchPlanner for CheckingPlanner {
+            fn build(&self, ctx: LaunchContext<'_>) -> Result<LaunchPlan, LaunchPlanError> {
+                let ports = vec![ctx.cdp_port, ctx.socks_port.unwrap()];
+                assert_ne!(ports[0], ports[1]);
+                for port in &ports {
+                    assert!(TcpListener::bind(("127.0.0.1", *port)).is_err());
+                }
+                *self.0.lock().unwrap() = ports;
+                Err(LaunchPlanError::InvalidArguments(
+                    "test planning failure".into(),
+                ))
+            }
+        }
+        let mut f = Fixture::new(false, true, XRAY);
+        let ports = Arc::new(Mutex::new(Vec::new()));
+        f.supervisor.planner = Box::new(CheckingPlanner(ports.clone()));
+        f.start();
+        assert!(matches!(f.snapshot().state, RuntimeState::Failed { .. }));
+        for port in ports.lock().unwrap().iter() {
+            assert!(TcpListener::bind(("127.0.0.1", *port)).is_ok());
+        }
+    }
 
     struct CommandProbe {
         sender: Sender<RuntimeCommand>,

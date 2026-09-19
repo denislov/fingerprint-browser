@@ -83,7 +83,21 @@ also cancels startup and shuts down the supervisor. Responsiveness is bounded by
 the current readiness probe (normally at most 100 ms), plus process cleanup;
 filesystem operations and process creation are still synchronous.
 
-Before declaring Phase 3 fully accepted, reserve launch ports through startup and
-wire runtime settings and services into the GPUI UI. Event consumers must keep
-draining the bounded event channel to avoid blocking the supervisor.
+CDP and SOCKS TCP ports are reserved by live loopback listeners during planning.
+Each reservation is released immediately before its child is spawned, and all
+error/cancellation paths release reservations automatically. External programs
+bind their own sockets, so a small release-to-bind race remains; readiness and
+child-exit checks handle detected startup failures rather than claiming atomic
+port handoff.
+
+Events are bounded, best-effort notifications sent without blocking. UI clients
+must reconcile from `RuntimeFacade::snapshot` on notifications, periodically and
+on reconnect, rather than replaying events as authoritative state. Snapshots retain
+effective arguments, the latest error/warning and a cumulative `dropped_events`
+counter, including when the receiver is full or disconnected. Diagnostics reset
+on a new start; stop preserves them. This is in-memory recovery, not a durable
+event history.
+
+Before declaring Phase 3 fully accepted, complete real Chromium acceptance and
+wire runtime settings and services into the GPUI UI.
 Phase 4 then adds version detection and fingerprint capability compatibility.
