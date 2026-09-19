@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_planner_with_proxy() {
-        let profile = test_profile();
+        let mut profile = test_profile();
         let core = test_core();
         let capabilities = CoreCapabilities::default_for_major(128);
         let planner = DefaultLaunchPlanner::new();
@@ -130,6 +130,8 @@ mod tests {
                 password: None,
             }),
         };
+
+        profile.proxy_id = Some(proxy.id);
 
         let ctx = LaunchContext {
             profile: &profile,

@@ -24,6 +24,46 @@ This package is the first architecture baseline for a personal Rust fingerprint-
 9. CDP is loopback-only and used for readiness/basic control, not an automation platform.
 10. Xray failure closes the corresponding Chromium session (fail closed).
 
-## Next implementation step
+## Implementation status
 
-Batch 1 should create the actual Cargo workspace and compile-only skeleton for all five crates, then implement the domain types, errors, runtime command/event types and the minimum GPUI window.
+Phases 0–2 have landed: the Cargo workspace, domain models, SQLite repositories,
+application services and direct Chromium supervisor. Phase 3 now has its first
+runtime implementation for SOCKS5/HTTP upstream proxies:
+
+- A per-profile Xray process starts before Chromium, after writing a loopback-only
+  SOCKS configuration and checking local TCP readiness.
+- Stop, startup rollback and detected component crashes reclaim both processes
+  and remove the temporary proxy configuration. Xray crashes close Chromium.
+- Runtime snapshots include the Xray PID and clear process/port fields on stop.
+- Other outbound variants remain stored domain types but are rejected at launch
+  until their transport/TLS configuration is implemented and tested.
+
+Configure `SupervisorComponents.xray_executable`, `runtime_dir` and
+`xray_ready_timeout` when constructing the supervisor. Defaults are `bin/xray`
+(`bin/xray.exe` on Windows), `data/runtime` and five seconds. Temporary configs
+live at `<runtime_dir>/<profile-id>/xray.json`; Unix files use mode `0600`.
+
+## Validation and next steps
+
+```sh
+cargo fmt --all --check
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings -A stable-features
+```
+
+The existing `.cargo/config.toml` injects two feature attributes that are already
+stable on the installed compiler; `-A stable-features` bypasses only those legacy
+warnings. Strict `-D warnings` alone currently fails on that existing configuration.
+
+Runtime lifecycle tests on Unix require Python 3 and permission to bind loopback
+ports. They use controlled child processes rather than a real browser/Xray pair.
+Real upstream connectivity, browser state persistence and Windows process-tree
+cleanup still need end-to-end acceptance testing.
+
+Before declaring Phase 3 fully accepted, make startup readiness nonblocking:
+the current serial supervisor delays active-session polling and stop commands
+while another profile is waiting for Xray/CDP. Also harden Unix process-tree
+termination (the existing controller kills only the parent PID), reserve launch
+ports through startup, and wire runtime settings and services into the GPUI UI.
+Phase 4 then adds version detection and fingerprint capability compatibility.

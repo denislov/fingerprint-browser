@@ -72,6 +72,8 @@ effective args log
 
 ## Phase 3 — Xray per-profile runtime
 
+进度（2026-09-19）：首批运行时实现已落地，包含 SOCKS5/HTTP 配置、Xray 启动与本地 TCP readiness、启动回滚、停止清理、双进程崩溃监控和快照清理，并有受控子进程回归测试。尚未完成真实 Chromium/Xray 验收；串行启动阻塞监控、Unix 进程树回收和端口预留仍需补强，详见 README。
+
 先支持：
 
 ```text

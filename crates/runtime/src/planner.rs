@@ -32,6 +32,16 @@ impl DefaultLaunchPlanner {
 
 impl LaunchPlanner for DefaultLaunchPlanner {
     fn build(&self, ctx: LaunchContext<'_>) -> Result<LaunchPlan, LaunchPlanError> {
+        if ctx.proxy.is_some() != ctx.socks_port.is_some()
+            || ctx.profile.proxy_id != ctx.proxy.map(|p| p.id)
+            || ctx.socks_port == Some(0)
+            || ctx.cdp_port == 0
+            || ctx.socks_port == Some(ctx.cdp_port)
+        {
+            return Err(LaunchPlanError::InvalidArguments(
+                "inconsistent proxy configuration or invalid ports".into(),
+            ));
+        }
         let mut args: Vec<OsString> = Vec::new();
 
         // 1. user-data-dir
@@ -40,6 +50,8 @@ impl LaunchPlanner for DefaultLaunchPlanner {
 
         // 2. remote debugging
         args.push(format!("--remote-debugging-port={}", ctx.cdp_port).into());
+
+        args.push("--remote-debugging-address=127.0.0.1".into());
 
         // 3. common launch flags
         args.push("--disable-session-crashed-bubble".into());
@@ -121,10 +133,13 @@ impl LaunchPlanner for DefaultLaunchPlanner {
         // Build XrayLaunchPlan if proxy & socks_port are present
         let xray = match (ctx.proxy, ctx.socks_port) {
             (Some(_), Some(socks_port)) => {
-                let executable = ctx
-                    .xray_executable
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("bin/xray.exe"));
+                let executable = ctx.xray_executable.clone().unwrap_or_else(|| {
+                    PathBuf::from(if cfg!(windows) {
+                        "bin/xray.exe"
+                    } else {
+                        "bin/xray"
+                    })
+                });
                 let config_dir = ctx.xray_config_dir.clone().unwrap_or_else(|| {
                     PathBuf::from("data/runtime").join(ctx.profile.id.to_string())
                 });
