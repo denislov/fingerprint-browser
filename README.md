@@ -100,6 +100,15 @@ tab of its own and reports every claim the browser did not reproduce, with a
 per-row badge so the answer is visible without selecting anything. A reading
 that fails is reported as unreadable, never as confirmed.
 
+Profiles can be edited, duplicated and deleted from the window. The editor is a
+form over the profile's fingerprint and window: name, seed (with a re-roll),
+brand and its version, platform and its version, language, accept language,
+timezone, CPU cores, window size, the WebRTC policy and which spoofing features
+to exclude. Saving runs the same domain rules storage enforces and keeps the
+dialog open with the reason when one fails; fields the form does not edit (core,
+proxy assignment, data directory, start target) are carried through untouched.
+Deleting asks first and keeps the profile's browser data on disk.
+
 - `crates/app/src/state.rs` holds the view-facing state (`AppState`). It owns no
   runtime state: every read goes through `RuntimeService::snapshot`, and a
   background tick drains `RuntimeEvent`s and reconciles snapshots every 200 ms

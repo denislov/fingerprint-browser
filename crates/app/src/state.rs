@@ -5,7 +5,7 @@
 //! into it. Runtime state is never owned here: every read goes through
 //! [`RuntimeService::snapshot`], which is the documented reconciliation path.
 
-use application::{AppError, NewProfile, ProfileService, RuntimeService};
+use application::{AppError, DeleteMode, NewProfile, ProfileService, RuntimeService};
 use domain::{
     BrowserProfile, CoreCapabilities, CoreId, FingerprintProfile, ProfileId, ProxyId, RuntimeState,
 };
@@ -398,6 +398,45 @@ impl AppState {
         Ok(())
     }
 
+    /// Writes an edited profile back, keeping the row list in step.
+    pub fn update_profile(&mut self, profile: BrowserProfile) -> Result<(), AppError> {
+        self.record(self.profiles.update(profile))?;
+        self.load_rows()?;
+        self.refresh_runtime();
+        Ok(())
+    }
+
+    /// Copies a profile under a new name, id, seed and data directory.
+    pub fn duplicate_profile(&mut self, id: ProfileId) -> Result<ProfileId, AppError> {
+        let name = format!("{} copy", self.next_profile_name());
+        let duplicated = self.record(self.profiles.duplicate(id, name))?;
+        self.load_rows()?;
+        self.refresh_runtime();
+        self.selected = Some(duplicated.id);
+        Ok(duplicated.id)
+    }
+
+    /// Removes a profile. Its browser data is kept on disk: deleting a profile
+    /// should not be the same decision as destroying its sessions.
+    pub fn delete_profile(&mut self, id: ProfileId) -> Result<(), AppError> {
+        self.record(self.profiles.delete(id, DeleteMode::KeepUserData))?;
+        self.forget_verification(id);
+        if self.selected == Some(id) {
+            self.selected = None;
+        }
+        self.load_rows()?;
+        self.refresh_runtime();
+        Ok(())
+    }
+
+    /// The stored profile behind a row, for the editor to start from.
+    pub fn profile(&self, id: ProfileId) -> Option<BrowserProfile> {
+        self.rows
+            .iter()
+            .find(|row| row.profile.id == id)
+            .map(|row| row.profile.clone())
+    }
+
     /// Claims the verification slot for a profile and assembles the job.
     ///
     /// Refuses when the profile is not running, because a fingerprint can only
@@ -644,6 +683,92 @@ mod tests {
         let core = core(CoreId::new());
         fixture.cores.save(&core).expect("save core");
         core.id
+    }
+
+    #[test]
+    fn editing_a_profile_writes_it_and_keeps_the_row_in_step() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture.state.create_profile("Before").expect("create");
+
+        let mut edited = fixture.state.profile(id).expect("the profile is loaded");
+        edited.name = "After".to_string();
+        edited.fingerprint.seed = 999;
+        edited.window.width = 1600;
+        fixture.state.update_profile(edited).expect("save");
+
+        let row = fixture
+            .state
+            .rows()
+            .iter()
+            .find(|row| row.profile.id == id)
+            .expect("the row is still listed");
+        assert_eq!(row.profile.name, "After");
+        assert_eq!(row.profile.fingerprint.seed, 999);
+        assert_eq!(row.profile.window.width, 1600);
+        assert_eq!(
+            fixture.profiles.get(id).expect("stored").unwrap().name,
+            "After",
+            "the edit reached storage, not just the view"
+        );
+    }
+
+    #[test]
+    fn a_refused_edit_leaves_the_stored_profile_alone() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture.state.create_profile("Kept").expect("create");
+
+        let mut broken = fixture.state.profile(id).expect("loaded");
+        broken.name = "   ".to_string();
+
+        assert!(fixture.state.update_profile(broken).is_err());
+        assert!(
+            fixture.state.notice().is_some_and(|notice| notice.error),
+            "the refusal is shown in the banner"
+        );
+        assert_eq!(
+            fixture.profiles.get(id).expect("stored").unwrap().name,
+            "Kept"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_gets_its_own_identity_and_is_selected() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture.state.create_profile("Source").expect("create");
+        fixture.state.select(id);
+
+        let copy = fixture.state.duplicate_profile(id).expect("duplicate");
+
+        assert_ne!(copy, id);
+        assert_eq!(fixture.state.selected_id(), Some(copy));
+        let source = fixture.state.profile(id).expect("source");
+        let duplicated = fixture.state.profile(copy).expect("copy");
+        assert_ne!(duplicated.fingerprint.seed, source.fingerprint.seed);
+        assert_ne!(duplicated.user_data_dir, source.user_data_dir);
+        assert!(duplicated.name.contains("Source") || duplicated.name.contains("copy"));
+    }
+
+    #[test]
+    fn deleting_a_profile_removes_it_and_forgets_its_reading() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+        fixture.state.finish_verification(id, Ok(Vec::new()));
+
+        fixture.state.delete_profile(id).expect("delete");
+
+        assert!(fixture.state.rows().is_empty(), "the row is gone");
+        assert!(fixture.state.profile(id).is_none());
+        assert!(
+            fixture.state.verification(id).is_none(),
+            "a deleted profile keeps no verification result"
+        );
+        assert_eq!(fixture.state.selected_id(), None);
     }
 
     /// A running profile with a debug port, ready to be verified.

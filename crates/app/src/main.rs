@@ -5,6 +5,7 @@
 //! the UI; commands go through [`RuntimeService`] into the supervisor channel.
 
 mod core_detect;
+mod editor;
 #[cfg(all(test, target_os = "linux"))]
 mod real_browser;
 mod state;

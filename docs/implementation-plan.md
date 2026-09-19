@@ -149,6 +149,24 @@ ShutdownAll；修复正常 Stop 强杀导致 Cookie 丢失的问题。详见 `ch
 仍未验证：地理位置（模型无字段，不发射开关；`--fingerprint-location` 在本环境产不出坐标，
 无法与"无定位源"区分），以及 `--fingerprinting-client-rects-noise` 在已有 seed 时测不出额外效果。
 
+### 第五批：Profile 编辑器（Phase 5 剩余页面的第一页）
+
+进度（2026-09-20）：已完成。Proxies / Browser Cores / Settings 仍为 `(soon)`。
+
+- `app::editor`：表单持有 profile 的可编辑副本（name / seed / brand (+version) / platform (+version) /
+  language / accept language / timezone / CPU cores / 窗口尺寸 / WebRTC 策略 / 排除伪装清单），
+  `build_profile()` 复用 domain 的 `validate_profile`+`validate_fingerprint`+`validate_window`，
+  失败返回原因而不是写入；表单不编辑的字段（core / proxy / data dir / start target）原样带过去。
+- `AppState`：`update_profile` / `duplicate_profile` / `delete_profile`（保留 user data）；
+  UI 侧 Edit/Duplicate/Delete 按钮 + 删除二次确认（`AlertDialog`）。
+- 对话框在后台线程之外同步执行，保存失败时**不关闭**并显示原因。
+
+本轮最值得记的 bug：**gpui-component 的 overlay 层必须由应用视图自己渲染**
+（`Root::render_dialog_layer` / `render_sheet_layer` / `render_notification_layer`）。
+`Root` 只渲染 inner view，所以漏了这三行的症状是"对话框永远弹不出来"，
+而且 headless 测试与真机都同样失败——这个 bug 是 headless UI 测试抓到的，
+不是真机截图抓到的（真机只会看到点了没反应）。
+
 ### 第四批：窗口内的指纹验证动作
 
 进度（2026-09-20）：已完成。
@@ -317,6 +335,24 @@ stopping or restarting a profile drops a stale reading
 a confirmed fingerprint is reported in the window
 disagreements are listed claim by claim
 every disagreement is reachable from a short panel
+```
+
+### Profile editor
+
+```text
+the form rebuilds the profile it was opened on
+every edited field reaches the rebuilt profile
+a field the engine cannot read is refused with a reason
+the domain rules still apply
+a new seed is different and still valid
+the engine specific defaults survive an edit
+editing a profile writes it and keeps the row in step
+a refused edit leaves the stored profile alone
+a duplicate gets its own identity and is selected
+deleting a profile removes it and forgets its reading
+a profile can be edited from the window
+a refused edit keeps the dialog open and shows why
+duplicating adds a profile and deleting removes one
 ```
 
 ### Fingerprint acceptance (real binary, opt-in)

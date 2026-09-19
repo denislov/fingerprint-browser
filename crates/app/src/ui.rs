@@ -4,12 +4,16 @@
 //! dirty; the snapshot itself stays the single source of truth, exactly as the
 //! runtime façade contract requires.
 
+use crate::editor::ProfileEditor;
 use crate::state::{AppState, ProfileRow, Verification};
 use crate::verifier::FingerprintVerifier;
 use crossbeam_channel::{Receiver, Sender};
 use domain::{ProfileId, RuntimeState};
 use gpui_kit::component::Disableable as _;
+use gpui_kit::component::Root;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::*;
+use gpui_kit::component::dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use runtime::{Discrepancy, RuntimeEvent};
@@ -31,6 +35,8 @@ const RECONCILE_EVERY: u64 = 5;
 const WARNING_WIDTH: f32 = 420.0;
 
 pub struct AppView {
+    /// The editor behind the open dialog, if any.
+    editor: Option<Entity<ProfileEditor>>,
     verifier: Arc<dyn FingerprintVerifier>,
     verifications: Receiver<(ProfileId, Result<Vec<Discrepancy>, String>)>,
     verification_tx: Sender<(ProfileId, Result<Vec<Discrepancy>, String>)>,
@@ -50,6 +56,7 @@ impl AppView {
         // worker thread and reports back through this channel.
         let (verification_tx, verifications) = crossbeam_channel::unbounded();
         Self {
+            editor: None,
             verifier,
             verifications,
             verification_tx,
@@ -69,6 +76,12 @@ impl AppView {
     #[cfg(test)]
     pub fn state_mut(&mut self) -> &mut AppState {
         &mut self.state
+    }
+
+    /// The editor behind the open dialog, for tests that type into it.
+    #[cfg(test)]
+    pub fn editor(&self) -> Option<Entity<ProfileEditor>> {
+        self.editor.clone()
     }
 
     /// Load storage once, then keep reconciling from snapshots in the background.
@@ -146,6 +159,132 @@ impl AppView {
         received
     }
 
+    /// Opens the editor for a profile and saves it through the dialog.
+    fn on_edit(&mut self, id: ProfileId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self.state.profile(id) else {
+            self.state
+                .push_notice(format!("profile {id} is no longer there"), true);
+            cx.notify();
+            return;
+        };
+        let editor = cx.new(|cx| ProfileEditor::new(&profile, window, cx));
+        self.editor = Some(editor.clone());
+        let view = cx.entity().downgrade();
+        let accepted = editor.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let editor = editor.clone();
+            let view = view.clone();
+            let accepted = accepted.clone();
+            dialog
+                .title("Edit profile")
+                .w(px(760.0))
+                .content({
+                    let editor = editor.clone();
+                    move |content, _, _| content.child(editor.clone())
+                })
+                // `Dialog` renders its own footer, not `button_props`; the
+                // confirm button carries the id the tests click.
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                        )
+                        .child(DialogAction::new().child(Button::new("ok").label("Save"))),
+                )
+                .on_ok(move |_, _, cx| {
+                    match editor.read(cx).build_profile(cx) {
+                        Ok(profile) => {
+                            let saved = view
+                                .update(cx, |view, _| match view.state.update_profile(profile) {
+                                    Ok(()) => {
+                                        view.state.push_notice("Saved.", false);
+                                        true
+                                    }
+                                    Err(error) => {
+                                        view.state.push_notice(error.to_string(), true);
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false);
+                            if saved {
+                                accepted.update(cx, |editor, cx| {
+                                    editor.set_error(None);
+                                    cx.notify();
+                                });
+                            } else {
+                                accepted.update(cx, |editor, cx| {
+                                    editor.set_error(Some(
+                                        "the profile could not be saved".to_string(),
+                                    ));
+                                    cx.notify();
+                                });
+                            }
+                            saved
+                        }
+                        Err(error) => {
+                            // Keep the dialog open: the form is where the
+                            // mistake is, not the window behind it.
+                            accepted.update(cx, |editor, cx| {
+                                editor.set_error(Some(error));
+                                cx.notify();
+                            });
+                            false
+                        }
+                    }
+                })
+        });
+    }
+
+    fn on_duplicate(&mut self, id: ProfileId, cx: &mut Context<Self>) {
+        match self.state.duplicate_profile(id) {
+            Ok(_) => self.state.push_notice("Copied the profile.", false),
+            Err(error) => self.state.push_notice(error.to_string(), true),
+        }
+        cx.notify();
+    }
+
+    /// Deleting asks first: it removes the profile, not its sessions on disk.
+    fn on_delete(&mut self, id: ProfileId, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .state
+            .profile(id)
+            .map(|profile| profile.name)
+            .unwrap_or_else(|| id.to_string());
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            alert
+                .title("Delete profile")
+                .description(format!(
+                    "\"{name}\" will be removed from the list. Its browser data stays on disk.",
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Delete")
+                        .cancel_text("Keep")
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            if let Some(view) = view.upgrade() {
+                                view.update(cx, |view, cx| {
+                                    match view.state.delete_profile(id) {
+                                        Ok(()) => {
+                                            view.state.push_notice("Deleted the profile.", false)
+                                        }
+                                        Err(error) => {
+                                            view.state.push_notice(error.to_string(), true)
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                            true
+                        })
+                        .on_cancel(|_, _, _| true),
+                )
+        });
+        cx.notify();
+    }
+
     fn on_verify(&mut self, id: ProfileId, cx: &mut Context<Self>) {
         let job = match self.state.begin_verification(id) {
             Ok(job) => job,
@@ -212,7 +351,12 @@ impl AppView {
 }
 
 impl Render for AppView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The overlay layers live above the view and are rendered by the view
+        // itself: without these, a dialog can be opened and never appear.
+        let dialogs = Root::render_dialog_layer(window, cx);
+        let sheets = Root::render_sheet_layer(window, cx);
+        let notifications = Root::render_notification_layer(window, cx);
         let rows = self.state.rows().to_vec();
         let selected = self.state.selected().cloned();
         let selected_id = self.state.selected_id();
@@ -264,6 +408,9 @@ impl Render for AppView {
                         .child(details_panel(selected.as_ref(), verification, cx)),
                 ),
             )
+            .children(dialogs)
+            .children(sheets)
+            .children(notifications)
     }
 }
 
@@ -690,6 +837,58 @@ fn details_panel(
                                     this.on_verify(id, cx);
                                 }
                             })),
+                        )
+                        .child(
+                            Button::new(
+                                selected
+                                    .map(|row| format!("edit-{}", row.profile.id))
+                                    .unwrap_or_else(|| "edit".to_string()),
+                            )
+                            .label("Edit")
+                            .outline()
+                            .disabled(selected.is_none())
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    if let Some(row) = this.state.selected() {
+                                        let id = row.profile.id;
+                                        this.on_edit(id, window, cx);
+                                    }
+                                },
+                            )),
+                        )
+                        .child(
+                            Button::new(
+                                selected
+                                    .map(|row| format!("duplicate-{}", row.profile.id))
+                                    .unwrap_or_else(|| "duplicate".to_string()),
+                            )
+                            .label("Duplicate")
+                            .outline()
+                            .disabled(selected.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(row) = this.state.selected() {
+                                    let id = row.profile.id;
+                                    this.on_duplicate(id, cx);
+                                }
+                            })),
+                        )
+                        .child(
+                            Button::new(
+                                selected
+                                    .map(|row| format!("delete-{}", row.profile.id))
+                                    .unwrap_or_else(|| "delete".to_string()),
+                            )
+                            .label("Delete")
+                            .outline()
+                            .disabled(selected.is_none())
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    if let Some(row) = this.state.selected() {
+                                        let id = row.profile.id;
+                                        this.on_delete(id, window, cx);
+                                    }
+                                },
+                            )),
                         ),
                 ),
         )
@@ -1195,6 +1394,147 @@ mod tests {
             );
         })
         .unwrap();
+    }
+
+    /// Opens the window the way the component library's own dialog tests do:
+    /// a `VisualTestContext` can park the async work a dialog needs to mount.
+    fn window<'a>(
+        cx: &'a mut TestAppContext,
+        view: &gpui_kit::Entity<AppView>,
+    ) -> &'a mut gpui_kit::VisualTestContext {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (_, cx) = cx.add_window_view({
+            let view = view.clone();
+            move |window, cx| Root::new(view, window, cx)
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx
+    }
+
+    /// Draws enough frames for a layer to mount and then paint at rest.
+    fn settle(cx: &mut gpui_kit::VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_profile_can_be_edited_from_the_window(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+
+        cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("editor-name").is_some()),
+            "the editor opens on the profile"
+        );
+
+        let editor = view
+            .read_with(cx, |view, _| view.editor())
+            .expect("an editor");
+        let name = editor.read_with(cx, |editor, _| editor.name_input());
+        cx.update(|window, cx| {
+            name.update(cx, |state, cx| state.set_value("Renamed", window, cx));
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        let row = view.read_with(cx, |view, _| view.state().rows()[0].clone());
+        assert_eq!(row.profile.name, "Renamed");
+        assert!(
+            cx.update(|window, _| window.try_find("editor-name").is_none()),
+            "saving closes the dialog"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_edit_keeps_the_dialog_open_and_shows_why(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        let name_before = view.read_with(cx, |view, _| view.state().rows()[0].profile.name.clone());
+
+        cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
+        settle(cx);
+
+        let editor = view
+            .read_with(cx, |view, _| view.editor())
+            .expect("an editor");
+        let seed = editor.read_with(cx, |editor, _| editor.seed_input());
+        cx.update(|window, cx| {
+            seed.update(cx, |state, cx| state.set_value("not a number", window, cx));
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("editor-name").is_some()),
+            "a refused save leaves the form open"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("editor-error").is_some()),
+            "the form says what is wrong"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().rows()[0].profile.name.clone()),
+            name_before,
+            "nothing was written"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn duplicating_adds_a_profile_and_deleting_removes_one(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+
+        cx.update(|window, cx| window.click(format!("duplicate-{id}"), cx));
+        settle(cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().rows().len()),
+            2,
+            "the copy is listed"
+        );
+        let copy = view
+            .read_with(cx, |view, _| view.state().selected_id())
+            .expect("selected");
+        assert_ne!(copy, id);
+
+        cx.update(|window, cx| window.click(format!("delete-{copy}"), cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("ok").is_some()),
+            "deleting asks first"
+        );
+
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().rows().len()),
+            1,
+            "only the copy was removed"
+        );
+        assert!(
+            view.read_with(cx, |view, _| view.state().profile(id).is_some()),
+            "the original is untouched"
+        );
     }
 
     #[gpui_kit::test]
