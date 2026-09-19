@@ -162,7 +162,25 @@ Deleting asks first and keeps the profile's browser data on disk.
   `PATH`. Phase 4 owns moving real version detection into the runtime crate.
 - Closing the last window and the Quit action both exit through `main`, which
   sends `ShutdownAll` and waits up to five seconds for the supervisor to reclaim
-  every child process.
+  every child process. `SIGINT`, `SIGTERM` and `SIGHUP` take the same exit: the
+  handler writes one byte to a self-pipe and a thread of its own asks the
+  supervisor for `ShutdownAll`, so a service manager stopping this process, a
+  terminal going away and the Quit button all reclaim the browsers it started.
+- Every running session writes a record next to its temporary Xray config
+  (`data/runtime/<profile-id>/session.json`), naming the browser, the Xray, their
+  ports, the arguments they were started with and the kernel start time of each.
+  A run that is killed outright - `SIGKILL`, a crash, a window destroyed without
+  the close protocol - leaves those browsers running and that record behind; the
+  next start reads it back before the window opens and stops what it finds, and
+  says so in the banner. Nothing is killed on a pid alone: the record is only
+  acted on when the live process is still the instance it captured (same pid and
+  kernel start time), or - where a platform cannot report a start time - when its
+  command line still carries the recorded arguments as the tail of the argument
+  vector, or as the end of the single string a process like Chromium leaves
+  behind when it rewrites `/proc/self/cmdline`. A record that cannot be
+  identified is reported and left alone, its process and its temporary config
+  included. `RUST_LOG=info` is what shows the reclaim; the subscriber otherwise
+  reports errors only.
 
 Runtime configuration for the window:
 
@@ -180,12 +198,12 @@ FP_BROWSER_CHROMIUM_BIN=/absolute/path/to/chrome cargo run -p app
 Known limitations:
 
 - A window destroyed by another X client without the close protocol (for example
-  `xdotool windowclose`) may leave the process running with its browsers. The
-  supported exits are the window manager's close button and the in-window Quit
-  action.
-- Terminating the process directly (`SIGTERM`, `SIGKILL`) skips the reclaim path
-  for the same reason: only the graceful exit asks the supervisor for
-  `ShutdownAll`. Signal handling is not implemented yet.
+  `xdotool windowclose`) may leave the process running, and it will not run the
+  exit path a signal or the Quit action runs. What it leaves behind is no longer
+  lost, though: the next start finds the session records and reclaims it.
+- Reclaiming trusts a Linux-only reader for process identity (`/proc/<pid>/stat`
+  and `/proc/<pid>/cmdline`). On a platform that cannot be asked, records are
+  reported as unreadable and nothing is killed, rather than guessed at.
 
 ## Validation and next steps
 
@@ -215,7 +233,20 @@ XRAY_BIN=/absolute/path/to/xray cargo test -p runtime --test xray_real -- --igno
 
 The binary is not bundled. Linux acceptance with real ungoogled-chromium
 148.0.7778.215 and Xray 26.2.6 now covers profile isolation, cookie persistence,
-authenticated local proxy forwarding, crash recovery and shutdown. See
+authenticated local proxy forwarding, crash recovery and shutdown, plus the two
+paths that used to end with a browser nobody knew about:
+
+```sh
+# a start cancelled while a real browser is waiting for CDP readiness
+# a real browser left running by a killed run, stopped from its session record
+CHROMIUM_BIN=/absolute/path/to/chrome \
+XRAY_BIN=/absolute/path/to/xray \
+cargo test -p runtime --test chromium_real -- --ignored --test-threads=1
+```
+
+Both were also walked through the window by hand: start a profile, `kill -9` the
+app, and the next start reclaims the browser and says so in the banner; with a
+browser running, `kill -TERM` the app and it exits with nothing left behind. See
 [the acceptance report](docs/chromium-acceptance.md) for reproduction and limits.
 Actual remote upstreams and Windows process-tree cleanup still need acceptance.
 

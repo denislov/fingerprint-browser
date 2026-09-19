@@ -121,6 +121,7 @@ Running
   -> terminate browser tree if needed
   -> stop Xray
   -> delete temp Xray config
+  -> delete session record
   -> clear RuntimeSession
   -> Stopped
 ```
@@ -139,7 +140,6 @@ CDP 不可用时直接强制回收；崩溃和启动回滚仍立即强制回收�
 ---
 
 ## 5. Crash handling
-
 ### Browser crash
 
 如果 Chromium 在 `Running` 状态意外退出：
@@ -172,6 +172,39 @@ Running
 
 ---
 
+## 5b. Startup reclaim（上一次运行留下的进程）
+
+被直接杀死（`SIGKILL`、崩溃、非 WM 协议销毁窗口）的进程无法回收自己的子进程，
+所以每个 `Running` 会话都会把自己的子进程写进 `data/runtime/<profile-id>/session.json`：
+
+```text
+profile_id / cdp_port / socks_port / started_at
+browser: pid, executable, args, start_time
+xray:    pid, executable, args, start_time   (optional)
+```
+
+下一次启动在窗口打开之前、在接受任何命令之前读回这些记录：
+
+```text
+reclaim_orphans()
+  -> 读取 session.json
+  -> 判定每个子进程：Gone / Ours / 不可识别
+  -> Ours: 先 SIGTERM 进程组，宽限期内未退出再 SIGKILL
+  -> Gone: 清理残留的 xray.json（里面是上游凭据）
+  -> 不可识别: 不动它，记录保留，由 UI 上报
+  -> 停止后删除记录与 xray.json
+```
+
+**pid 不是证据**：pid 会在两次运行之间被回收给无关进程。只有满足以下条件才发信号：
+
+- 记录中的 `start_time` 与存活进程的 `/proc/<pid>/stat` 一致（同一进程实例）；或
+- 无法读取 `start_time` 时，存活进程的命令行仍以记录中的参数结尾——包括
+  被进程重写成单个字符串的 `/proc/self/cmdline`（Chromium 就是如此）。
+
+无法识别的记录一律上报而不是猜测：杀错别人的进程比留下我们自己的更糟。
+
+---
+
 ## 6. Application shutdown
 
 桌面应用退出：
@@ -181,11 +214,16 @@ ShutdownAll
   -> reject new Start commands
   -> stop all active Chromium sessions
   -> stop all Xray processes
+  -> remove session records and temporary Xray configs
   -> flush storage/log
   -> exit GPUI application
 ```
 
 不得直接依赖父进程退出后由 OS“顺便”回收全部子进程。
+
+`SIGINT` / `SIGTERM` / `SIGHUP` 与 Quit 动作走同一条路径：信号处理函数只向 self-pipe
+写一个字节（异步信号安全），由专用线程请求 `ShutdownAll`、等待宽限期并退出 0。
+`SIGKILL` 无法被处理，它留下的进程由下一次启动的 reclaim 兜底（见 5b）。
 
 ---
 
@@ -244,14 +282,14 @@ xray config path = runtime/sessions/<profile>/xray.json
 
 ```text
 data/runtime/<profile-id>/
-├── xray.json
+├── session.json   # 当前会话的子进程记录，停止/回收后删除
+├── xray.json      # 临时凭据，停止/回收后删除
 ├── xray.log
 └── browser.log   (optional)
 ```
 
 它是临时运行态，不属于 user-data-dir。
-
-启动前可清理残留；停止后可保留最新日志但删除敏感临时凭据。
+停止后删除敏感临时凭据与 session record；下一次启动先按 session record 回收残留进程（见 5b）。
 
 ---
 
@@ -364,3 +402,4 @@ Xray 也可以放入独立 Job，或由同一 RuntimeSession 管理。
 6. 动态端口不持久化到 Profile。
 7. UI 状态以 Supervisor snapshot 为准；event 仅作非阻塞更新通知，需定期和重连时读取快照。
 8. 事件队列满或断开时允许丢弃通知，快照保留最后错误、警告、启动参数和累计 dropped_events；停止不清空诊断，下次启动清空诊断。
+9. session record 中的 pid 只有在进程身份（同一 `start_time`，或无该信息时命令行尾部匹配）成立时才可被发信号；无法识别时保留记录并上报。

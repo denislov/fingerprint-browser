@@ -353,15 +353,69 @@ Settings            （已完成，第八批）
 Runtime Details     （已完成）
 ```
 
-仍未实现（都是"锦上添花"，不是缺口）：
+仍未实现（都是“锦上添花”，不是缺口）：
 
 - 行内 toast（目前用横幅 + 对话框内错误行）；
 - open user-data-dir（打开 profile 的数据目录）；
 - recent error/log 面板（目前只有 Runtime Details 里的 last error/warning）。
 
 已知限制：非 WM 关闭协议直接销毁窗口（如 `xdotool windowclose`）时，gpui 可能不感知
-窗口已消失，进程会继续运行并持有浏览器；支持的退出方式是窗口管理器关闭按钮与窗口内
-Quit 按钮。该问题在 gpui 的 X11 后端，不在本仓库接线代码。
+窗口已消失，进程会继续运行并持有浏览器；支持的退出方式是窗口管理器关闭按钮、窗口内
+Quit 按钮，以及 `SIGINT`/`SIGTERM`/`SIGHUP`（第十批）。该问题在 gpui 的 X11 后端，
+不在本仓库接线代码；它留下的子进程由下一次启动的 reclaim 兜底。
+
+---
+
+### 第十批：进程生命周期与退出路径的硬化
+
+进度（2026-09-20）：已完成。**这一批消掉的是“会真丢状态”的缺口，不是补页面。**
+
+- `runtime::journal`（新）：每个 `Running` 会话把子进程写进
+  `data/runtime/<profile-id>/session.json`（临时文件 + rename 原子落盘，0600），
+  停止与回收后删除。记录带 pid、可执行文件、启动参数，以及**从活进程读回**的
+  `/proc/<pid>/stat` start time。
+- `RuntimeSupervisor::reclaim_orphans()`：窗口打开前、接受任何命令前调用，读回记录并
+  回收上一次运行留下的进程：先 `SIGTERM` 进程组（让 Chromium 落盘），宽限期内没退出
+  再 `SIGKILL`；顺手删掉残留的 `xray.json`（里面是上游凭据）。进程已不在的记录也会被清掉。
+- `process::ProcessInspector` / `ProcessReading`：**pid 不是证据**。判定分三态
+  （Absent / Unknown / Live），绝不把“平台问不到”与“进程不在了”合并——在不能读
+  `/proc` 的平台上，合并会让每条记录都像是死进程的记录，回收就会删掉唯一线索并把
+  浏览器留在那里。身份成立的条件是同一 pid 的**同一 start time**；读不到 start time 时
+  退回命令行匹配。
+- `app::signal`（新）：`SIGINT`/`SIGTERM`/`SIGHUP` 与 Quit 走同一条退出路径。
+  处理函数只做异步信号安全的事（向 self-pipe 写一个字节），由专用线程请求 `ShutdownAll`、
+  等宽限期、`exit(0)`；pipe 两端都设 `FD_CLOEXEC`，子进程不会继承。安装失败只告警不致命。
+- `app::reclaim`（新）：把回收报告翻成一行横幅文案（纯函数 + 测试），并同时写日志。
+  横幅只有一行，所以回收提示**最后**入栈：设置/内核问题在自己的页面上还在，而被停掉的
+  浏览器只有这一处会说。
+- 测试卫生：`journal` 的测试助手对 `ETXTBSY` 做有界重试（“刚写完的可执行文件立刻 exec”
+  是内核/glibc 已知竞态，glibc 的 `execvp` 也这么做；生产从不写自己要启动的二进制）。
+
+**这一批又被真机推翻了两个假设**（都是“测试绿但断言在空转”那一类）：
+
+1. **Chromium 会重写自己的 `/proc/self/cmdline`**，整条命令行变成一个字段（没有 NUL 分隔）。
+   按“参数向量尾部匹配”识别记录，会把明明是自己的浏览器判成陌生人而拒杀。现在身份 = 同一
+   pid 的同一 start time（内核不会把回收的 pid 配上死者的 start time），命令行只在读不到
+   start time 时兜底，并且同时接受两种形状（分离字段的尾部 / 单字符串的结尾）。
+2. **验收探针自己写错了**：它把 profile 目录当裸词找，而浏览器持有的是
+   `--user-data-dir=<dir>`，于是“没有浏览器残留”在什么都没看的情况下永远是绿的。改成按 flag
+   匹配后，孤儿回收测试才真的在断言。
+
+真机验收（有证据）：真实 148 上跑 `chromium_real` 3/3（含新增的“启动中途取消”与
+“被杀死的一轮留下的浏览器被回收”）、`xray_real` 1/1、`fingerprint_real` 两者各 10/10
+（148 与 142）。窗口里又走了一遍完整链路：新建 profile → Start（真实 Chromium + 落盘记录）
+→ `kill -9` app（浏览器存活、记录还在）→ 重新启动 app，日志与横幅均出现
+`a previous run left 1 browser session running; Profile 1 (browser pid 496461)`，浏览器与记录都被清掉；
+另一次在浏览器运行时 `kill -TERM` app，日志出现
+`received signal 15; reclaiming child processes before exiting`，退出后无残留浏览器、无残留记录。
+
+顺手清掉的技术债：删除了 `.cargo/config.toml`（`RUSTC_BOOTSTRAP` + 向所有 crate 注入
+`feature(cold_path, atomic_try_update)`）；两个 feature 自 Rust 1.95 已稳定，本仓库无人使用，
+依赖图里也没有 nightly 需求（已在 rustc 1.96 上验证）。因此 `clippy --workspace --all-targets -- -D warnings`
+成为真正的门禁，不再需要 `-A stable-features`。
+
+仍留在这一批之外：Windows 的进程树回收与验收（现在的 reclaim 依赖 `/proc`，在 Windows 上
+只会如实报告“无法识别”），以及真实远端代理出口的验收。
 
 ---
 

@@ -41,6 +41,36 @@ so lifecycle assertions use runtime snapshots.
 - Unexpected browser termination is detected and its group is reclaimed.
 - ShutdownAll closes the remaining browser and reclaims its process group.
 
+### Added 2026-09-20: cancellation and reclaim
+
+- A start cancelled while a real browser is waiting for CDP readiness leaves
+  nothing running and no session record behind. The test moves the debugging
+  endpoint off the port the supervisor probes, so the browser is up and the start
+  is provably still inside the readiness wait when the stop arrives.
+- A browser left running by a run that was killed is stopped from its session
+  record alone, and the record and temporary config are removed with it. The test
+  spawns a real Chromium the way the launch planner would, writes the record the
+  way the supervisor does, and drops the handle: nothing in the test process is
+  holding the browser when the reclaim runs.
+- Walked through the window as well, on the same build: a profile was started,
+  the app was killed with `SIGKILL`, and the next start reclaimed the browser
+  (`INFO app: a previous run left 1 browser session running; Profile 1 (browser
+  pid 496461)` and the same sentence in the banner). With a browser running,
+  `SIGTERM` on the app made it exit through `ShutdownAll`, leaving no browser and
+  no record behind.
+
+### Defects found by that acceptance
+
+- Chromium overwrites `/proc/self/cmdline` with a single string holding the whole
+  command line, so the arguments a browser was started with are not separate
+  fields any more. Identifying a recorded process by comparing its argument
+  vector tail refused to reclaim a browser that was plainly ours. Identity is now
+  the kernel start time of the same pid, with the command line as the fallback
+  when a start time cannot be read - in both shapes.
+- The acceptance probe looked for a profile directory as a bare word, but a
+  browser holds it as `--user-data-dir=<dir>`. "No browser is left" was passing
+  without looking at anything; it now matches the flag.
+
 ## Defect found and fixed
 
 The initial run lost a freshly set persistent cookie after Stop/Start. Stop used
@@ -55,8 +85,12 @@ kill.
 ## Limits
 
 This certifies the tested Linux runtime path with **ungoogled-chromium**, not
-fingerprint spoofing. Passing a `--fingerprint` argument does not prove that this
-browser implements it. Fingerprint-chromium capability detection/certification,
-remote proxy endpoints, visible GPUI operation, Windows/macOS cleanup and real
-browser startup cancellation remain separate acceptance work. Startup cancellation
-is currently covered by the controlled-child regression suite.
+fingerprint spoofing: passing a `--fingerprint` argument does not prove that this
+browser implements it. What the fingerprint layer claims is certified separately,
+by reading the surface back out of the fingerprint-chromium builds (see
+`docs/fingerprint-matrix.md`), not by this report.
+
+Remote proxy endpoints, Windows/macOS process-tree cleanup and visible GPUI
+operation remain separate acceptance work. Process identity for reclaim is read
+from `/proc`, so that path is Linux-only today: on a platform that cannot be
+asked, records are reported as unreadable and nothing is killed.

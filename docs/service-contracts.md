@@ -277,8 +277,48 @@ Windows 后期应使用 Job Object；v1 若先做主进程终止，也应把“�
 ```rust
 pub trait ProcessTreeController: Send + Sync {
     fn terminate_tree(&self, pid: u32) -> Result<(), ProcessError>;
+
+    /// 回收孤儿时先请求退出（Unix：信号进程组），默认实现不做任何事。
+    fn request_tree_exit(&self, pid: u32) -> Result<(), ProcessError> {
+        Ok(())
+    }
 }
 ```
+
+---
+
+## 12b. ProcessInspector / session journal
+
+pid 不是证据，所以识别一个记录中的进程需要单独的读回接口，并且必须把
+“平台问不到”与“进程不在了”分开（合并会让记录在不能读 `/proc` 的平台上全被判成死进程，
+回收因此删掉唯一线索并留下孤儿进程）。
+
+```rust
+pub enum ProcessReading {
+    Absent,                              // pid 未被占用或进程已退出
+    Unknown,                             // 平台无法回答，或进程仍在 fork 与 execve 之间
+    Live(ProcessIdentity),               // argv + start_time
+}
+
+pub trait ProcessInspector: Send + Sync {
+    fn inspect(&self, pid: u32) -> ProcessReading;
+}
+```
+
+会话记录（`runtime::journal`）与回收：
+
+```text
+SessionRecord { profile_id, cdp_port, socks_port, started_at,
+                browser: ProcessRecord, xray: Option<ProcessRecord> }
+ProcessRecord { pid, executable, args, start_time }
+
+journal::write / read / remove / list
+journal::reclaim(runtime_dir, inspector, tree, graceful) -> ReclaimReport
+journal::confirm(record, inspector) -> Option<String>
+```
+
+`ReclaimReport`（reclaimed / unresolved / stale）是运行时返回的结构化结果，
+面向用户的一行文案由 UI 层生成（它才知道 profile 名字）。
 
 ---
 
@@ -295,6 +335,7 @@ CapabilityError
 ProxyError
 LaunchPlanError
 ProcessError
+JournalError
 CdpError
 RuntimeError
 AppError
