@@ -10,7 +10,10 @@ mod editor;
 mod proxy_editor;
 #[cfg(all(test, target_os = "linux"))]
 mod real_browser;
+mod reclaim;
 mod settings;
+#[cfg(unix)]
+mod signal;
 mod state;
 mod ui;
 mod verifier;
@@ -27,7 +30,7 @@ use runtime::{
 };
 use state::AppState;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use storage::{CoreRepository, ProfileRepository, ProxyRepository, SqliteStorage};
 use ui::AppView;
@@ -69,7 +72,13 @@ fn main() {
         Arc::clone(&snapshots),
         components,
     );
-    let supervisor_thread = supervisor.spawn();
+    // Before the window opens and before any command can queue: a previous run
+    // that was killed left browsers behind, and one of them may still hold the
+    // profile and the debugging port this run is about to want.
+    let reclaim = supervisor.reclaim_orphans();
+    // The supervisor thread is the only owner of the child handles, so the
+    // shutdown that a signal asks for has to be able to take it from here.
+    let supervisor_thread = Arc::new(Mutex::new(Some(supervisor.spawn())));
 
     let facade: Arc<dyn RuntimeFacade> = Arc::new(ChannelRuntimeFacade::new(
         channels.command_tx.clone(),
@@ -107,6 +116,44 @@ fn main() {
     }
     if let Some((message, error)) = settings_notice {
         app_state.push_notice(message, error);
+    }
+    // Last, so it wins the single banner line: a settings or core problem is
+    // still on its own page afterwards, while a browser that was stopped at
+    // startup is reported nowhere else.
+    if let Some((message, error)) = reclaim::reclaim_notice(&reclaim, |profile_id| {
+        profile_repo
+            .get(profile_id)
+            .ok()
+            .flatten()
+            .map(|profile| profile.name)
+    }) {
+        // The banner is one line; the log is what a headless run has.
+        if error {
+            tracing::warn!("{message}");
+        } else {
+            tracing::info!("{message}");
+        }
+        app_state.push_notice(message, error);
+    }
+
+    #[cfg(unix)]
+    let _signals = signal::on_shutdown_request({
+        let command_tx = channels.command_tx.clone();
+        let supervisor_thread = Arc::clone(&supervisor_thread);
+        move |signal| {
+            tracing::info!("received signal {signal}; reclaiming child processes before exiting");
+            let thread = supervisor_thread
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            shutdown(&command_tx, thread);
+            std::process::exit(0);
+        }
+    });
+    #[cfg(unix)]
+    if let Err(error) = &_signals {
+        // Not fatal: the window still closes through its own exit paths.
+        tracing::warn!("signal handlers could not be installed: {error}");
     }
 
     gpui_kit::application().run(move |cx| {
@@ -154,15 +201,27 @@ fn main() {
         .detach();
     });
 
-    shutdown(&channels.command_tx, supervisor_thread);
+    shutdown(
+        &channels.command_tx,
+        supervisor_thread
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take()),
+    );
 }
 
 /// Ask the supervisor to reclaim every child, then give it a bounded moment.
+/// The handle arrives in an `Option` because a signal may have taken it first.
 fn shutdown(
     command_tx: &crossbeam_channel::Sender<RuntimeCommand>,
-    supervisor_thread: std::thread::JoinHandle<()>,
+    supervisor_thread: Option<std::thread::JoinHandle<()>>,
 ) {
     let _ = command_tx.send(RuntimeCommand::ShutdownAll);
+
+    let Some(supervisor_thread) = supervisor_thread else {
+        // Another exit path is already reclaiming; do not wait twice.
+        return;
+    };
 
     let deadline = Instant::now() + SHUTDOWN_GRACE;
     while !supervisor_thread.is_finished() && Instant::now() < deadline {

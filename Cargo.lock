@@ -195,6 +195,7 @@ dependencies = [
  "crossbeam-channel",
  "domain",
  "gpui-kit",
+ "libc",
  "runtime",
  "serde",
  "serde_json",
