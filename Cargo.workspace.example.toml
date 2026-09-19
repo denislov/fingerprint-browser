@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/domain",
+    "crates/storage",
+    "crates/runtime",
+    "crates/application",
+    "crates/app",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+# Dependency versions are intentionally not pinned in this architecture baseline.
+# Resolve current compatible releases when Batch 1 bootstraps the actual workspace.
+# Candidate dependencies:
+# serde, serde_json, uuid, thiserror, tracing, tracing-subscriber,
+# crossbeam-channel, rusqlite, ureq, gpui-kit.

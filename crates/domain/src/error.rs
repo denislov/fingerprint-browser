@@ -1,0 +1,37 @@
+use thiserror::Error;
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ValidationError {
+    #[error("profile name cannot be empty")]
+    EmptyProfileName,
+
+    #[error("proxy name cannot be empty")]
+    EmptyProxyName,
+
+    #[error("core name cannot be empty")]
+    EmptyCoreName,
+
+    #[error("invalid window dimensions: {width}x{height}, width and height must be greater than 0")]
+    InvalidWindowDimensions { width: u32, height: u32 },
+
+    #[error("invalid hardware concurrency: {0}, must be between 1 and 128")]
+    InvalidHardwareConcurrency(u8),
+
+    #[error("language cannot be empty")]
+    EmptyLanguage,
+
+    #[error("timezone cannot be empty")]
+    EmptyTimezone,
+
+    #[error("validation failed: {0}")]
+    Custom(String),
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum DomainError {
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+
+    #[error("domain error: {0}")]
+    Other(String),
+}
