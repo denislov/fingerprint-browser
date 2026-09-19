@@ -289,7 +289,7 @@ impl CoreRow {
             format!(
                 "{} · {}",
                 capabilities.generation_label(),
-                capabilities.noise_label()
+                capabilities.exclusion_label()
             )
         })
     }
@@ -1355,7 +1355,7 @@ mod tests {
         assert_eq!(rows[0].usage_label(), "not used");
         assert_eq!(
             rows[0].generation_label().as_deref(),
-            Some("Chrome 144+ · noise switches verified")
+            Some("Chrome 144+ · spoofing exclusions honoured")
         );
     }
 
@@ -1375,7 +1375,7 @@ mod tests {
         assert_eq!(rows[0].core.major, 128);
         assert_eq!(
             rows[0].generation_label().as_deref(),
-            Some("Chrome 143 and older · noise switches not offered")
+            Some("Chrome 143 and older · spoofing exclusions not honoured")
         );
     }
 
@@ -1437,7 +1437,7 @@ mod tests {
         assert_eq!(rows[0].core.major, 128);
         assert_eq!(
             rows[0].generation_label().as_deref(),
-            Some("Chrome 143 and older · noise switches not offered")
+            Some("Chrome 143 and older · spoofing exclusions not honoured")
         );
         assert!(
             fixture

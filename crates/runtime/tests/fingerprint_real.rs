@@ -33,6 +33,35 @@ impl LaunchPlanner for HeadlessPlanner {
     }
 }
 
+/// Pins the capability table, so a measurement does not depend on the table
+/// under test. The product's own table is what the measurement is compared
+/// with afterwards, never what produces the readings.
+struct FixedCapabilities(CoreCapabilities);
+
+impl CapabilityResolver for FixedCapabilities {
+    fn resolve(&self, _core: &BrowserCore) -> Result<CoreCapabilities, CapabilityError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// Adds raw switches to the launch line.
+///
+/// The capability table decides what the *product* emits. Measuring a switch on
+/// its own terms needs it added directly, so the answer does not depend on the
+/// very table under test - a table that wrongly says "supported" would
+/// otherwise hide the engine ignoring it.
+struct RawArgsPlanner(Vec<String>);
+
+impl LaunchPlanner for RawArgsPlanner {
+    fn build(&self, ctx: LaunchContext<'_>) -> Result<LaunchPlan, LaunchPlanError> {
+        let mut plan = HeadlessPlanner.build(ctx)?;
+        for flag in self.0.iter().rev() {
+            plan.browser_args.insert(0, flag.clone().into());
+        }
+        Ok(plan)
+    }
+}
+
 /// A planner that re-enables the leaking ICE policy, to prove the probe can
 /// see a leak at all. Nothing in the product emits this.
 struct LeakyWebRtcPlanner;
@@ -61,6 +90,15 @@ impl Harness {
     }
 
     fn with_planner(major: u32, planner: Box<dyn LaunchPlanner>) -> Self {
+        Self::with_capabilities(major, planner, CoreCapabilities::for_major(major))
+    }
+
+    /// The harness with the table pinned, for measuring the engine itself.
+    fn with_capabilities(
+        major: u32,
+        planner: Box<dyn LaunchPlanner>,
+        capabilities: CoreCapabilities,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!("fp-fingerprint-{}", ProfileId::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let channels = RuntimeSupervisorChannels::new(128);
@@ -72,6 +110,7 @@ impl Harness {
             snapshots,
             SupervisorComponents {
                 planner,
+                capability_resolver: Box::new(FixedCapabilities(capabilities)),
                 // No proxy is assigned in these tests, so Xray is never spawned.
                 xray_executable: dir.join("unused-xray"),
                 runtime_dir: dir.join("runtime"),
@@ -95,13 +134,30 @@ impl Harness {
         }
     }
 
+    /// The major the binary under test reports.
+    ///
+    /// Probing the binary rather than assuming a number is what lets this suite
+    /// be run against any build: every expectation below is the table's claim
+    /// for *that* major, so a wrong table fails here instead of hiding.
+    fn detected_major() -> u32 {
+        let binary = PathBuf::from(std::env::var_os("CHROMIUM_BIN").expect("set CHROMIUM_BIN"));
+        ::runtime::version::VersionReport::probe(&binary, ::runtime::version::DEFAULT_TIMEOUT)
+            .major
+            .expect("the binary must report a version with --version")
+    }
+
+    /// The harness for the binary under test, at its own major.
+    fn detected() -> Self {
+        Self::with_major(Self::detected_major())
+    }
+
     fn verified() -> Self {
-        Self::with_major(148)
+        Self::detected()
     }
 
     /// Verified capabilities with the ICE policy forced back open.
     fn verified_with_leaking_webrtc() -> Self {
-        Self::with_planner(148, Box::new(LeakyWebRtcPlanner))
+        Self::with_planner(Self::detected_major(), Box::new(LeakyWebRtcPlanner))
     }
 
     /// A document for the probe to run on, reachable as a `file:` URL.
@@ -274,9 +330,11 @@ fn two_profiles_do_not_share_a_canvas_surface() {
 #[test]
 #[ignore = "requires CHROMIUM_BIN and a real browser"]
 fn disabling_canvas_spoofing_makes_the_canvas_seed_independent() {
-    // A legacy core does not request the extra noise switch, so the only thing
-    // that can move the canvas is the seed itself.
-    let harness = Harness::with_major(128);
+    // The exclusion is a verified-generation feature: 148 honours it, 142
+    // accepts and ignores it. What the product does must follow the table, so
+    // the expectation follows the binary's own major.
+    let harness = Harness::detected();
+    let supported = CoreCapabilities::for_major(harness.core.major).supports_disable_spoofing;
     let mut fingerprint = FingerprintProfile::new_random(0);
     fingerprint.disabled_spoofing = vec![SpoofingFeature::Canvas];
 
@@ -285,32 +343,53 @@ fn disabling_canvas_spoofing_makes_the_canvas_seed_independent() {
     let (spoofing_disabled, first_observed) = harness.read(&first);
     let (_, second_observed) = harness.read(&second);
 
+    let emitted = spoofing_disabled
+        .effective_args
+        .iter()
+        .any(|arg| arg == "--disable-spoofing=canvas");
     assert_eq!(
-        first_observed.canvas_signature(),
-        second_observed.canvas_signature(),
-        "with canvas spoofing disabled the seed must not reach the canvas: {first_observed:#?} {second_observed:#?}"
+        emitted, supported,
+        "the command line must follow the table: {:?}",
+        spoofing_disabled.effective_args
     );
 
-    // The same seed without the exclusion does move the canvas, so the equality
-    // above is the exclusion working and not a canvas that never moves.
+    // Two seeds with nothing excluded, so the comparisons below are against a
+    // canvas that is known to move.
     let spoonfed = harness.profile(11111, FingerprintProfile::new_random(0));
+    let other = harness.profile(22222, FingerprintProfile::new_random(0));
     let (_, spoonfed_observed) = harness.read(&spoonfed);
+    let (_, other_observed) = harness.read(&other);
     assert_ne!(
         spoonfed_observed.canvas_signature(),
-        first_observed.canvas_signature(),
+        other_observed.canvas_signature(),
         "the seed must move the canvas when nothing is excluded"
     );
 
-    assert!(
-        spoofing_disabled
-            .effective_args
-            .iter()
-            .any(|arg| arg == "--disable-spoofing=canvas"),
-        "the exclusion reaches the command line: {:?}",
-        spoofing_disabled.effective_args
-    );
+    if supported {
+        assert_eq!(
+            first_observed.canvas_signature(),
+            second_observed.canvas_signature(),
+            "with canvas spoofing disabled the seed must not reach the canvas: {first_observed:#?} {second_observed:#?}"
+        );
+        assert_eq!(
+            spoofing_disabled.last_warning, None,
+            "a core that honours the exclusion has nothing to report"
+        );
+    } else {
+        assert_ne!(
+            first_observed.canvas_signature(),
+            second_observed.canvas_signature(),
+            "an unsupported exclusion must not be claimed as honoured: {first_observed:#?}"
+        );
+        let warning = spoofing_disabled
+            .last_warning
+            .clone()
+            .expect("the omission is reported");
+        assert!(warning.contains("--disable-spoofing"), "{warning}");
+    }
     harness.stop(spoofing_disabled.profile_id);
     harness.stop(spoonfed.id);
+    harness.stop(other.id);
 }
 
 #[test]
@@ -354,31 +433,41 @@ fn a_macos_profile_is_not_left_on_the_host_platform() {
 #[ignore = "requires CHROMIUM_BIN and a real browser"]
 fn excluding_client_rects_removes_only_that_noise() {
     // `client-rects` is accepted by the engine and ignored; only the
-    // unhyphenated token turns the ClientRects noise off.
-    let harness = Harness::with_major(128);
+    // unhyphenated token turns the ClientRects noise off - on a generation that
+    // honours the exclusion at all.
+    let harness = Harness::detected();
+    let supported = CoreCapabilities::for_major(harness.core.major).supports_disable_spoofing;
     let mut fingerprint = FingerprintProfile::new_random(0);
     fingerprint.disabled_spoofing = vec![SpoofingFeature::ClientRects];
     let profile = harness.profile(11111, fingerprint);
 
     let (snapshot, observed) = harness.read(&profile);
 
-    assert!(
-        !observed.has_rect_noise(),
-        "client rects must be exact when the exclusion is honoured: {observed:#?}"
+    assert_eq!(
+        snapshot
+            .effective_args
+            .iter()
+            .any(|arg| arg == "--disable-spoofing=clientrects"),
+        supported,
+        "the engine's spelling reaches the command line only when the table says          the generation honours it: {:?}",
+        snapshot.effective_args
     );
+    if supported {
+        assert!(
+            !observed.has_rect_noise(),
+            "client rects must be exact when the exclusion is honoured: {observed:#?}"
+        );
+    } else {
+        assert!(
+            observed.has_rect_noise(),
+            "an ignored exclusion must not be reported as honoured: {observed:#?}"
+        );
+    }
     assert!(
         observed
             .measure_text
             .is_some_and(|width| width.fract() != 0.0),
         "the canvas is a separate surface and stays perturbed: {observed:#?}"
-    );
-    assert!(
-        snapshot
-            .effective_args
-            .iter()
-            .any(|arg| arg == "--disable-spoofing=clientrects"),
-        "the engine's spelling reaches the command line: {:?}",
-        snapshot.effective_args
     );
     harness.stop(snapshot.profile_id);
 }
@@ -386,9 +475,8 @@ fn excluding_client_rects_removes_only_that_noise() {
 #[test]
 #[ignore = "requires CHROMIUM_BIN and a real browser"]
 fn audio_spoofing_is_seed_driven_and_can_be_excluded() {
-    // A legacy core keeps the extra noise switches out of the command line, so
-    // the seed is the only thing that can move the audio surface.
-    let harness = Harness::with_major(128);
+    let harness = Harness::detected();
+    let supported = CoreCapabilities::for_major(harness.core.major).supports_disable_spoofing;
     let mut excluded = FingerprintProfile::new_random(0);
     excluded.disabled_spoofing = vec![SpoofingFeature::Audio];
 
@@ -401,30 +489,44 @@ fn audio_spoofing_is_seed_driven_and_can_be_excluded() {
         first_observed.audio_signature().0.is_some(),
         "the audio surface must be readable: {first_observed:#?}"
     );
-    assert_eq!(
-        first_observed.audio_signature(),
-        second_observed.audio_signature(),
-        "with audio spoofing excluded the seed must not reach the audio fingerprint"
-    );
 
-    let spoofed = harness.profile(11111, FingerprintProfile::new_random(0));
-    let (_, spoofed_observed) = harness.read(&spoofed);
+    // Two seeds with nothing excluded, so the comparisons below are against an
+    // audio surface that is known to move.
+    let spoonfed = harness.profile(11111, FingerprintProfile::new_random(0));
+    let other = harness.profile(22222, FingerprintProfile::new_random(0));
+    let (_, spoonfed_observed) = harness.read(&spoonfed);
+    let (_, other_observed) = harness.read(&other);
     assert_ne!(
-        spoofed_observed.audio_signature(),
-        first_observed.audio_signature(),
+        spoonfed_observed.audio_signature(),
+        other_observed.audio_signature(),
         "the seed must move the audio fingerprint when nothing is excluded"
     );
 
-    assert!(
+    assert_eq!(
         excluded_snapshot
             .effective_args
             .iter()
             .any(|arg| arg == "--disable-spoofing=audio"),
-        "the exclusion reaches the command line: {:?}",
+        supported,
+        "the command line must follow the table: {:?}",
         excluded_snapshot.effective_args
     );
+    if supported {
+        assert_eq!(
+            first_observed.audio_signature(),
+            second_observed.audio_signature(),
+            "with audio spoofing excluded the seed must not reach the audio fingerprint"
+        );
+    } else {
+        assert_ne!(
+            first_observed.audio_signature(),
+            second_observed.audio_signature(),
+            "an ignored exclusion must not be claimed as honoured"
+        );
+    }
     harness.stop(excluded_snapshot.profile_id);
-    harness.stop(spoofed.id);
+    harness.stop(spoonfed.id);
+    harness.stop(other.id);
 }
 
 #[test]
@@ -566,4 +668,128 @@ fn a_fresh_reading_repeats_and_leaves_the_session_as_it_was() {
         "the pages the user has keep their urls"
     );
     harness.stop(snapshot.profile_id);
+}
+
+/// Measures what one binary does with the switches whose support the table
+/// claims, and holds the table to it.
+///
+/// The table is a claim about the engine, so it is checked against the engine:
+/// the switches are added as raw arguments and their effect is measured, then
+/// compared with what [`CoreCapabilities::for_major`] promises for the major
+/// this binary reports. Running this against a build the table has never seen
+/// is how a wrong table is found - which is what happened on 142, where the
+/// noise switch is honoured and `--disable-spoofing` is not, the opposite of
+/// what the table said.
+#[test]
+#[ignore = "requires CHROMIUM_BIN and a real browser"]
+fn the_capability_table_matches_this_build() {
+    let binary = PathBuf::from(std::env::var_os("CHROMIUM_BIN").expect("set CHROMIUM_BIN"));
+    let report =
+        ::runtime::version::VersionReport::probe(&binary, ::runtime::version::DEFAULT_TIMEOUT);
+    let major = report
+        .major
+        .expect("the binary must report a version with --version");
+    let capabilities = CoreCapabilities::for_major(major);
+
+    // The engine under test is the binary. The harness table is pinned to one
+    // that emits neither switch, so every difference below is the switch added
+    // by hand and nothing else.
+    let bare = CoreCapabilities {
+        supports_canvas_noise: false,
+        supports_disable_spoofing: false,
+        ..CoreCapabilities::for_major(128)
+    };
+    let with_args = |flags: Vec<String>| {
+        Harness::with_capabilities(128, Box::new(RawArgsPlanner(flags)), bare.clone())
+    };
+
+    // A seed pair with nothing extra: the reference for "the seed moves this
+    // surface at all", without which every comparison below would be vacuous.
+    let plain = with_args(Vec::new());
+    let plain_first = plain.profile(11111, FingerprintProfile::new_random(0));
+    let plain_second = plain.profile(22222, FingerprintProfile::new_random(0));
+    let (_, plain_first) = plain.read(&plain_first);
+    let (_, plain_second) = plain.read(&plain_second);
+    let canvas_moves = plain_first.canvas_signature() != plain_second.canvas_signature();
+    let audio_moves = plain_first.audio_signature() != plain_second.audio_signature();
+    let rects_move = plain_first.rects != plain_second.rects;
+    assert!(
+        canvas_moves && audio_moves && rects_move,
+        "the seed must move every surface on any build we support: {plain_first:#?} {plain_second:#?}"
+    );
+
+    // --- the exclusions: two seeds, each with the switch under test ---
+    let mut exclusions = Vec::new();
+    for (feature, flag) in [
+        ("canvas", "--disable-spoofing=canvas"),
+        ("clientrects", "--disable-spoofing=clientrects"),
+        ("audio", "--disable-spoofing=audio"),
+    ] {
+        let harness = with_args(vec![flag.to_string()]);
+        let first = harness.profile(11111, FingerprintProfile::new_random(0));
+        let second = harness.profile(22222, FingerprintProfile::new_random(0));
+        let (_, first_observed) = harness.read(&first);
+        let (_, second_observed) = harness.read(&second);
+        // Equal readings under two seeds mean the seed never reached that
+        // surface, which is the exclusion working.
+        let honoured = match feature {
+            "audio" => first_observed.audio_signature() == second_observed.audio_signature(),
+            "clientrects" => first_observed.rects == second_observed.rects,
+            _ => first_observed.canvas_signature() == second_observed.canvas_signature(),
+        };
+        exclusions.push((feature, honoured));
+    }
+
+    // --- the noise switches: one seed, with and without the switch ---
+    let noisy = with_args(vec![
+        "--fingerprinting-canvas-image-data-noise".into(),
+        "--fingerprinting-client-rects-noise".into(),
+    ]);
+    let noisy_profile = noisy.profile(11111, FingerprintProfile::new_random(0));
+    let (_, noisy_observed) = noisy.read(&noisy_profile);
+    let noise_changes_data_url = noisy_observed.canvas_data_url != plain_first.canvas_data_url;
+    let noise_changes_pixels = noisy_observed.canvas_pixels != plain_first.canvas_pixels;
+
+    println!(
+        "fingerprint-chromium {version} (major {major})\n\
+         table says: disable_spoofing={disable_spoofing}, canvas_noise={canvas_noise}\n\
+         measured on this build:\n\
+         {exclusions}\n\
+         \t--fingerprinting-canvas-image-data-noise: changes toDataURL={data_url}, \
+         changes getImageData={pixels}\n\
+         \treference without the noise switches: canvas {plain_canvas:?}\n\
+         \treference with them:                canvas {noisy_canvas:?}",
+        version = report.banner.as_deref().unwrap_or("unknown"),
+        disable_spoofing = capabilities.supports_disable_spoofing,
+        canvas_noise = capabilities.supports_canvas_noise,
+        exclusions = exclusions
+            .iter()
+            .map(|(feature, honoured)| format!(
+                "\t--disable-spoofing={feature}: the surface is seed-independent (honoured)={honoured}"
+            ))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        data_url = noise_changes_data_url,
+        pixels = noise_changes_pixels,
+        plain_canvas = plain_first.canvas_signature(),
+        noisy_canvas = noisy_observed.canvas_signature(),
+    );
+
+    // The whole feature stands or falls together: the product emits one
+    // `--disable-spoofing=<features>` argument.
+    for (feature, honoured) in &exclusions {
+        assert_eq!(
+            *honoured, capabilities.supports_disable_spoofing,
+            "the table and the engine disagree about --disable-spoofing={feature} on major {major}"
+        );
+    }
+    assert_eq!(
+        noise_changes_data_url, capabilities.supports_canvas_noise,
+        "the table and the engine disagree about the canvas noise switch on major {major}"
+    );
+    assert!(
+        !noise_changes_pixels,
+        "the noise switch must not change getImageData, or the two canvas surfaces \
+         would move together: {noisy_observed:#?}"
+    );
 }

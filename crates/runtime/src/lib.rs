@@ -44,7 +44,7 @@ mod tests {
     use domain::{
         BrowserBrand, BrowserCore, BrowserProfile, CoreCapabilities, CoreId, FingerprintProfile,
         Platform, ProfileId, ProxyId, ProxyOutbound, ProxyProfile, RuntimeState, Socks5Outbound,
-        StartTarget, WebRtcPolicy, WindowProfile,
+        SpoofingFeature, StartTarget, WebRtcPolicy, WindowProfile,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -281,7 +281,9 @@ mod tests {
         let facade = ChannelRuntimeFacade::new(channels.command_tx.clone(), Arc::clone(&snapshots));
         let handle = supervisor.spawn();
 
-        let profile = test_profile();
+        let mut profile = test_profile();
+        // A legacy core has something to report: it ignores the exclusions.
+        profile.fingerprint.disabled_spoofing = vec![SpoofingFeature::Font];
         let mut core = test_core();
         core.executable = PathBuf::from("non_existent_chrome_binary_xyz123.exe");
 

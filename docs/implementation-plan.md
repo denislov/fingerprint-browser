@@ -109,7 +109,7 @@ ProxyProfile
 前置验收（2026-09-19，仍有效）：真实 ungoogled-chromium 148 + Xray 26.2.6 已通过 Linux
 无界面运行时验收，覆盖双 Profile、Cookie 隔离与持久化、本地认证代理链路、崩溃回收和
 ShutdownAll；修复正常 Stop 强杀导致 Cookie 丢失的问题。详见 `chromium-acceptance.md`。
-这不代表 fingerprint-chromium 的指纹能力已认证；v1 只正式认证一个 major。
+指纹能力随后由回读认证：148（已验证代）与 **142（低于 pivot 的最后一版）**都在本机实测过。
 
 仍需实现：
 
@@ -232,6 +232,41 @@ xray 子进程的配置 outbound 正是表单里填的 `10.0.0.1:1080`，浏览�
 
 同一轮还统一了**错误文案的渲染**：三个编辑器的错误框按 `; ` 分行，每行一句，
 因为 gpui 不会自动换行，长句会被裁掉半句。
+
+### 第九批：认证第二个 major（142），并据此修正能力表
+
+进度（2026-09-20）：已完成。**这一批是行为修正，不是补文档。**
+
+上游 `adryfish/fingerprint-chromium` 的 Linux 资产里，142 是**低于 pivot 的最后一个版本**
+（没有 143 的 release，144 是 pivot 本身）。用户下载了 142，本机实测（`--version` → Chromium 142.0.7444.175）。
+
+**实测结果推翻了继承来的结论**（`CHROMIUM_BIN=<142 的 chrome> cargo test -p runtime --test fingerprint_real`）：
+
+| 开关 | 142 | 148 | 原能力表 |
+| --- | --- | --- | --- |
+| `--fingerprinting-canvas-image-data-noise` 改 `toDataURL` | **是** | 是 | 仅 ≥144 → **错**：142 被无故禁用了引擎支持的开关 |
+| 同上，是否改 `getImageData` | 否 | 否 | （不变式，一致） |
+| `--disable-spoofing=canvas|clientrects|audio` 是否生效 | **否** | 是 | 两代通用 → **错**：142 接受并忽略它 |
+
+也就是说：**两个"不稳定开关"分处 pivot 两侧，而原来的表把它们写反了**。
+
+改动：
+
+- `CoreCapabilities::for_major`：`supports_disable_spoofing = 生成代（≥144）`，
+  `supports_canvas_noise = true`（142 与 148 都实测生效）。文档写清每个数字测于哪个 major。
+- `compat::check`：`--disable-spoofing` 的省略原来**没有任何上报**（因为它被当作两代通用），
+  现在会报告，并按"低于已验证代"给出理由；noise 分支改为**由能力而非代际**驱动
+  （否则会给一个其实拿到了开关的 142 核心报"缺失"）。
+- Cores 页的能力行改为描述真正有差异的那一项：`spoofing exclusions honoured / not honoured`
+  （`noise switches verified` 已不成立）。
+- 集成测试**按二进制自报的 major 判定契约**（`Harness::detected()` 探测 `--version`），
+  所以同一套测试对任何内核都成立；新增
+  `the_capability_table_matches_this_build`：把开关当**原始参数**加上去直接测引擎
+  （用 `FixedCapabilities` 固定能力表，避免"用被测对象去测它自己"），再与 `for_major` 对比。
+- 两台上都跑：142 与 148 各 10/10 通过；142 上失败过的三个旧测试改为按 major 分支断言。
+
+同一 seed 在两个 major 上给出**逐字节相同**的 canvas 读数（无 noise：`1251849731`，
+有 noise：`368676017`，`getImageData` 均为 `4160716610`），说明这套回读确实在同一条路径上对比。
 
 ### 第八批：Settings 页面（Phase 5 最后一页）
 
@@ -560,6 +595,17 @@ a refused setting is reported and changes nothing
 the sidebar switches to the settings page
 only the editable settings offer a button
 a setting can be changed from the window
+```
+
+### Capability table vs a real engine
+
+```text
+the two unstable switches sit on opposite sides of the pivot
+the stable switch set is carried by both generations
+the generation is written the same way everywhere
+a legacy core reports the exclusions it ignores
+a legacy core is not told the noise switch is missing
+the legacy generation gets the noise switches but not the exclusions
 ```
 
 ### Fingerprint acceptance (real binary, opt-in)

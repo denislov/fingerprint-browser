@@ -231,16 +231,25 @@ mod tests {
     }
 
     #[test]
-    fn the_legacy_generation_omits_the_noise_switches() {
+    /// Measured on 142: the noise switch works below the pivot, so a legacy
+    /// core gets it. What a legacy core must not get is `--disable-spoofing`,
+    /// which 142 accepts and ignores.
+    fn the_legacy_generation_gets_the_noise_switches_but_not_the_exclusions() {
+        let mut profile = profile();
+        profile.disabled_spoofing = vec![SpoofingFeature::Canvas];
         let args = strings(&serialize_fingerprint_args(
-            &profile(),
-            &CoreCapabilities::for_major(128),
+            &profile,
+            &CoreCapabilities::for_major(142),
         ));
 
         assert!(
-            !args
-                .iter()
-                .any(|a| a == "--fingerprinting-canvas-image-data-noise")
+            args.iter()
+                .any(|a| a == "--fingerprinting-canvas-image-data-noise"),
+            "142 honours the noise switch: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.starts_with("--disable-spoofing")),
+            "142 ignores the exclusion: {args:?}"
         );
         assert!(args.iter().any(|a| a == "--fingerprint=4242"));
     }

@@ -124,20 +124,21 @@ pub fn check(
         );
     }
 
-    if !capabilities.is_verified() {
+    // Driven by the capability, not by the generation: the noise switch is
+    // carried below the pivot too, and reading the generation here would report
+    // an omission that does not happen.
+    if !capabilities.supports_canvas_noise {
         report.push(
             "--fingerprinting-canvas-image-data-noise,--fingerprinting-client-rects-noise",
             "profile canvas and client-rects spoofing",
-            Omission::UnverifiedGeneration {
-                major: capabilities.major,
-            },
-        );
-    } else if !capabilities.supports_canvas_noise {
-        report.push(
-            "--fingerprinting-canvas-image-data-noise,--fingerprinting-client-rects-noise",
-            "profile canvas and client-rects spoofing",
-            Omission::UnsupportedSwitch {
-                major: capabilities.major,
+            if capabilities.is_verified() {
+                Omission::UnsupportedSwitch {
+                    major: capabilities.major,
+                }
+            } else {
+                Omission::UnverifiedGeneration {
+                    major: capabilities.major,
+                }
             },
         );
     }
@@ -174,8 +175,17 @@ pub fn check(
                     .collect::<Vec<_>>()
                     .join(",")
             ),
-            Omission::UnsupportedSwitch {
-                major: capabilities.major,
+            // The exclusions are a verified-generation feature: a major below
+            // the pivot accepts the switch and applies the noise anyway, so
+            // "older than the verified generation" is the accurate reason.
+            if capabilities.is_verified() {
+                Omission::UnsupportedSwitch {
+                    major: capabilities.major,
+                }
+            } else {
+                Omission::UnverifiedGeneration {
+                    major: capabilities.major,
+                }
             },
         );
     }
@@ -236,16 +246,29 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_core_reports_the_unverified_switch_group() {
-        let report = check(&core(128), &profile(), &CoreCapabilities::for_major(128));
+    fn a_legacy_core_reports_the_exclusions_it_ignores() {
+        // Measured on 142: the engine accepts `--disable-spoofing=canvas` and
+        // applies the noise anyway, so the switch is omitted and reported.
+        let mut profile = profile();
+        profile.fingerprint.disabled_spoofing = vec![SpoofingFeature::Canvas];
+        let report = check(&core(142), &profile, &CoreCapabilities::for_major(142));
 
         assert!(!report.is_empty());
         let message = report.message().expect("warning");
-        assert!(
-            message.contains("--fingerprinting-canvas-image-data-noise"),
-            "{message}"
-        );
+        assert!(message.contains("--disable-spoofing"), "{message}");
         assert!(message.contains("major 144"), "{message}");
+        assert!(
+            !message.contains("canvas-image-data-noise"),
+            "the noise switch is carried below the pivot: {message}"
+        );
+    }
+
+    /// The noise switch is not keyed on the generation: a legacy core gets it
+    /// and must not be told it is missing.
+    #[test]
+    fn a_legacy_core_is_not_told_the_noise_switch_is_missing() {
+        let report = check(&core(142), &profile(), &CoreCapabilities::for_major(142));
+        assert!(report.is_empty(), "{report:?}");
     }
 
     #[test]
@@ -291,7 +314,8 @@ mod tests {
                 "--fingerprint-brand-version",
                 "--fingerprint-platform-version",
                 "--disable-spoofing"
-            ]
+            ],
+            "the noise group is no longer reported for a legacy major"
         );
         let message = report.message().expect("warning");
         assert!(message.contains("canvas"), "{message}");
@@ -307,6 +331,7 @@ mod tests {
         let mut capabilities = CoreCapabilities::for_major(128);
         capabilities.supports_brand_version = false;
         capabilities.supports_platform_version = false;
+        capabilities.supports_canvas_noise = false;
         capabilities.supports_disable_spoofing = false;
 
         let report = check(&core(128), &profile, &capabilities);

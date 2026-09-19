@@ -1169,7 +1169,7 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                             div()
                                 .text_xs()
                                 .text_color(rgb(match row.generation_label() {
-                                    Some(label) if label.contains("verified") => 0x86efac,
+                                    Some(label) if label.contains("honoured") => 0x86efac,
                                     Some(_) => 0xfbbf24,
                                     None => 0xfca5a5,
                                 }))
@@ -2712,7 +2712,7 @@ mod tests {
         assert_eq!(redetected.core.major, 128);
         assert_eq!(
             redetected.generation_label().as_deref(),
-            Some("Chrome 143 and older · noise switches not offered")
+            Some("Chrome 143 and older · spoofing exclusions not honoured")
         );
     }
 

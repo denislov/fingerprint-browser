@@ -120,11 +120,25 @@ const VERIFIED_BRANDS: [BrowserBrand; 2] = [BrowserBrand::Chrome, BrowserBrand::
 impl CoreCapabilities {
     /// Capability table for a detected major.
     ///
-    /// Only switches verified against a real engine are enabled. The stable set
+    /// Only switches measured against a real engine are enabled. The stable set
     /// (seed, brand, platform, both version switches, language, timezone,
-    /// hardware concurrency, WebRTC policy, `--disable-spoofing`) is carried by
-    /// both generations; the canvas/rects noise switches were verified from
-    /// [`FingerprintGeneration::PIVOT_MAJOR`] onwards.
+    /// hardware concurrency, WebRTC policy) is carried by both generations.
+    ///
+    /// The two switches that are not stable turned out to sit on opposite sides
+    /// of the pivot, which is worth spelling out because the table said the
+    /// reverse until both were measured:
+    ///
+    /// - `--fingerprinting-canvas-image-data-noise` changes `toDataURL` and
+    ///   leaves `getImageData` alone on **142 and 148**, so both generations
+    ///   carry it. The pivot was never its boundary: a major below 144 was
+    ///   being denied a switch the engine honours.
+    /// - `--disable-spoofing=<feature>` is honoured by **148** and ignored by
+    ///   **142**, which accepts the switch and applies the noise anyway. Only
+    ///   the verified generation is asked for it; the omission is reported.
+    ///
+    /// 144 to 147 were not measured here: exclusions are claimed for them on
+    /// the strength of the sibling product's 144 measurement, and the noise
+    /// switch is claimed for every major on the strength of 142 and 148.
     pub fn for_major(major: u32) -> Self {
         let generation = FingerprintGeneration::for_major(major);
         let verified = generation == FingerprintGeneration::Chrome144Plus;
@@ -132,8 +146,10 @@ impl CoreCapabilities {
         Self {
             major,
             generation,
-            supports_disable_spoofing: true,
-            supports_canvas_noise: verified,
+            // Measured: honoured on 148, ignored on 142.
+            supports_disable_spoofing: verified,
+            // Measured: honoured on 142 and on 148.
+            supports_canvas_noise: true,
             supports_brand_version: true,
             supports_platform_version: true,
             supported_brands: VERIFIED_BRANDS.to_vec(),
@@ -158,12 +174,16 @@ impl CoreCapabilities {
         }
     }
 
-    /// Whether the switches this generation does not carry were verified for it.
-    pub fn noise_label(&self) -> &'static str {
-        if self.supports_canvas_noise {
-            "noise switches verified"
+    /// Whether the engine honours `--disable-spoofing` for this generation.
+    ///
+    /// This is the switch that separates the generations: measured honoured on
+    /// 148, ignored on 142. The noise switch is carried by both, so it is not
+    /// what the label describes.
+    pub fn exclusion_label(&self) -> &'static str {
+        if self.supports_disable_spoofing {
+            "spoofing exclusions honoured"
         } else {
-            "noise switches not offered"
+            "spoofing exclusions not honoured"
         }
     }
 
@@ -192,18 +212,25 @@ mod tests {
         );
     }
 
+    /// Measured on 142 and 148: the noise switch is honoured by both, while
+    /// `--disable-spoofing` is honoured only by the verified generation.
     #[test]
-    fn the_verified_generation_carries_the_noise_switches() {
+    fn the_two_unstable_switches_sit_on_opposite_sides_of_the_pivot() {
         let modern = CoreCapabilities::for_major(148);
         assert!(modern.is_verified());
         assert!(modern.supports_canvas_noise);
         assert!(modern.supports_disable_spoofing);
 
-        let legacy = CoreCapabilities::for_major(128);
+        let legacy = CoreCapabilities::for_major(142);
         assert!(!legacy.is_verified());
         assert!(
-            !legacy.supports_canvas_noise,
-            "the noise switches are only verified from the pivot major"
+            legacy.supports_canvas_noise,
+            "142 honours --fingerprinting-canvas-image-data-noise: toDataURL moves, \
+             getImageData does not"
+        );
+        assert!(
+            !legacy.supports_disable_spoofing,
+            "142 accepts --disable-spoofing=canvas and applies the noise anyway"
         );
     }
 
@@ -211,7 +238,7 @@ mod tests {
     fn the_stable_switch_set_is_carried_by_both_generations() {
         for major in [110, 143, 144, 148] {
             let capabilities = CoreCapabilities::for_major(major);
-            assert!(capabilities.supports_disable_spoofing, "major {major}");
+            assert!(capabilities.supports_canvas_noise, "major {major}");
             assert!(capabilities.supports_brand_version, "major {major}");
             assert!(capabilities.supports_platform_version, "major {major}");
             for brand in VERIFIED_BRANDS {
@@ -239,11 +266,11 @@ mod tests {
     fn the_generation_is_written_the_same_way_everywhere() {
         let modern = CoreCapabilities::for_major(148);
         assert_eq!(modern.generation_label(), "Chrome 144+");
-        assert_eq!(modern.noise_label(), "noise switches verified");
+        assert_eq!(modern.exclusion_label(), "spoofing exclusions honoured");
 
-        let legacy = CoreCapabilities::for_major(128);
+        let legacy = CoreCapabilities::for_major(142);
         assert_eq!(legacy.generation_label(), "Chrome 143 and older");
-        assert_eq!(legacy.noise_label(), "noise switches not offered");
+        assert_eq!(legacy.exclusion_label(), "spoofing exclusions not honoured");
     }
 
     #[test]

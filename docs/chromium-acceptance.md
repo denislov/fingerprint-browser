@@ -4,6 +4,11 @@
 
 - User-supplied `ungoogled-chromium-148.0.7778.215-1-x86_64_linux.tar.xz`;
   executable reports `Chromium 148.0.7778.215`.
+- A second build was accepted on 2026-09-20 to check the capability table
+  against a legacy major: `ungoogled-chromium-142.0.7444.175-1-x86_64_linux.tar.xz`
+  (`Chromium 142.0.7444.175`, the last release below the pivot). It runs the same
+  `fingerprint_real` suite, which resolves the major from the binary itself; the
+  readings are recorded in `docs/fingerprint-matrix.md`.
 - Xray 26.2.6, copied from `Ant-Browser/bin/linux-amd64/xray`.
 - Linux x86_64, headless Chromium with its sandbox enabled.
 - Binaries are extracted/copied outside the repository and are not committed.

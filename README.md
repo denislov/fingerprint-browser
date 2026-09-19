@@ -55,18 +55,21 @@ compatibility report, and read-back verification of the fingerprint itself.
   kept, and a missing executable is reported. A core whose version cannot be
   re-read keeps its stored major rather than being downgraded to "unknown".
 - `CoreCapabilities::for_major` is a table instead of a stub. Majors split at
-  `FingerprintGeneration::PIVOT_MAJOR` (144, the first generation whose switch
-  set was verified against a real engine): both generations carry the stable set
-  (seed, brand, platform, both version switches, language, timezone, hardware
-  concurrency, WebRTC policy, `--disable-spoofing`), and only the verified
-  generation carries the canvas and client-rects noise switches. See
-  [the switch matrix](docs/fingerprint-matrix.md) for the evidence and the gaps.
+  `FingerprintGeneration::PIVOT_MAJOR` (144) into a legacy and a verified
+  generation, and both carry the stable set (seed, brand, platform, both version
+  switches, language, timezone, hardware concurrency and the WebRTC policy).
+  The two switches that are not stable were measured on **two** builds and sit on
+  opposite sides of the pivot: `--fingerprinting-canvas-image-data-noise` is
+  honoured by 142 and 148 alike, while `--disable-spoofing` is honoured by 148
+  and ignored by 142. See [the switch matrix](docs/fingerprint-matrix.md) for the
+  readings and for which majors are still inherited rather than measured.
 - Nothing is dropped in silence. A switch the core cannot honour is omitted at
   serialization time and reported by `runtime::compat::check`, which the
   supervisor turns into a `Warning` event; it lands in
   `RuntimeSnapshot::last_warning`, on the profile row and in Runtime Details.
   An undetected version (major `0`) is refused instead of being resolved to an
-  assumed capability set.
+  assumed capability set. That includes `--disable-spoofing`, which used to be
+  emitted for every generation and reported nowhere.
 - A switch name is not evidence. `CdpSession` opens the browser's debugging
   endpoint on loopback and `FingerprintProbe` reads the fingerprint back out of
   a real page; `runtime::verify` compares that reading with the profile and

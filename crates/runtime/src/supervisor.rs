@@ -946,6 +946,10 @@ mod tests {
     #[test]
     fn a_legacy_core_reports_the_switches_it_cannot_honour() {
         let mut f = Fixture::new(true, true, XRAY);
+        // Measured on 142: the exclusions are what a legacy core ignores. The
+        // noise switch is carried below the pivot, so it is not the omission to
+        // expect here.
+        f.params.profile.fingerprint.disabled_spoofing = vec![SpoofingFeature::Font];
         f.start();
 
         let warning = f
@@ -953,10 +957,7 @@ mod tests {
             .last_warning
             .clone()
             .expect("compatibility warning");
-        assert!(
-            warning.contains("--fingerprinting-canvas-image-data-noise"),
-            "{warning}"
-        );
+        assert!(warning.contains("--disable-spoofing"), "{warning}");
         assert!(warning.contains("major 144"), "{warning}");
 
         // The same fixture with a verified core reports nothing.
@@ -972,6 +973,8 @@ mod tests {
     #[test]
     fn full_event_queue_does_not_block_stop_crash_or_shutdown() {
         let mut f = Fixture::new(true, true, XRAY);
+        // A warning has to exist for the checks below to be about replacing it.
+        f.params.profile.fingerprint.disabled_spoofing = vec![SpoofingFeature::Font];
         let (sender, receiver) = crossbeam_channel::bounded(1);
         f.supervisor.event_tx = sender;
         f.events = receiver;

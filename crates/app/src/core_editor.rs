@@ -128,7 +128,7 @@ impl Render for CoreEditor {
                 format!(
                     "{} · {}",
                     capabilities.generation_label(),
-                    capabilities.noise_label()
+                    capabilities.exclusion_label()
                 )
             });
             (core.version.clone(), generation)

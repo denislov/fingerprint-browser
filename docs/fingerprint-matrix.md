@@ -8,19 +8,37 @@ core major, and on what evidence.
 `FingerprintGeneration::PIVOT_MAJOR` is 144. Below it the core is `Legacy`,
 from it upwards the core is `Chrome144Plus`.
 
+The generation label is a coarse split, not a claim that every switch changes at
+144: each capability is its own measured claim, and the two unstable ones turned
+out to sit on **opposite sides** of the pivot.
+
 Evidence:
 
 - The sibling Go product (`Ant-Browser`) verified its switch set against a local
-  Chromium 144 and encodes that in `backend/app_browser_fingerprint_matrix.go`:
-  the noise switches it emits at runtime are
-  `--fingerprinting-canvas-image-data-noise` and
-  `--fingerprinting-client-rects-noise`, and a list of older switches was
-  measured to have no effect on that build.
+  Chromium 144 and encodes that in `backend/app_browser_fingerprint_matrix.go`.
+  That is where the pivot came from, and it is inherited evidence: nothing in
+  this repository had measured a major below 144.
 - This repository certifies the runtime path against a fingerprint-chromium 148
-  build (`docs/chromium-acceptance.md`), and now certifies the fingerprint
-  surface itself by reading it back out of the page
-  (`crates/runtime/tests/fingerprint_real.rs`).
-- Nothing below 144 has been verified here, so nothing below 144 is claimed.
+  build (`docs/chromium-acceptance.md`), and reads the fingerprint surface back
+  out of the page (`crates/runtime/tests/fingerprint_real.rs`).
+- **A fingerprint-chromium 142 build (major 142, the last release below the
+  pivot) was measured here**, and it contradicts the inherited claim:
+
+  | Measured on 142 and 148 | 142 | 148 |
+  | --- | --- | --- |
+  | `--fingerprinting-canvas-image-data-noise` changes `toDataURL` | **yes** | yes |
+  | the same switch changes `getImageData` | no | no |
+  | `--disable-spoofing=canvas\|clientrects\|audio` is honoured | **no** | yes |
+
+  So the noise switch is *not* a 144 feature - a major below the pivot was being
+  denied a switch the engine honours - and the exclusions *are*. Both the table
+  and the tests were corrected (`the_capability_table_matches_this_build` now
+  measures this on whatever binary `CHROMIUM_BIN` points at).
+
+- Majors 144 to 147 remain inherited: exclusions are claimed for them on the
+  strength of the sibling product's 144 measurement, and the noise switch is
+  claimed for every major on the strength of 142 and 148.
+- Nothing below 142 has been verified here.
 
 ## Capability table
 
@@ -37,8 +55,8 @@ the compatibility layer both read it.
 | language, timezone | yes | yes | `--lang=`, `--accept-lang=`, `--timezone=` |
 | hardware concurrency | yes | yes | `--fingerprint-hardware-concurrency=` |
 | WebRTC policy | yes | yes | `--disable-non-proxied-udp` |
-| spoofing exclusions | yes | yes | `--disable-spoofing=<feature,...>` |
-| canvas and client-rects noise | **no** | yes | `--fingerprinting-canvas-image-data-noise`, `--fingerprinting-client-rects-noise` |
+| spoofing exclusions | **no** (measured on 142) | yes (measured on 148) | `--disable-spoofing=<feature,...>` |
+| canvas and client-rects noise | yes (measured on 142) | yes | `--fingerprinting-canvas-image-data-noise`, `--fingerprinting-client-rects-noise` |
 
 "yes" means the switch is passed. "no" means the serializer omits it **and** the
 compatibility layer reports the omission, so the window shows why a profile is
@@ -83,6 +101,33 @@ end-to-end run is:
 ```sh
 CHROMIUM_BIN=/path/to/chrome cargo test -p runtime --test fingerprint_real -- --ignored
 ```
+
+## Measured on a legacy generation (fingerprint-chromium 142, Linux)
+
+The last release below the pivot, added to test the inherited claim rather than
+to assume it. Same method, same probe, same seed as the 148 rows below.
+
+| Switch | Observable | 142 |
+| --- | --- | --- |
+| `--fingerprint=<seed>` | canvas `toDataURL`/`getImageData`, `measureText`, sub-pixel rects, UA-CH version | same as 148; the same seed gives the **same** canvas reading as 148 |
+| `--fingerprinting-canvas-image-data-noise` | canvas `toDataURL` | changes it, exactly as on 148; `getImageData` untouched |
+| `--fingerprinting-client-rects-noise` | client rects | no change beyond what the seed applies (same as 148) |
+| `--disable-spoofing=canvas` | canvas returns to the engine's own value | **no**: the seed still reaches the canvas |
+| `--disable-spoofing=clientrects` | client rects become integral | **no** |
+| `--disable-spoofing=audio` | audio fingerprint returns to the engine's own value | **no** |
+| `--fingerprint-platform=macos` | `navigator.platform`, user agent | honoured |
+| `--disable-non-proxied-udp` | ICE gathering completes with no candidates | honoured |
+
+All ten integration tests run against both builds:
+
+```sh
+CHROMIUM_BIN=/path/to/chrome-142 cargo test -p runtime --test fingerprint_real -- --ignored
+CHROMIUM_BIN=/path/to/chrome-148 cargo test -p runtime --test fingerprint_real -- --ignored
+```
+
+The suite resolves the major from the binary it is given and checks the table's
+claims for *that* major against the engine, so a wrong table fails the run
+instead of hiding behind a hard-coded number.
 
 ## Measured on the verified generation (fingerprint-chromium 148, Linux)
 
