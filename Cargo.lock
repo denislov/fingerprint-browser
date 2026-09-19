@@ -196,6 +196,8 @@ dependencies = [
  "domain",
  "gpui-kit",
  "runtime",
+ "serde",
+ "serde_json",
  "storage",
  "tracing",
  "tracing-subscriber",

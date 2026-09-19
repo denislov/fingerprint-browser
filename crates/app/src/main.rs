@@ -10,6 +10,7 @@ mod editor;
 mod proxy_editor;
 #[cfg(all(test, target_os = "linux"))]
 mod real_browser;
+mod settings;
 mod state;
 mod ui;
 mod verifier;
@@ -26,18 +27,12 @@ use runtime::{
 };
 use state::AppState;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use storage::{CoreRepository, ProfileRepository, ProxyRepository, SqliteStorage};
 use ui::AppView;
 use verifier::CdpFingerprintVerifier;
 
-/// Data root. Overridable so tests and portable installs can relocate it.
-const DATA_DIR_ENV: &str = "FP_BROWSER_DATA_DIR";
-const DEFAULT_DATA_DIR: &str = "data";
-/// Explicit Xray executable for per-profile proxying.
-const XRAY_BIN_ENV: &str = "FP_BROWSER_XRAY_BIN";
 const EVENT_CAPACITY: usize = 256;
 /// How long shutdown waits for the supervisor to reclaim children.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -45,9 +40,11 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 fn main() {
     tracing_subscriber::fmt::init();
 
-    let data_dir = std::env::var_os(DATA_DIR_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+    // Configuration is resolved before anything opens: the data directory and
+    // the Xray path both decide what this process does.
+    let (settings, settings_notice) =
+        settings::Settings::load(settings::Environment::from_process());
+    let data_dir = settings.data_dir().to_path_buf();
 
     let storage = SqliteStorage::open(data_dir.join("app.db")).expect("open sqlite storage");
     let profile_repo: Arc<dyn ProfileRepository> = Arc::new(storage.profiles());
@@ -60,11 +57,11 @@ fn main() {
     let event_rx = channels.event_rx.clone();
     let snapshots = Arc::new(RwLock::new(HashMap::new()));
 
-    let mut components = SupervisorComponents::default();
-    if let Some(xray) = std::env::var_os(XRAY_BIN_ENV) {
-        components.xray_executable = PathBuf::from(xray);
-    }
-    components.runtime_dir = data_dir.join("runtime");
+    let components = SupervisorComponents {
+        xray_executable: settings.xray_executable().to_path_buf(),
+        runtime_dir: settings.runtime_dir(),
+        ..SupervisorComponents::default()
+    };
 
     let supervisor = RuntimeSupervisor::with_components(
         channels.command_rx,
@@ -102,9 +99,13 @@ fn main() {
         runtime_service,
         core_service,
         proxy_service,
+        settings,
     );
     let _ = app_state.load();
     if let Some((message, error)) = core_notice {
+        app_state.push_notice(message, error);
+    }
+    if let Some((message, error)) = settings_notice {
         app_state.push_notice(message, error);
     }
 

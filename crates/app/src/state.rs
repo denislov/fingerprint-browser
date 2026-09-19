@@ -5,6 +5,7 @@
 //! into it. Runtime state is never owned here: every read goes through
 //! [`RuntimeService::snapshot`], which is the documented reconciliation path.
 
+use crate::settings::{SettingKey, SettingRow, Settings};
 use application::{
     AppError, CoreService, DeleteMode, NewProfile, NewProxy, ProfileService, ProxyService,
     RuntimeService,
@@ -227,7 +228,7 @@ impl Page {
 
     /// Whether the page has been built yet.
     pub fn is_ready(self) -> bool {
-        !matches!(self, Self::Settings)
+        true
     }
 }
 
@@ -299,6 +300,7 @@ pub struct AppState {
     runtime: Arc<RuntimeService>,
     cores: Arc<dyn CoreService>,
     proxies: Arc<dyn ProxyService>,
+    settings: Settings,
     page: Page,
     rows: Vec<ProfileRow>,
     selected: Option<ProfileId>,
@@ -312,12 +314,14 @@ impl AppState {
         runtime: Arc<RuntimeService>,
         cores: Arc<dyn CoreService>,
         proxies: Arc<dyn ProxyService>,
+        settings: Settings,
     ) -> Self {
         Self {
             profiles,
             runtime,
             cores,
             proxies,
+            settings,
             page: Page::Profiles,
             rows: Vec::new(),
             selected: None,
@@ -509,6 +513,31 @@ impl AppState {
         self.record(self.proxies.delete(id))?;
         self.notice = Some(Notice::info(format!("Deleted proxy {name}")));
         Ok(())
+    }
+
+    /// Every setting with the value in force and where it came from.
+    pub fn setting_rows(&self) -> Vec<SettingRow> {
+        self.settings.rows()
+    }
+
+    /// Stores an editable setting for the next start.
+    ///
+    /// The value is not live: it decides what the next process does, and the
+    /// window says so on the row.
+    pub fn update_setting(&mut self, key: SettingKey, value: &str) -> Result<(), AppError> {
+        let result = self.settings.set(key, value).map_err(AppError::Conflict);
+        match &result {
+            Ok(()) => {
+                self.notice = Some(Notice::info(format!(
+                    "Saved {}. It takes effect at the next start.",
+                    key.label()
+                )));
+            }
+            Err(error) => {
+                self.notice = Some(Notice::error(error.to_string()));
+            }
+        }
+        result
     }
 
     /// Every core with the profiles that use it, for the Browser Cores page.
@@ -896,6 +925,24 @@ pub(crate) mod testing {
         ))
     }
 
+    /// Settings for a test: nothing set, in a config file under the temp dir.
+    pub fn settings() -> crate::settings::Settings {
+        settings_at(
+            &std::env::temp_dir()
+                .join("fp-app-settings-test")
+                .join("config.json"),
+        )
+    }
+
+    /// Settings read from a specific config file, for a test that saves one.
+    pub fn settings_at(config: &std::path::Path) -> crate::settings::Settings {
+        let (settings, _) = crate::settings::Settings::load(crate::settings::Environment {
+            config: Some(config.to_string_lossy().to_string()),
+            ..crate::settings::Environment::default()
+        });
+        settings
+    }
+
     /// A browser binary on disk: the file holds the version it reports.
     ///
     /// The directory goes away with the guard, so a test run leaves nothing
@@ -966,6 +1013,15 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_with_config(
+            &std::env::temp_dir()
+                .join("fp-app-settings-fixture")
+                .join("config.json"),
+        )
+    }
+
+    /// The same fixture, with the settings file somewhere the test can read.
+    fn fixture_with_config(config: &std::path::Path) -> Fixture {
         let profile_repo: Arc<MemProfileRepository> = Arc::new(MemProfileRepository::new());
         let core_repo: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
         let proxy_repo: Arc<MemProxyRepository> = Arc::new(MemProxyRepository::new());
@@ -988,7 +1044,17 @@ mod tests {
         ));
 
         let core_service = core_service(core_repo.clone(), profile_repo.clone());
-        let state = AppState::new(service, runtime_service, core_service, proxy_service);
+        let (settings, _) = Settings::load(crate::settings::Environment {
+            config: Some(config.to_string_lossy().to_string()),
+            ..crate::settings::Environment::default()
+        });
+        let state = AppState::new(
+            service,
+            runtime_service,
+            core_service,
+            proxy_service,
+            settings,
+        );
 
         Fixture {
             state,
@@ -1427,13 +1493,96 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_rows_say_where_each_value_came_from() {
+        let fixture = fixture();
+        let rows = fixture.state.setting_rows();
+
+        assert_eq!(rows.len(), 6, "every setting is listed");
+        let data_dir = rows
+            .iter()
+            .find(|row| row.key == SettingKey::DataDir)
+            .expect("the data directory row");
+        assert_eq!(data_dir.source, crate::settings::Source::Default);
+        assert_eq!(data_dir.source_label(), "from the default");
+        assert!(data_dir.key.editable());
+        assert_eq!(data_dir.key.effect(), "next start");
+
+        let chromium = rows
+            .iter()
+            .find(|row| row.key == SettingKey::ChromiumBin)
+            .expect("the chromium row");
+        assert!(
+            !chromium.key.editable(),
+            "the binary is chosen by the environment and shown on the cores page"
+        );
+    }
+
+    #[test]
+    fn saving_a_setting_stores_it_and_says_when_it_applies() {
+        let dir = std::env::temp_dir().join(format!("fp-app-settings-{}", CoreId::new()));
+        let config = dir.join("config.json");
+        let mut fixture = fixture_with_config(&config);
+
+        fixture
+            .state
+            .update_setting(SettingKey::DataDir, "/srv/fp")
+            .expect("save");
+
+        let stored = std::fs::read_to_string(&config).expect("the config file was written");
+        assert!(stored.contains("/srv/fp"), "{stored}");
+        let notice = fixture.state.notice().expect("a notice");
+        assert!(!notice.error);
+        assert!(
+            notice.message.contains("next start"),
+            "the banner says when it applies: {}",
+            notice.message
+        );
+        assert_eq!(
+            fixture
+                .state
+                .setting_rows()
+                .iter()
+                .find(|row| row.key == SettingKey::DataDir)
+                .expect("the row")
+                .value,
+            "/srv/fp",
+            "the page shows what the next start will use"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_setting_is_reported_and_changes_nothing() {
+        let mut fixture = fixture();
+        fixture
+            .state
+            .update_setting(SettingKey::DataDir, "   ")
+            .expect_err("an empty value is refused");
+        assert!(fixture.state.notice().is_some_and(|notice| notice.error));
+        assert_eq!(
+            fixture
+                .state
+                .setting_rows()
+                .iter()
+                .find(|row| row.key == SettingKey::DataDir)
+                .expect("the row")
+                .source,
+            crate::settings::Source::Default,
+            "nothing was stored"
+        );
+    }
+
+    #[test]
     fn the_page_can_be_switched() {
         let mut fixture = fixture();
         assert_eq!(fixture.state.page(), Page::Profiles);
         fixture.state.set_page(Page::Proxies);
         assert_eq!(fixture.state.page(), Page::Proxies);
         assert!(Page::Proxies.is_ready());
-        assert!(!Page::Settings.is_ready());
+        assert!(
+            Page::Settings.is_ready(),
+            "every page in the sidebar is built now"
+        );
     }
 
     /// A running profile with a debug port, ready to be verified.

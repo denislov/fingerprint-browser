@@ -113,7 +113,17 @@ impl Harness {
                 Arc::clone(&profile_repo),
             ));
         let cores = application::DefaultCoreService::new(core_repo, Arc::clone(&profile_repo));
-        let mut state = AppState::new(profiles, runtime_service, Arc::new(cores), proxy_service);
+        let (settings, _) = crate::settings::Settings::load(crate::settings::Environment {
+            data_dir: Some(dir.to_string_lossy().to_string()),
+            ..crate::settings::Environment::default()
+        });
+        let mut state = AppState::new(
+            profiles,
+            runtime_service,
+            Arc::new(cores),
+            proxy_service,
+            settings,
+        );
         state.load().expect("initial load");
 
         Self {

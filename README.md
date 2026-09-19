@@ -100,6 +100,21 @@ tab of its own and reports every claim the browser did not reproduce, with a
 per-row badge so the answer is visible without selecting anything. A reading
 that fails is reported as unreadable, never as confirmed.
 
+Settings has a page of its own, and it is mostly a report: every setting is
+listed with the value in force and where that value came from - the environment,
+the config file, a default, or another setting it is derived from. An
+environment variable wins over the config file and the row says so, naming the
+stored value it is overriding, because a setting that looks saved and does
+nothing is worse than no setting.
+
+Two settings can be changed from the window: the data directory and the Xray
+executable. Both decide what the *next* start does, so they are stored in a
+config file outside the data directory - keeping them inside would mean that
+changing the data directory moves the database and loses the setting in the
+move. A config file that cannot be read is reported rather than treated as
+empty, and saving is refused until it is fixed, so a typo cannot cost the
+settings it still holds.
+
 Browser cores have a page of their own. A core is added by pointing at a
 fingerprint-chromium binary; the version is read from it with `--version` rather
 than typed, because the detected major is what decides which switches a profile
@@ -234,7 +249,7 @@ close. Persistence is not guaranteed on a forced exit.
 
 Before declaring Phase 3 fully accepted for the fingerprint browser product,
 repeat acceptance with fingerprint-chromium. Wiring runtime settings and services
-into the GPUI UI has started (see the Phase 5 slice below) but the Proxies,
-Browser Cores and Settings pages do not exist yet, so proxy assignment and core
-management still happen outside the window.
+into the GPUI UI is done: profiles, their fingerprint fields, proxies, browser
+cores and the settings that need a restart are all managed from the window, with
+the pages below describing what each one refuses to do.
 Phase 4 then adds version detection and fingerprint capability compatibility.

@@ -233,6 +233,38 @@ xray 子进程的配置 outbound 正是表单里填的 `10.0.0.1:1080`，浏览�
 同一轮还统一了**错误文案的渲染**：三个编辑器的错误框按 `; ` 分行，每行一句，
 因为 gpui 不会自动换行，长句会被裁掉半句。
 
+### 第八批：Settings 页面（Phase 5 最后一页）
+
+进度（2026-09-20）：已完成。侧边栏四页全部不再是 `(soon)`。
+
+- `app::settings`（新）：进程级配置 + **来源**。六行：数据目录、Xray 可执行文件、
+  Chromium 二进制（env）、Chromium major 覆盖（env）、配置文件、运行时目录（派生）。
+  每行给出「生效值 + 来源 + 生效时机」，来源是
+  `environment / config file / default / derived from the data directory`。
+- 优先级：**环境变量 > 配置文件 > 默认值**；被环境变量压住的那一行会把
+  "the config file holds X, which this overrides" 直接写在行里——
+  这正是"我存了设置却没生效"的现场答案。
+- **可改的两项存在数据目录之外的配置文件里**（默认 `$XDG_CONFIG_HOME/fp-browser/config.json`，
+  `FP_BROWSER_CONFIG` 可覆盖）。这是本批最关键的设计决定：数据目录自己不能存在数据目录的
+  SQLite 里，否则改完目录重启会打开一个新库，设置当场"消失"。
+- 配置文件读不出来（JSON 坏 / 无权限）时：**报告**、用默认值让程序照常启动，
+  并**拒绝写入**直到修好——不覆盖用户文件里还留着的设置。
+- 生效时机如实标注：两项都是 `next start`，对话框标题也写明
+  "takes effect at the next start"，并说明当前进程仍用旧的（含运行中的 profile 保持启动时的 Xray）。
+
+真机验收（有证据链）：把 Xray 指向一个会写日志再 `exec` 真 xray 的包装脚本 →
+配置文件落盘 → 重启（不带 `FP_BROWSER_XRAY_BIN`）→ 行变成 `from the config file` 指向包装脚本 →
+启动一个带代理的 profile → **包装脚本日志里出现 `run -config …/xray.json`**，详情面板 Xray PID 与
+真 xray 进程 PID 一致（`exec` 替换），证明"存的设置就是真正被拉起的可执行文件"。
+再带 `FP_BROWSER_XRAY_BIN` 重启 → 行回到琥珀色 `set by FP_BROWSER_XRAY_BIN` 并显示被覆盖的那条。
+
+真机（其实这次是 headless）抓到的缺陷：设置对话框的输入框与页面行**共用了元素 id**
+（`setting-data-dir`），测试报 "ambiguous ElementId"。同一棵树里 id 必须唯一，
+输入框改为 `setting-field-<key>`。
+
+另外把 `Runtime directory` 那行的来源从 "from the environment" 纠正为
+`derived from the data directory`（新增 `Source::Derived`）——它并不是被谁选定的，而是算出来的。
+
 ### 第四批：窗口内的指纹验证动作
 
 进度（2026-09-20）：已完成。
@@ -278,21 +310,19 @@ effective launch args 页面  （已有：Runtime Details + Copy args）
 页面：
 
 ```text
-Profiles            （已接线）
-Profile Editor      （未开始）
-Proxies             （未开始）
-Browser Cores       （未开始）
-Settings            （未开始）
-Runtime Details     （已接线）
+Profiles            （已完成）
+Profile Editor      （已完成，第五批）
+Proxies             （已完成，第六批）
+Browser Cores       （已完成，第七批）
+Settings            （已完成，第八批）
+Runtime Details     （已完成）
 ```
 
-仍需实现：
+仍未实现（都是"锦上添花"，不是缺口）：
 
-- toast / dialog；
-- open user-data-dir；
-- recent error/log；
-- Profile 表单（目前新建使用自动命名，指纹字段不可编辑）；
-- Proxies / Browser Cores / Settings 页面。
+- 行内 toast（目前用横幅 + 对话框内错误行）；
+- open user-data-dir（打开 profile 的数据目录）；
+- recent error/log 面板（目前只有 Runtime Details 里的 last error/warning）。
 
 已知限制：非 WM 关闭协议直接销毁窗口（如 `xdotool windowclose`）时，gpui 可能不感知
 窗口已消失，进程会继续运行并持有浏览器；支持的退出方式是窗口管理器关闭按钮与窗口内
@@ -507,6 +537,29 @@ re pointing a core takes the new path
 a new form has no core to build
 an empty path is refused by the form
 the edited path is what a new core would use
+```
+
+### Settings
+
+```text
+with nothing set every value is the default
+a stored value is used and says where it came from
+an environment override shows the value it shadows
+a broken config file is reported and does not lose settings
+saving keeps the other setting
+a saved value is the pending one even while the process uses the old
+an environment override has no pending value
+an empty value is refused
+the read only settings cannot be saved
+the runtime directory follows the data directory
+a relative data directory is shown against the working directory
+the settings page names every source
+the settings rows say where each value came from
+saving a setting stores it and says when it applies
+a refused setting is reported and changes nothing
+the sidebar switches to the settings page
+only the editable settings offer a button
+a setting can be changed from the window
 ```
 
 ### Fingerprint acceptance (real binary, opt-in)

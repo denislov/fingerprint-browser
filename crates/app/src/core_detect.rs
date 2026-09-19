@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use storage::CoreRepository;
 
 /// Explicit core executable. Wins over every other source.
-pub const BIN_ENV: &str = "FP_BROWSER_CHROMIUM_BIN";
+pub use crate::settings::CHROMIUM_BIN_ENV as BIN_ENV;
 /// Major override for binaries that do not answer `--version` usefully.
-pub const MAJOR_ENV: &str = "FP_BROWSER_CHROMIUM_MAJOR";
+pub use crate::settings::CHROMIUM_MAJOR_ENV as MAJOR_ENV;
 
 /// A banner message and whether it is an error, as the window banner shows it.
 pub type Notice = (String, bool);

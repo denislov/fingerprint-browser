@@ -7,6 +7,7 @@
 use crate::core_editor::CoreEditor;
 use crate::editor::ProfileEditor;
 use crate::proxy_editor::ProxyEditor;
+use crate::settings::SettingKey;
 use crate::state::{AppState, CoreRow, Page, ProfileRow, ProxyRow, Verification};
 use crate::verifier::FingerprintVerifier;
 use crossbeam_channel::{Receiver, Sender};
@@ -16,6 +17,7 @@ use gpui_kit::component::Root;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::*;
 use gpui_kit::component::dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use runtime::{Discrepancy, RuntimeEvent};
@@ -43,6 +45,10 @@ pub struct AppView {
     proxy_editor: Option<Entity<ProxyEditor>>,
     /// The browser-core editor behind the open dialog, if any.
     core_editor: Option<Entity<CoreEditor>>,
+    /// The settings value field behind the open dialog, if any.
+    setting_editor: Option<Entity<InputState>>,
+    /// Which setting that field belongs to.
+    setting_key: Option<SettingKey>,
     verifier: Arc<dyn FingerprintVerifier>,
     verifications: Receiver<(ProfileId, Result<Vec<Discrepancy>, String>)>,
     verification_tx: Sender<(ProfileId, Result<Vec<Discrepancy>, String>)>,
@@ -65,6 +71,8 @@ impl AppView {
             editor: None,
             proxy_editor: None,
             core_editor: None,
+            setting_editor: None,
+            setting_key: None,
             verifier,
             verifications,
             verification_tx,
@@ -102,6 +110,12 @@ impl AppView {
     #[cfg(test)]
     pub fn core_editor(&self) -> Option<Entity<CoreEditor>> {
         self.core_editor.clone()
+    }
+
+    /// The settings field behind the open dialog, for tests that type into it.
+    #[cfg(test)]
+    pub fn setting_editor(&self) -> Option<Entity<InputState>> {
+        self.setting_editor.clone()
     }
 
     fn on_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -308,6 +322,87 @@ impl AppView {
         cx.notify();
     }
 
+    /// Asks for a new value for one editable setting.
+    ///
+    /// The dialog says when the value takes effect, because a setting that
+    /// looks live and is not is the thing this page exists to avoid.
+    fn on_edit_setting(&mut self, key: SettingKey, window: &mut Window, cx: &mut Context<Self>) {
+        let row = self
+            .state
+            .setting_rows()
+            .into_iter()
+            .find(|row| row.key == key);
+        let Some(row) = row else {
+            self.state
+                .push_notice(format!("{} is not a setting", key.label()), true);
+            cx.notify();
+            return;
+        };
+        let current = row.value.clone();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
+        self.setting_editor = Some(input.clone());
+        self.setting_key = Some(key);
+        let view = cx.entity().downgrade();
+        let field = input.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let view = view.clone();
+            let field = field.clone();
+            let now = row.value.clone();
+            dialog
+                .title(format!(
+                    "{} - takes effect at the {}",
+                    key.label(),
+                    key.effect()
+                ))
+                .w(px(680.0))
+                .content({
+                    let field = field.clone();
+                    move |content, _, _| {
+                        content.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(format!("Now: {now}")),
+                                )
+                                .child(
+                                    // Not `setting-{key}`: the row card already
+                                    // owns that id, and two elements sharing one
+                                    // id in a single tree is ambiguous.
+                                    Input::new(&field)
+                                        .id(format!("setting-field-{}", key.id()))
+                                        .aria_label(key.label()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x71717a))
+                                        .child(key_help(key)),
+                                ),
+                        )
+                    }
+                })
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                        )
+                        .child(DialogAction::new().child(Button::new("ok").label("Save"))),
+                )
+                .on_ok(move |_, _, cx| {
+                    let value = field.read(cx).value().to_string();
+                    view.update(cx, |view, _| view.state.update_setting(key, &value).is_ok())
+                        .unwrap_or(false)
+                })
+        });
+        cx.notify();
+    }
+
+    /// Opens the form for a new core, or for one that is already registered.
     /// Opens the form for a new core, or for one that is already registered.
     ///
     /// Adding goes through the service, which probes the binary: the version a
@@ -695,6 +790,7 @@ impl Render for AppView {
                         let page = self.state.page();
                         let proxy_rows = self.state.proxy_rows().unwrap_or_default();
                         let core_rows = self.state.core_rows().unwrap_or_default();
+                        let setting_rows = self.state.setting_rows();
                         div()
                             .flex()
                             .flex_col()
@@ -706,7 +802,8 @@ impl Render for AppView {
                             .child(match page {
                                 Page::Proxies => proxies_header(cx),
                                 Page::Cores => cores_header(cx),
-                                _ => profiles_header(cx),
+                                Page::Settings => settings_header(),
+                                Page::Profiles => profiles_header(cx),
                             })
                             .children(notice.map(|notice| notice_banner(notice, cx)))
                             .when(page == Page::Proxies, |this| {
@@ -714,6 +811,9 @@ impl Render for AppView {
                             })
                             .when(page == Page::Cores, |this| {
                                 this.child(cores_body(&core_rows, cx))
+                            })
+                            .when(page == Page::Settings, |this| {
+                                this.child(settings_body(&setting_rows, cx))
                             })
                             .when(page == Page::Profiles, |this| {
                                 this.child(
@@ -1119,6 +1219,140 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                                     this.on_delete_core(id, window, cx)
                                 })),
                         ),
+                )
+        }))
+}
+
+/// What a setting does, in one line, under its field.
+fn key_help(key: SettingKey) -> String {
+    match key {
+        SettingKey::DataDir => {
+            "Where profiles, cores and the database live. A new directory starts empty; \
+             the current one keeps being used until the next start."
+                .to_string()
+        }
+        SettingKey::XrayExecutable => {
+            "Used when a profile has a proxy. The running process keeps the executable \
+             it started with."
+                .to_string()
+        }
+        _ => String::new(),
+    }
+}
+
+fn settings_header() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xl()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Settings"),
+        )
+        .child(div().text_xs().text_color(rgb(MUTED)).child(
+            "The value in force and where it came from. An environment variable wins over the config file, and the row says so.",
+        ))
+}
+
+fn settings_body(
+    rows: &[crate::settings::SettingRow],
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    div()
+        .id("settings-scroll")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .gap_2()
+        .overflow_y_scroll()
+        // Built inline: a helper returning a borrowed type cannot escape the
+        // closure that owns the context.
+        .children(rows.iter().map(|row| {
+            let key = row.key;
+            let editable = key.editable();
+            div()
+                .id(format!("setting-{}", key.id()))
+                .test_support()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .px_4()
+                .py_3()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(key.label()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(
+                                            if row.source == crate::settings::Source::Environment {
+                                                0xfbbf24
+                                            } else {
+                                                0x71717a
+                                            },
+                                        ))
+                                        .child(row.source_label()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0xd4d4d8))
+                                .child(row.value.clone()),
+                        )
+                        .children(
+                            row.shadowed_label().map(|label| {
+                                div().text_xs().text_color(rgb(0xfbbf24)).child(label)
+                            }),
+                        )
+                        .children(
+                            row.note
+                                .clone()
+                                .map(|note| div().text_xs().text_color(rgb(0x71717a)).child(note)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x71717a))
+                                .child(row.key.effect()),
+                        )
+                        .when(editable, |this| {
+                            this.child(
+                                Button::new(format!("edit-setting-{}", key.id()))
+                                    .label("Change")
+                                    .outline()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.on_edit_setting(key, window, cx)
+                                    })),
+                            )
+                        }),
                 )
         }))
 }
@@ -1688,6 +1922,22 @@ mod tests {
         cx: &mut TestAppContext,
         verifier: Arc<FakeVerifier>,
     ) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>) {
+        view_full(cx, verifier, None)
+    }
+
+    /// The same view, with the settings file somewhere the test can read it.
+    fn view_with_config(
+        cx: &mut TestAppContext,
+        config: &std::path::Path,
+    ) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>) {
+        view_full(cx, Arc::new(FakeVerifier::passing()), Some(config))
+    }
+
+    fn view_full(
+        cx: &mut TestAppContext,
+        verifier: Arc<FakeVerifier>,
+        config: Option<&std::path::Path>,
+    ) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>) {
         let profile_repo: Arc<MemProfileRepository> = Arc::new(MemProfileRepository::new());
         let core_repo: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
         let proxy_repo: Arc<MemProxyRepository> = Arc::new(MemProxyRepository::new());
@@ -1709,7 +1959,11 @@ mod tests {
         let cores = crate::state::testing::core_service(core_repo.clone(), profile_repo.clone());
         let proxies: Arc<dyn ProxyService> =
             Arc::new(DefaultProxyService::new(proxy_repo, profile_repo));
-        let state = AppState::new(profiles, runtime_service, cores, proxies);
+        let settings = match config {
+            Some(config) => crate::state::testing::settings_at(config),
+            None => crate::state::testing::settings(),
+        };
+        let state = AppState::new(profiles, runtime_service, cores, proxies, settings);
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
 
         let view = cx.new(|cx| {
@@ -2462,6 +2716,110 @@ mod tests {
         );
     }
 
+    #[gpui_kit::test]
+    fn the_sidebar_switches_to_the_settings_page(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        assert!(
+            cx.update(|window, _| window.try_find("settings-scroll").is_none()),
+            "the settings page is not shown first"
+        );
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("setting-data-dir").is_some()),
+            "the settings page is shown"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("profiles-scroll").is_none()),
+            "the profiles body is not rendered on the settings page"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("setting-chromium-bin").is_some()),
+            "the read-only rows are listed too"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().page()),
+            crate::state::Page::Settings
+        );
+    }
+
+    #[gpui_kit::test]
+    fn only_the_editable_settings_offer_a_button(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+
+        for key in ["data-dir", "xray-executable"] {
+            assert!(
+                cx.update(|window, _| window.try_find(format!("edit-setting-{key}")).is_some()),
+                "{key} can be changed"
+            );
+        }
+        for key in [
+            "chromium-bin",
+            "chromium-major",
+            "config-file",
+            "runtime-dir",
+        ] {
+            assert!(
+                cx.update(|window, _| window.try_find(format!("edit-setting-{key}")).is_none()),
+                "{key} is read-only"
+            );
+        }
+        let _ = view;
+    }
+
+    #[gpui_kit::test]
+    fn a_setting_can_be_changed_from_the_window(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = std::env::temp_dir().join(format!("fp-ui-settings-{}", std::process::id()));
+        let config = dir.join("config.json");
+        let (view, _runtime) = view_with_config(cx, &config);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("edit-setting-data-dir", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("setting-field-data-dir").is_some()),
+            "the field is open"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("setting-data-dir").is_some()),
+            "the row it belongs to is still there"
+        );
+
+        let field = view
+            .read_with(cx, |view, _| view.setting_editor())
+            .expect("the settings field");
+        cx.update(|window, cx| {
+            field.update(cx, |state, cx| state.set_value("/srv/fp", window, cx));
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        let stored = std::fs::read_to_string(&config).expect("the config file was written");
+        assert!(stored.contains("/srv/fp"), "{stored}");
+        let row = view.read_with(cx, |view, _| {
+            view.state()
+                .setting_rows()
+                .into_iter()
+                .find(|row| row.key == crate::settings::SettingKey::DataDir)
+                .expect("the row")
+        });
+        assert_eq!(row.value, "/srv/fp");
+        assert_eq!(row.source, crate::settings::Source::ConfigFile);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Draws enough frames for a layer to mount and then paint at rest.
     fn settle(cx: &mut gpui_kit::VisualTestContext) {
         cx.run_until_parked();
@@ -2607,7 +2965,8 @@ mod tests {
         let cores = crate::state::testing::core_service(core_repo.clone(), profile_repo.clone());
         let proxies: Arc<dyn ProxyService> =
             Arc::new(DefaultProxyService::new(proxy_repo, profile_repo));
-        let state = AppState::new(profiles, runtime_service, cores, proxies);
+        let settings = crate::state::testing::settings();
+        let state = AppState::new(profiles, runtime_service, cores, proxies, settings);
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
         let view = cx.new(|cx| {
             let mut view = AppView::new(state, event_rx, Arc::new(FakeVerifier::passing()));
