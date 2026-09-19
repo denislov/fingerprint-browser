@@ -19,9 +19,17 @@ pub fn serialize_fingerprint_args(
     let mut args: Vec<OsString> = Vec::new();
 
     args.push(format!("--fingerprint={}", fingerprint.seed).into());
-    args.push(format!("--fingerprint-brand={}", fingerprint.brand.as_arg_value()).into());
-    if let Some(brand_version) = non_empty(&fingerprint.brand_version) {
-        args.push(format!("--fingerprint-brand-version={brand_version}").into());
+    // The brand and its version are one claim about the engine: a core that does
+    // not declare the brand gets neither switch, and the compatibility layer
+    // reports the omission.
+    let brand_supported = capabilities.supports_brand(fingerprint.brand);
+    if brand_supported {
+        args.push(format!("--fingerprint-brand={}", fingerprint.brand.as_arg_value()).into());
+        if capabilities.supports_brand_version
+            && let Some(brand_version) = non_empty(&fingerprint.brand_version)
+        {
+            args.push(format!("--fingerprint-brand-version={brand_version}").into());
+        }
     }
 
     args.push(
@@ -31,7 +39,9 @@ pub fn serialize_fingerprint_args(
         )
         .into(),
     );
-    if let Some(platform_version) = non_empty(&fingerprint.platform_version) {
+    if capabilities.supports_platform_version
+        && let Some(platform_version) = non_empty(&fingerprint.platform_version)
+    {
         args.push(format!("--fingerprint-platform-version={platform_version}").into());
     }
 
@@ -47,7 +57,7 @@ pub fn serialize_fingerprint_args(
         args.push("--disable-non-proxied-udp".into());
     }
 
-    if capabilities.supports_canvas_noise_flag {
+    if capabilities.supports_canvas_noise {
         args.push("--fingerprinting-canvas-image-data-noise".into());
         args.push("--fingerprinting-client-rects-noise".into());
     }
@@ -99,7 +109,7 @@ mod tests {
 
     #[test]
     fn emits_brand_and_platform_versions_when_present() {
-        let capabilities = CoreCapabilities::default_for_major(144);
+        let capabilities = CoreCapabilities::for_major(144);
         let args = strings(&serialize_fingerprint_args(&profile(), &capabilities));
 
         assert!(args.iter().any(|a| a == "--fingerprint=4242"));
@@ -117,7 +127,7 @@ mod tests {
 
     #[test]
     fn omits_version_switches_when_absent_or_blank() {
-        let capabilities = CoreCapabilities::default_for_major(144);
+        let capabilities = CoreCapabilities::for_major(144);
         let mut fp = profile();
         fp.brand_version = None;
         fp.platform_version = Some("   ".to_string());
@@ -138,7 +148,7 @@ mod tests {
 
     #[test]
     fn version_switch_follows_its_brand_and_platform_switch() {
-        let capabilities = CoreCapabilities::default_for_major(144);
+        let capabilities = CoreCapabilities::for_major(144);
         let args = strings(&serialize_fingerprint_args(&profile(), &capabilities));
 
         let position = |needle: &str| {
@@ -162,8 +172,8 @@ mod tests {
         let mut fp = profile();
         fp.disabled_spoofing = vec![SpoofingFeature::Font, SpoofingFeature::Canvas];
 
-        let mut capabilities = CoreCapabilities::default_for_major(144);
-        capabilities.supports_canvas_noise_flag = false;
+        let mut capabilities = CoreCapabilities::for_major(144);
+        capabilities.supports_canvas_noise = false;
         capabilities.supports_disable_spoofing = false;
 
         let args = strings(&serialize_fingerprint_args(&fp, &capabilities));
@@ -182,8 +192,62 @@ mod tests {
     }
 
     #[test]
+    fn a_brand_the_core_does_not_declare_is_omitted_with_its_version() {
+        let mut fp = profile();
+        fp.brand = BrowserBrand::Opera;
+
+        let mut capabilities = CoreCapabilities::for_major(144);
+        capabilities.supported_brands = vec![BrowserBrand::Chrome];
+
+        let args = strings(&serialize_fingerprint_args(&fp, &capabilities));
+
+        assert!(
+            !args.iter().any(|a| a.starts_with("--fingerprint-brand")),
+            "neither the brand nor its version may be claimed: {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--fingerprint=4242"));
+    }
+
+    #[test]
+    fn an_unsupported_version_switch_is_omitted() {
+        let mut capabilities = CoreCapabilities::for_major(144);
+        capabilities.supports_brand_version = false;
+        capabilities.supports_platform_version = false;
+
+        let args = strings(&serialize_fingerprint_args(&profile(), &capabilities));
+
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.starts_with("--fingerprint-brand-version"))
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.starts_with("--fingerprint-platform-version"))
+        );
+        assert!(args.iter().any(|a| a == "--fingerprint-brand=Chrome"));
+        assert!(args.iter().any(|a| a == "--fingerprint-platform=windows"));
+    }
+
+    #[test]
+    fn the_legacy_generation_omits_the_noise_switches() {
+        let args = strings(&serialize_fingerprint_args(
+            &profile(),
+            &CoreCapabilities::for_major(128),
+        ));
+
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "--fingerprinting-canvas-image-data-noise")
+        );
+        assert!(args.iter().any(|a| a == "--fingerprint=4242"));
+    }
+
+    #[test]
     fn disable_spoofing_lists_every_requested_feature() {
-        let capabilities = CoreCapabilities::default_for_major(144);
+        let capabilities = CoreCapabilities::for_major(144);
         let mut fp = profile();
         fp.disabled_spoofing = vec![SpoofingFeature::Font, SpoofingFeature::Gpu];
 

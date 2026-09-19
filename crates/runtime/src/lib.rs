@@ -1,5 +1,6 @@
 pub mod capability;
 pub mod cdp;
+pub mod compat;
 pub mod error;
 pub mod events;
 pub mod facade;
@@ -8,10 +9,12 @@ pub mod planner;
 pub mod ports;
 pub mod process;
 pub mod supervisor;
+pub mod version;
 pub mod xray;
 
 pub use capability::{CapabilityResolver, DefaultCapabilityResolver};
 pub use cdp::{CdpInfo, CdpProbe, HttpCdpProbe};
+pub use compat::{CompatibilityReport, Finding as CompatibilityFinding};
 pub use error::{
     CapabilityError, CdpError, LaunchPlanError, PortError, ProcessError, ProxyError,
     RuntimeCommandError, RuntimeError,
@@ -25,6 +28,7 @@ pub use process::{DefaultProcessTreeController, ProcessTreeController};
 pub use supervisor::{
     ChannelRuntimeFacade, RuntimeSupervisor, RuntimeSupervisorChannels, SupervisorComponents,
 };
+pub use version::{DEFAULT_TIMEOUT as DEFAULT_VERSION_TIMEOUT, VersionReport, parse_major};
 pub use xray::{DefaultXrayConfigBuilder, XrayConfigBuilder};
 
 #[cfg(test)]
@@ -79,7 +83,7 @@ mod tests {
     fn test_planner_without_proxy() {
         let profile = test_profile();
         let core = test_core();
-        let capabilities = CoreCapabilities::default_for_major(128);
+        let capabilities = CoreCapabilities::for_major(128);
         let planner = DefaultLaunchPlanner::new();
 
         let ctx = LaunchContext {
@@ -121,7 +125,7 @@ mod tests {
     fn test_planner_with_proxy() {
         let mut profile = test_profile();
         let core = test_core();
-        let capabilities = CoreCapabilities::default_for_major(128);
+        let capabilities = CoreCapabilities::for_major(128);
         let planner = DefaultLaunchPlanner::new();
 
         let proxy = ProxyProfile {
@@ -174,7 +178,7 @@ mod tests {
         profile.fingerprint.platform_version = Some("10.0.0".to_string());
 
         let core = test_core();
-        let capabilities = CoreCapabilities::default_for_major(128);
+        let capabilities = CoreCapabilities::for_major(128);
         let planner = DefaultLaunchPlanner::new();
 
         let ctx = LaunchContext {
@@ -213,7 +217,7 @@ mod tests {
     fn test_planner_deterministic_output() {
         let profile = test_profile();
         let core = test_core();
-        let capabilities = CoreCapabilities::default_for_major(128);
+        let capabilities = CoreCapabilities::for_major(128);
         let planner = DefaultLaunchPlanner::new();
 
         let ctx1 = LaunchContext {
@@ -291,6 +295,21 @@ mod tests {
                 ..
             }
         ));
+
+        // A legacy core reports the switches it cannot honour before planning.
+        let warning = channels
+            .event_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("compatibility warning");
+        match warning {
+            RuntimeEvent::Warning { message, .. } => {
+                assert!(
+                    message.contains("verified fingerprint generation"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected a compatibility warning, got {other:?}"),
+        }
 
         // Next event is EffectiveLaunchArgs
         let _event2 = channels

@@ -292,6 +292,17 @@ impl RuntimeSupervisor {
             }
         };
 
+        // 3b. Report every switch the core cannot honour. The serializer omits
+        // them, so without this the profile would claim a fingerprint the
+        // engine never applies.
+        let compatibility = crate::compat::check(&params.core, &params.profile, &capabilities);
+        if let Some(message) = compatibility.message() {
+            self.emit(RuntimeEvent::Warning {
+                profile_id,
+                message,
+            });
+        }
+
         // 4. Build LaunchPlan
         let ctx = LaunchContext {
             profile: &params.profile,
@@ -933,6 +944,32 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_core_reports_the_switches_it_cannot_honour() {
+        let mut f = Fixture::new(true, true, XRAY);
+        f.start();
+
+        let warning = f
+            .snapshot()
+            .last_warning
+            .clone()
+            .expect("compatibility warning");
+        assert!(
+            warning.contains("--fingerprinting-canvas-image-data-noise"),
+            "{warning}"
+        );
+        assert!(warning.contains("major 144"), "{warning}");
+
+        // The same fixture with a verified core reports nothing.
+        f.supervisor.stop_profile(f.params.profile.id);
+        f.params.core.major = 148;
+        f.params.core.version = "148.0.7778.215".into();
+        f.start();
+
+        assert_eq!(f.snapshot().state, RuntimeState::Running);
+        assert_eq!(f.snapshot().last_warning, None);
+    }
+
+    #[test]
     fn full_event_queue_does_not_block_stop_crash_or_shutdown() {
         let mut f = Fixture::new(true, true, XRAY);
         let (sender, receiver) = crossbeam_channel::bounded(1);
@@ -943,12 +980,20 @@ mod tests {
         assert!(f.snapshot().dropped_events > 0);
         assert!(!f.snapshot().effective_args.is_empty());
         f.start();
-        assert!(f.snapshot().last_warning.is_some());
+        let already_running = f.snapshot().last_warning.clone().expect("warning");
+        assert!(
+            already_running.contains("already running"),
+            "{already_running}"
+        );
         f.supervisor.stop_profile(f.params.profile.id);
         assert_eq!(f.snapshot().state, RuntimeState::Stopped);
         assert!(!f.config().exists());
         f.start();
-        assert!(f.snapshot().last_warning.is_none());
+        let fresh = f.snapshot().last_warning.clone().expect("warning");
+        assert!(
+            !fresh.contains("already running"),
+            "a new start must replace the previous diagnostics: {fresh}"
+        );
         let child = f
             .supervisor
             .active_sessions

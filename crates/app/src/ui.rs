@@ -25,6 +25,8 @@ const DIM: u32 = 0x52525b;
 const TICK: Duration = Duration::from_millis(200);
 /// Full reconciliation every N ticks, for any notification that was dropped.
 const RECONCILE_EVERY: u64 = 5;
+/// Cap on the per-row warning line; the full text is in Runtime Details.
+const WARNING_WIDTH: f32 = 420.0;
 
 pub struct AppView {
     state: AppState,
@@ -46,6 +48,12 @@ impl AppView {
     #[cfg(test)]
     pub fn state(&self) -> &AppState {
         &self.state
+    }
+
+    /// Mutable access for tests that drive reconciliation directly.
+    #[cfg(test)]
+    pub fn state_mut(&mut self) -> &mut AppState {
+        &mut self.state
     }
 
     /// Load storage once, then keep reconciling from snapshots in the background.
@@ -412,6 +420,18 @@ fn profile_list(
                                 .items_end()
                                 .gap_1()
                                 .child(state_badge(row))
+                                .children(row.last_warning().map(|warning| {
+                                    // The full text lives in Runtime Details; the row
+                                    // only needs to say that something is off.
+                                    div()
+                                        .id(format!("warning-{id}"))
+                                        .test_support()
+                                        .max_w(px(WARNING_WIDTH))
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(rgb(0xfbbf24))
+                                        .child(format!("warning: {warning}"))
+                                }))
                                 .children(row.last_error().map(|error| {
                                     div()
                                         .text_xs()
@@ -766,6 +786,45 @@ mod tests {
         );
         assert!(commands[0].starts_with("start:"));
         assert!(commands[1].starts_with("stop:"));
+    }
+
+    #[gpui_kit::test]
+    fn a_long_compatibility_warning_stays_inside_the_row(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, runtime) = view(cx);
+
+        let handle = cx.open_window(size(px(1200.), px(800.)), |window, cx| {
+            Root::new(view.clone(), window, cx)
+        });
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("new-profile", cx);
+            let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+
+            // The longest warning the compatibility layer produces.
+            runtime.set_warning(
+                id,
+                "chrome 128 (major 128) is older than the verified fingerprint generation \
+                 (major 144) and omits --fingerprinting-canvas-image-data-noise,\
+                 --fingerprinting-client-rects-noise; requested by profile canvas and \
+                 client-rects spoofing",
+            );
+            view.update(cx, |view, cx| {
+                view.state_mut().refresh_runtime();
+                cx.notify();
+            });
+            window.render_frame(cx);
+
+            let warning = window.find(format!("warning-{id}"));
+            assert!(warning.visible(), "the row reports the warning");
+            assert!(
+                warning.bounds().size.width <= px(420.0),
+                "the row warning is capped instead of overflowing: {:?}",
+                warning.bounds().size
+            );
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

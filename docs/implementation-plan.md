@@ -96,17 +96,37 @@ ProxyProfile
 
 ## Phase 4 — Fingerprint capability layer
 
-前置验收更新（2026-09-19）：真实 ungoogled-chromium 148 + Xray 26.2.6 已通过 Linux 无界面运行时验收，覆盖双 Profile、Cookie 隔离与持久化、本地认证代理链路、崩溃回收和 ShutdownAll；修复正常 Stop 强杀导致 Cookie 丢失的问题。详见 `chromium-acceptance.md`。这不代表 fingerprint-chromium 的指纹能力已认证。
+进度（2026-09-19）：第一批已落地。详情见 [fingerprint-matrix.md](fingerprint-matrix.md)。
 
-实现：
+- `runtime::version`：`--version` 超时探测 + major 解析（5 秒上限，避免错二进制卡启动）。
+- `app::core_detect::maintain`：每次启动重探并刷新内核记录（二进制被换掉不会留下过期 major），
+  自定义名字不覆盖，丢失可执行文件会上报。
+- `CoreCapabilities::for_major` 真值表：以 `FingerprintGeneration::PIVOT_MAJOR = 144` 分代；
+  稳定开关两代都发，canvas/client-rects 噪声开关只发给已认证代际。
+- `runtime::compat::check`：把“内核不支持的开关”转成 Warning 事件，进入
+  `RuntimeSnapshot::last_warning`，在行内与 Runtime Details 展示；major 0 直接拒绝启动。
 
-- browser version detection；
-- CoreCapabilities；
-- fingerprint CLI serializer；
-- version compatibility warnings；
-- effective launch args 页面。
+前置验收（2026-09-19，仍有效）：真实 ungoogled-chromium 148 + Xray 26.2.6 已通过 Linux
+无界面运行时验收，覆盖双 Profile、Cookie 隔离与持久化、本地认证代理链路、崩溃回收和
+ShutdownAll；修复正常 Stop 强杀导致 Cookie 丢失的问题。详见 `chromium-acceptance.md`。
+这不代表 fingerprint-chromium 的指纹能力已认证；v1 只正式认证一个 major。
 
-v1 只正式认证一个 fingerprint-chromium major。
+仍需实现：
+
+- browser version detection 在启动时复核（目前开工时复核）；
+- 跨平台字体策略（目标平台不等于宿主平台时补 `font` 到 `--disable-spoofing`）；
+- 回读 JS 指纹值做运行时验证，这是认证第二个 major 的唯一手段；
+- 真实 fingerprint-chromium 二进制验收（当前已认证的只有 ungoogled-chromium 148 的运行时链路）。
+
+既有实现：
+
+```text
+browser version detection  （已做，见上）
+CoreCapabilities           （已做，见上）
+fingerprint CLI serializer （已有，按能力表门控）
+version compatibility warnings （已做，见上）
+effective launch args 页面  （已有：Runtime Details + Copy args）
+```
 
 ---
 
@@ -190,6 +210,41 @@ fingerprint seed serialization
 accept-language default generation
 window validation
 profile duplication gets new seed/id/path
+generation splits at the verified pivot (144)
+stable switch set is carried by both generations
+canvas noise is only claimed for the verified generation
+```
+
+### Compatibility
+
+```text
+verified generation reports nothing
+legacy core reports the unverified switch group with the pivot major
+unsupported brand is reported with what asked for it
+unsupported switches are reported only when the profile uses them
+findings keep a stable order
+```
+
+### Version
+
+```text
+parses the major from a chromium banner
+rejects banners without digits
+missing executable reports nothing
+hanging executable is killed at the deadline
+```
+
+### Core catalogue (app)
+
+```text
+empty catalogue registers the discovered core
+major override covers a silent binary
+unreadable version is reported without a major
+no discovered core is an error, not an empty catalogue
+replaced binary updates the stored major and auto-generated name
+custom core name survives a version change
+unreadable probe keeps the stored core
+missing executable is an error naming the core
 ```
 
 ### LaunchPlanner

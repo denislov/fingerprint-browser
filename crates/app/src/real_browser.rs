@@ -10,7 +10,7 @@
 
 use crate::state::AppState;
 use application::{DefaultProfileService, ProfileService, RuntimeService};
-use domain::{BrowserCore, CoreId, LaunchPlan, ProfileId, RuntimeState};
+use domain::{BrowserCore, CoreCapabilities, CoreId, LaunchPlan, ProfileId, RuntimeState};
 use runtime::{
     ChannelRuntimeFacade, DefaultLaunchPlanner, LaunchContext, LaunchPlanError, LaunchPlanner,
     RuntimeCommand, RuntimeFacade, RuntimeSupervisor, RuntimeSupervisorChannels,
@@ -45,6 +45,8 @@ struct Harness {
     state: AppState,
     command_tx: crossbeam_channel::Sender<RuntimeCommand>,
     supervisor: Option<std::thread::JoinHandle<()>>,
+    /// Detected major of `CHROMIUM_BIN`, which selects the capability table.
+    major: u32,
     dir: PathBuf,
 }
 
@@ -53,11 +55,9 @@ impl Harness {
         let executable: PathBuf = std::env::var_os("CHROMIUM_BIN")
             .expect("set CHROMIUM_BIN")
             .into();
-        let detected = crate::core_detect::detect(&executable);
-        assert!(
-            detected.major > 0,
-            "CHROMIUM_BIN did not report a version: {detected:?}"
-        );
+        let detected =
+            runtime::version::VersionReport::probe(&executable, runtime::DEFAULT_VERSION_TIMEOUT);
+        let major = detected.major.expect("CHROMIUM_BIN must report a version");
 
         let dir = std::env::temp_dir().join(format!("fp-app-acceptance-{}", ProfileId::new()));
         std::fs::create_dir_all(&dir).expect("temp dir");
@@ -69,10 +69,13 @@ impl Harness {
 
         let core = BrowserCore {
             id: CoreId::new(),
-            name: detected.name,
-            executable: detected.executable,
-            version: detected.version,
-            major: detected.major,
+            name: format!("chromium {major}"),
+            executable,
+            version: detected
+                .banner
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            major,
         };
         core_repo.save(&core).expect("save core");
 
@@ -111,6 +114,7 @@ impl Harness {
             state,
             command_tx: channels.command_tx,
             supervisor: Some(supervisor.spawn()),
+            major,
             dir,
         }
     }
@@ -135,6 +139,7 @@ impl Harness {
                     browser_pid: row.browser_pid(),
                     cdp_port: row.cdp_port(),
                     args: row.effective_args().to_vec(),
+                    warning: row.last_warning().map(str::to_string),
                     data_dir: row.profile.user_data_dir.clone(),
                 };
             }
@@ -162,6 +167,7 @@ struct ProfileRowSnapshot {
     browser_pid: Option<u32>,
     cdp_port: Option<u16>,
     args: Vec<String>,
+    warning: Option<String>,
     data_dir: PathBuf,
 }
 
@@ -228,6 +234,39 @@ fn real_chromium_start_stop_through_app_state() {
             .collect();
         assert_eq!(fingerprints.len(), 1, "exactly one seed switch per session");
         assert_eq!(fingerprints[0], &format!("--fingerprint={seed}"));
+    }
+
+    // The switch set follows the detected major, and anything the core cannot
+    // honour is reported rather than dropped in silence.
+    let capabilities = CoreCapabilities::for_major(harness.major);
+    let noise = |snapshot: &ProfileRowSnapshot| {
+        snapshot
+            .args
+            .iter()
+            .any(|arg| arg == "--fingerprinting-canvas-image-data-noise")
+    };
+    match a.warning.as_deref() {
+        None => {
+            assert!(capabilities.is_verified(), "an unverified core must warn");
+            assert!(
+                noise(&a) && noise(&b),
+                "the verified set carries canvas noise"
+            );
+        }
+        Some(warning) => {
+            assert!(
+                !capabilities.is_verified(),
+                "a verified core must not warn: {warning}"
+            );
+            assert!(
+                warning.contains("verified fingerprint generation"),
+                "unexpected warning: {warning}"
+            );
+            assert!(
+                !noise(&a) && !noise(&b),
+                "canvas noise is omitted for a legacy core"
+            );
+        }
     }
 
     // Stopping one profile leaves the other running.

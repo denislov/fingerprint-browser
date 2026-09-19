@@ -382,6 +382,15 @@ pub(crate) mod testing {
             snapshot.state = state;
         }
 
+        /// Publishes a diagnostic the way the supervisor's warning event does.
+        pub fn set_warning(&self, id: ProfileId, message: &str) {
+            let mut snapshots = self.snapshots.write().expect("snapshot lock");
+            let snapshot = snapshots
+                .entry(id)
+                .or_insert_with(|| snapshot(id, RuntimeState::Stopped));
+            snapshot.last_warning = Some(message.to_string());
+        }
+
         fn record(&self, command: &str) {
             self.commands
                 .lock()

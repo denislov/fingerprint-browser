@@ -1,33 +1,26 @@
-//! Browser-core discovery for the application bootstrap.
+//! Browser-core discovery and catalogue maintenance for the bootstrap.
 //!
-//! Phase 4 owns real version detection in the runtime crate. Until that lands
-//! this module only has to produce one launchable core row so the window can
-//! start a browser: it resolves an executable, asks it for `--version`, and
-//! parses the major out of the answer.
+//! Version detection itself lives in the runtime crate
+//! ([`runtime::version::VersionReport`]) because it feeds the capability table.
+//! This module owns the product decisions around it: where to look for a core,
+//! what to name it, and how a replaced binary is noticed.
 
+use domain::{BrowserCore, CoreId};
+use runtime::version::{DEFAULT_TIMEOUT as VERSION_TIMEOUT, VersionReport};
 use std::ffi::OsString;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use storage::CoreRepository;
 
 /// Explicit core executable. Wins over every other source.
 pub const BIN_ENV: &str = "FP_BROWSER_CHROMIUM_BIN";
 /// Major override for binaries that do not answer `--version` usefully.
 pub const MAJOR_ENV: &str = "FP_BROWSER_CHROMIUM_MAJOR";
 
-const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
-const VERSION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// A banner message and whether it is an error, as the window banner shows it.
+pub type Notice = (String, bool);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DetectedCore {
-    pub name: String,
-    pub executable: PathBuf,
-    pub version: String,
-    /// Detected major, or the `FP_BROWSER_CHROMIUM_MAJOR` override.
-    /// `0` means "unknown"; the capability layer rejects it at launch.
-    pub major: u32,
-}
+/// Version probe, injected so maintenance can be tested without spawning.
+pub type Probe<'a> = &'a dyn Fn(&Path) -> VersionReport;
 
 /// Environment-first discovery, then conventional relative paths, then `PATH`.
 ///
@@ -53,34 +46,170 @@ pub fn discover() -> Option<PathBuf> {
         .find_map(|candidate| existing_file(&candidate))
 }
 
-fn existing_file(path: &Path) -> Option<PathBuf> {
-    path.is_file().then(|| path.to_path_buf())
+/// Reconciles the core catalogue with what is actually on disk.
+///
+/// Registers one core when the catalogue is empty, and otherwise re-probes the
+/// registered cores so a replaced binary cannot keep a stale major (and with it
+/// a stale capability table).
+pub fn maintain(cores: &dyn CoreRepository) -> Option<Notice> {
+    maintain_with(cores, discover(), env_major(), &|path| {
+        VersionReport::probe(path, VERSION_TIMEOUT)
+    })
 }
 
-pub fn detect(executable: &Path) -> DetectedCore {
-    let version = read_version(executable);
-    let major = version
-        .as_deref()
-        .and_then(parse_major)
-        .or_else(env_major)
-        .unwrap_or(0);
+fn maintain_with(
+    cores: &dyn CoreRepository,
+    discovered: Option<PathBuf>,
+    major_override: Option<u32>,
+    probe: Probe<'_>,
+) -> Option<Notice> {
+    let existing = match cores.list() {
+        Ok(existing) => existing,
+        Err(error) => return Some((format!("could not read browser cores: {error}"), true)),
+    };
 
-    DetectedCore {
+    if existing.is_empty() {
+        let Some(executable) = discovered else {
+            return Some((
+                format!(
+                    "no browser core found; set {} to a fingerprint-chromium executable and restart",
+                    BIN_ENV
+                ),
+                true,
+            ));
+        };
+        return register(cores, &executable, major_override, probe);
+    }
+
+    refresh(cores, &existing, probe)
+}
+
+fn register(
+    cores: &dyn CoreRepository,
+    executable: &Path,
+    major_override: Option<u32>,
+    probe: Probe<'_>,
+) -> Option<Notice> {
+    let report = probe(executable);
+    let major = report.major.or(major_override).unwrap_or(0);
+    let version = report
+        .banner
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let core = BrowserCore {
+        id: CoreId::new(),
         name: display_name(executable, major),
         executable: executable.to_path_buf(),
-        version: version.unwrap_or_else(|| "unknown".to_string()),
+        version,
         major,
+    };
+
+    if let Err(error) = cores.save(&core) {
+        return Some((format!("could not store browser core: {error}"), true));
+    }
+
+    tracing::info!(
+        "registered browser core {} (major {})",
+        core.name,
+        core.major
+    );
+
+    (major == 0).then(|| {
+        (
+            format!(
+                "{} did not report a usable version; set {} so fingerprint switches can be checked",
+                core.executable.display(),
+                MAJOR_ENV
+            ),
+            false,
+        )
+    })
+}
+
+/// Re-probes every registered core and rewrites the ones whose binary changed.
+///
+/// A core that cannot be re-read is left alone: its stored major was either
+/// detected earlier or set by `FP_BROWSER_CHROMIUM_MAJOR`, and dropping it would
+/// break a working configuration. A missing executable is reported instead.
+fn refresh(
+    cores: &dyn CoreRepository,
+    existing: &[BrowserCore],
+    probe: Probe<'_>,
+) -> Option<Notice> {
+    let mut updated: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+
+    for core in existing {
+        if !core.executable.is_file() {
+            missing.push(format!("{} ({})", core.name, core.executable.display()));
+            continue;
+        }
+
+        let report = probe(&core.executable);
+        let Some(major) = report.major else {
+            continue;
+        };
+        if major == core.major && report.banner.as_deref() == Some(core.version.as_str()) {
+            continue;
+        }
+
+        let refreshed = BrowserCore {
+            name: refreshed_name(core, major),
+            version: report
+                .banner
+                .clone()
+                .unwrap_or_else(|| core.version.clone()),
+            major,
+            ..core.clone()
+        };
+        if let Err(error) = cores.save(&refreshed) {
+            return Some((format!("could not update browser core: {error}"), true));
+        }
+
+        tracing::info!(
+            "browser core {} changed: major {} -> {}",
+            core.name,
+            core.major,
+            major
+        );
+        updated.push(format!(
+            "{} is now {} (major {})",
+            core.name, refreshed.version, refreshed.major
+        ));
+    }
+
+    if !missing.is_empty() {
+        return Some((
+            format!(
+                "browser core executable missing: {}; set {} and restart",
+                missing.join(", "),
+                BIN_ENV
+            ),
+            true,
+        ));
+    }
+
+    (!updated.is_empty()).then(|| {
+        (
+            format!("browser core updated: {}", updated.join("; ")),
+            false,
+        )
+    })
+}
+
+/// Keeps an auto-generated name in step with the detected major, but never
+/// rewrites a name the user chose.
+fn refreshed_name(core: &BrowserCore, major: u32) -> String {
+    if core.name == display_name(&core.executable, core.major) {
+        display_name(&core.executable, major)
+    } else {
+        core.name.clone()
     }
 }
 
-/// First run of ASCII digits in the version banner, e.g. `Chromium 148.0.7778.215`.
-pub fn parse_major(version_output: &str) -> Option<u32> {
-    let digits: String = version_output
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse().ok()
+fn existing_file(path: &Path) -> Option<PathBuf> {
+    path.is_file().then(|| path.to_path_buf())
 }
 
 fn env_major() -> Option<u32> {
@@ -125,59 +254,185 @@ fn executable_names() -> Vec<OsString> {
     names.iter().map(OsString::from).collect()
 }
 
-/// Run `<executable> --version` with a bounded wait.
-///
-/// The binary is not part of this project, so it can never be awaited without a
-/// deadline: a wrong or hung executable must not block the window.
-fn read_version(executable: &Path) -> Option<String> {
-    let mut child = Command::new(executable)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    let deadline = Instant::now() + VERSION_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                let mut output = String::new();
-                child.stdout.take()?.read_to_string(&mut output).ok()?;
-                let output = output.trim().to_string();
-                return (!output.is_empty()).then_some(output);
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(VERSION_POLL_INTERVAL);
-            }
-            Err(_) => return None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use storage::MemCoreRepository;
 
-    #[test]
-    fn parses_the_major_from_a_chromium_banner() {
-        assert_eq!(parse_major("Chromium 148.0.7778.215"), Some(148));
-        assert_eq!(parse_major("Google Chrome 143.0.7499.169"), Some(143));
-        assert_eq!(parse_major("  Chromium 110.0.5481.177\n"), Some(110));
+    fn touching(path: &Path) {
+        std::fs::write(path, b"#!/bin/sh\n").expect("write executable");
+    }
+
+    fn probe_returning(banner: Option<&'static str>) -> impl Fn(&Path) -> VersionReport {
+        move |_| VersionReport::from_banner(banner.map(str::to_string))
+    }
+
+    fn temp_executable(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fp-core-detect-{}", CoreId::new()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(name);
+        touching(&path);
+        path
     }
 
     #[test]
-    fn rejects_banners_without_digits() {
-        assert_eq!(parse_major(""), None);
-        assert_eq!(parse_major("Chromium"), None);
+    fn an_empty_catalogue_registers_the_discovered_core() {
+        let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
+        let executable = temp_executable("chrome");
+
+        let notice = maintain_with(
+            cores.as_ref(),
+            Some(executable.clone()),
+            None,
+            &probe_returning(Some("Chromium 148.0.7778.215")),
+        );
+
+        assert_eq!(notice, None);
+        let stored = cores.list().expect("list");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].major, 148);
+        assert_eq!(stored[0].version, "Chromium 148.0.7778.215");
+        assert_eq!(stored[0].name, "chrome 148");
+        assert_eq!(stored[0].executable, executable);
+    }
+
+    #[test]
+    fn the_major_override_covers_a_silent_binary() {
+        let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
+        let executable = temp_executable("chrome");
+
+        let notice = maintain_with(
+            cores.as_ref(),
+            Some(executable),
+            Some(144),
+            &probe_returning(None),
+        );
+
+        assert_eq!(notice, None);
+        assert_eq!(cores.list().expect("list")[0].major, 144);
+        assert_eq!(cores.list().expect("list")[0].version, "unknown");
+    }
+
+    #[test]
+    fn an_unreadable_version_is_reported_without_a_major() {
+        let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
+        let executable = temp_executable("chrome");
+
+        let notice = maintain_with(
+            cores.as_ref(),
+            Some(executable.clone()),
+            None,
+            &probe_returning(None),
+        );
+
+        let (message, is_error) = notice.expect("notice");
+        assert!(!is_error, "a registered but unclassified core is a warning");
+        assert!(message.contains(MAJOR_ENV), "{message}");
+        assert_eq!(cores.list().expect("list")[0].major, 0);
+    }
+
+    #[test]
+    fn no_discovered_core_is_an_error_not_an_empty_catalogue() {
+        let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
+
+        let notice = maintain_with(cores.as_ref(), None, None, &probe_returning(None));
+
+        let (message, is_error) = notice.expect("notice");
+        assert!(is_error);
+        assert!(message.contains("no browser core found"), "{message}");
+        assert!(message.contains(BIN_ENV), "{message}");
+        assert!(cores.list().expect("list").is_empty());
+    }
+
+    #[test]
+    fn a_replaced_binary_updates_the_stored_major_and_name() {
+        let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
+        let executable = temp_executable("chrome");
+        maintain_with(
+            cores.as_ref(),
+            Some(executable.clone()),
+            None,
+            &probe_returning(Some("Chromium 148.0.7778.215")),
+        );
+
+        let notice = maintain_with(
+            cores.as_ref(),
+            None,
+            None,
+            &probe_returning(Some("Chromium 150.0.1234.5")),
+        );
+
+        let (message, is_error) = notice.expect("notice");
+        assert!(!is_error);
+        assert!(message.contains("150.0.1234.5"), "{message}");
+        let stored = cores.list().expect("list");
+        assert_eq!(stored.len(), 1, "refresh must not add a second core");
+        assert_eq!(stored[0].major, 150);
+        assert_eq!(stored[0].name, "chrome 150");
+    }
+
+    #[test]
+    fn a_custom_core_name_survives_a_version_change() {
+        let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
+        let executable = temp_executable("chrome");
+        maintain_with(
+            cores.as_ref(),
+            Some(executable.clone()),
+            None,
+            &probe_returning(Some("Chromium 148.0.7778.215")),
+        );
+        let mut renamed = cores.list().expect("list")[0].clone();
+        renamed.name = "Work Browser".to_string();
+        cores.save(&renamed).expect("rename");
+
+        maintain_with(
+            cores.as_ref(),
+            None,
+            None,
+            &probe_returning(Some("Chromium 150.0.1234.5")),
+        );
+
+        let stored = cores.list().expect("list");
+        assert_eq!(stored[0].name, "Work Browser");
+        assert_eq!(stored[0].major, 150);
+    }
+
+    #[test]
+    fn an_unreadable_probe_keeps_the_stored_core() {
+        let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
+        let executable = temp_executable("chrome");
+        maintain_with(
+            cores.as_ref(),
+            Some(executable),
+            None,
+            &probe_returning(Some("Chromium 148.0.7778.215")),
+        );
+
+        let notice = maintain_with(cores.as_ref(), None, None, &probe_returning(None));
+
+        assert_eq!(notice, None, "an unreadable probe is not news");
+        assert_eq!(cores.list().expect("list")[0].major, 148);
+    }
+
+    #[test]
+    fn a_missing_executable_is_an_error_that_names_the_core() {
+        let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
+        let executable = temp_executable("chrome");
+        maintain_with(
+            cores.as_ref(),
+            Some(executable.clone()),
+            None,
+            &probe_returning(Some("Chromium 148.0.7778.215")),
+        );
+        std::fs::remove_file(&executable).expect("remove executable");
+
+        let notice = maintain_with(cores.as_ref(), None, None, &probe_returning(None));
+
+        let (message, is_error) = notice.expect("notice");
+        assert!(is_error);
+        assert!(message.contains("chrome 148"), "{message}");
+        assert!(message.contains(BIN_ENV), "{message}");
     }
 
     #[test]
@@ -190,15 +445,6 @@ mod tests {
             display_name(Path::new("/tmp/tools/chrome"), 0),
             "chrome (version unknown)"
         );
-    }
-
-    #[test]
-    fn detection_falls_back_to_a_named_version_unknown_core() {
-        let detected = detect(Path::new("definitely-not-a-real-binary-xyz"));
-
-        assert_eq!(detected.major, 0);
-        assert_eq!(detected.version, "unknown");
-        assert!(detected.name.contains("version unknown"));
     }
 
     #[test]

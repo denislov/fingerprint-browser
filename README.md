@@ -43,8 +43,33 @@ Configure `SupervisorComponents.xray_executable`, `runtime_dir` and
 (`bin/xray.exe` on Windows), `data/runtime` and five seconds. Temporary configs
 live at `<runtime_dir>/<profile-id>/xray.json`; Unix files use mode `0600`.
 
-Phase 5 has its first slice: the GPUI window is wired to the services instead of
-being a static mockup.
+Phase 4 has started: version detection, the capability table and the
+compatibility report.
+
+- `BrowserCore.major` now comes from the binary. `runtime::version::VersionReport`
+  runs `<executable> --version` under a five second deadline and parses the first
+  digit run (`Chromium 148.0.7778.215` -> 148); `FP_BROWSER_CHROMIUM_MAJOR`
+  overrides it for binaries that do not answer usefully.
+- The catalogue is reconciled on every start: a replaced binary is re-detected
+  and its stored major and auto-generated name are refreshed, a custom name is
+  kept, and a missing executable is reported. A core whose version cannot be
+  re-read keeps its stored major rather than being downgraded to "unknown".
+- `CoreCapabilities::for_major` is a table instead of a stub. Majors split at
+  `FingerprintGeneration::PIVOT_MAJOR` (144, the first generation whose switch
+  set was verified against a real engine): both generations carry the stable set
+  (seed, brand, platform, both version switches, language, timezone, hardware
+  concurrency, WebRTC policy, `--disable-spoofing`), and only the verified
+  generation carries the canvas and client-rects noise switches. See
+  [the switch matrix](docs/fingerprint-matrix.md) for the evidence and the gaps.
+- Nothing is dropped in silence. A switch the core cannot honour is omitted at
+  serialization time and reported by `runtime::compat::check`, which the
+  supervisor turns into a `Warning` event; it lands in
+  `RuntimeSnapshot::last_warning`, on the profile row and in Runtime Details.
+  An undetected version (major `0`) is refused instead of being resolved to an
+  assumed capability set.
+
+Phase 5 also has its first slice: the GPUI window is wired to the services
+instead of being a static mockup.
 
 - `crates/app/src/state.rs` holds the view-facing state (`AppState`). It owns no
   runtime state: every read goes through `RuntimeService::snapshot`, and a
@@ -75,10 +100,15 @@ Runtime configuration for the window:
 FP_BROWSER_CHROMIUM_BIN=/absolute/path/to/chrome cargo run -p app
 ```
 
-Known limitation: a window destroyed by another X client without the close
-protocol (for example `xdotool windowclose`) may leave the process running with
-its browsers; the supported exits are the window manager's close button and the
-in-window Quit action.
+Known limitations:
+
+- A window destroyed by another X client without the close protocol (for example
+  `xdotool windowclose`) may leave the process running with its browsers. The
+  supported exits are the window manager's close button and the in-window Quit
+  action.
+- Terminating the process directly (`SIGTERM`, `SIGKILL`) skips the reclaim path
+  for the same reason: only the graceful exit asks the supervisor for
+  `ShutdownAll`. Signal handling is not implemented yet.
 
 ## Validation and next steps
 
@@ -145,7 +175,7 @@ close. Persistence is not guaranteed on a forced exit.
 
 Before declaring Phase 3 fully accepted for the fingerprint browser product,
 repeat acceptance with fingerprint-chromium. Wiring runtime settings and services
-into the GPUI UI has started (see the Phase 5 slice above) but the Proxies,
+into the GPUI UI has started (see the Phase 5 slice below) but the Proxies,
 Browser Cores and Settings pages do not exist yet, so proxy assignment and core
 management still happen outside the window.
 Phase 4 then adds version detection and fingerprint capability compatibility.

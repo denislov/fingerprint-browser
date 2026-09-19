@@ -11,7 +11,6 @@ mod state;
 mod ui;
 
 use application::{DefaultProfileService, ProfileService, RuntimeService};
-use domain::BrowserCore;
 use gpui_kit::component::Root;
 use gpui_kit::*;
 use runtime::{
@@ -47,7 +46,7 @@ fn main() {
     let core_repo: Arc<dyn CoreRepository> = Arc::new(storage.cores());
     let proxy_repo: Arc<dyn ProxyRepository> = Arc::new(storage.proxies());
 
-    let core_notice = ensure_core(core_repo.as_ref());
+    let core_notice = core_detect::maintain(core_repo.as_ref());
 
     let channels = RuntimeSupervisorChannels::new(EVENT_CAPACITY);
     let event_rx = channels.event_rx.clone();
@@ -130,59 +129,6 @@ fn main() {
     });
 
     shutdown(&channels.command_tx, supervisor_thread);
-}
-
-/// Resolve one browser core, or explain why the window cannot launch anything.
-///
-/// Returns the banner message and whether it is an error.
-fn ensure_core(cores: &dyn CoreRepository) -> Option<(String, bool)> {
-    match cores.list() {
-        Ok(existing) if !existing.is_empty() => return None,
-        Ok(_) => {}
-        Err(error) => {
-            return Some((format!("could not read browser cores: {error}"), true));
-        }
-    }
-
-    let Some(executable) = core_detect::discover() else {
-        return Some((
-            format!(
-                "no browser core found; set {} to a fingerprint-chromium executable and restart",
-                core_detect::BIN_ENV
-            ),
-            true,
-        ));
-    };
-
-    let detected = core_detect::detect(&executable);
-    let notice = (detected.major == 0).then(|| {
-        (
-            format!(
-                "{} did not report a usable version; set {} so fingerprint switches can be checked",
-                detected.executable.display(),
-                core_detect::MAJOR_ENV
-            ),
-            false,
-        )
-    });
-
-    let core = BrowserCore {
-        id: domain::CoreId::new(),
-        name: detected.name,
-        executable: detected.executable,
-        version: detected.version,
-        major: detected.major,
-    };
-    if let Err(error) = cores.save(&core) {
-        return Some((format!("could not store browser core: {error}"), true));
-    }
-
-    tracing::info!(
-        "registered browser core {} (major {})",
-        core.name,
-        core.major
-    );
-    notice
 }
 
 /// Ask the supervisor to reclaim every child, then give it a bounded moment.
