@@ -134,11 +134,13 @@ pub(crate) fn wait_ready(
     child: &mut std::process::Child,
     port: u16,
     timeout: std::time::Duration,
+    mut poll_sessions: impl FnMut(),
 ) -> Result<(), ProxyError> {
     use std::net::{Ipv4Addr, SocketAddr, TcpStream};
     use std::time::{Duration, Instant};
     let start = Instant::now();
     loop {
+        poll_sessions();
         if let Some(status) = child.try_wait()? {
             return Err(ProxyError::Other(format!(
                 "Xray exited before readiness: {status}"

@@ -35,20 +35,77 @@ impl CdpProbe for HttpCdpProbe {
         let url = format!("http://127.0.0.1:{port}/json/version");
 
         while start.elapsed() < timeout {
-            let parsed_info = ureq::get(&url)
+            let remaining = timeout.saturating_sub(start.elapsed());
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .proxy(None)
+                .timeout_global(Some(remaining))
+                .build()
+                .into();
+            let parsed_info = agent
+                .get(&url)
                 .call()
                 .ok()
                 .and_then(|mut r| r.body_mut().read_to_string().ok())
                 .and_then(|body| serde_json::from_str::<CdpInfo>(&body).ok());
 
-            if let Some(info) = parsed_info {
+            if let Some(info) = parsed_info
+                .filter(|info| !info.browser.is_empty() && !info.web_socket_debugger_url.is_empty())
+            {
                 return Ok(info);
             }
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(
+                timeout
+                    .saturating_sub(start.elapsed())
+                    .min(Duration::from_millis(150)),
+            );
         }
 
         Err(CdpError::Timeout {
             timeout_secs: timeout.as_secs(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    #[test]
+    fn unresponsive_http_server_cannot_exceed_readiness_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Keep the listener alive without servicing requests.
+        let start = Instant::now();
+        assert!(
+            HttpCdpProbe
+                .wait_ready(port, Duration::from_millis(100))
+                .is_err()
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn empty_json_is_not_ready() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let _ = stream.read(&mut [0; 1024]);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .unwrap();
+        });
+        assert!(
+            HttpCdpProbe
+                .wait_ready(port, Duration::from_millis(100))
+                .is_err()
+        );
+        server.join().unwrap();
     }
 }

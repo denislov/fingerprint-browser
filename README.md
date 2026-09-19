@@ -58,12 +58,25 @@ warnings. Strict `-D warnings` alone currently fails on that existing configurat
 
 Runtime lifecycle tests on Unix require Python 3 and permission to bind loopback
 ports. They use controlled child processes rather than a real browser/Xray pair.
-Real upstream connectivity, browser state persistence and Windows process-tree
-cleanup still need end-to-end acceptance testing.
+Real Xray 26.2.6 has also passed an opt-in integration test against local
+authenticated SOCKS5 and HTTP CONNECT upstream fixtures, including bidirectional
+payload forwarding. Run it with:
 
-Before declaring Phase 3 fully accepted, make startup readiness nonblocking:
-the current serial supervisor delays active-session polling and stop commands
-while another profile is waiting for Xray/CDP. Also harden Unix process-tree
-termination (the existing controller kills only the parent PID), reserve launch
-ports through startup, and wire runtime settings and services into the GPUI UI.
+```sh
+XRAY_BIN=/absolute/path/to/xray cargo test -p runtime --test xray_real -- --ignored
+```
+
+The binary is not bundled. Browser state persistence, actual remote upstreams and
+Windows process-tree cleanup still need end-to-end acceptance testing.
+
+Startup readiness now polls existing sessions during Xray waits and between
+bounded CDP requests. CDP bypasses environment proxies and requires browser and
+WebSocket metadata. Unix children run in independent process groups, allowing
+cleanup of descendants even after their leader exits (children that deliberately
+leave the group require stronger OS containment).
+
+Before declaring Phase 3 fully accepted, allow stop/shutdown commands to interrupt
+startup, reserve launch ports through startup, and wire runtime settings and
+services into the GPUI UI. Event consumers must keep draining the bounded event
+channel to avoid blocking the supervisor.
 Phase 4 then adds version detection and fingerprint capability compatibility.

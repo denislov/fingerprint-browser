@@ -313,19 +313,21 @@ impl RuntimeSupervisor {
                 self.xray_builder
                     .build(proxy, xray_plan.socks_port, &xray_plan.config_path)
                     .map_err(|e| e.to_string())?;
-                let mut child = std::process::Command::new(&xray_plan.executable)
+                let mut command = std::process::Command::new(&xray_plan.executable);
+                command
                     .arg("run")
                     .arg("-config")
                     .arg(&xray_plan.config_path)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
+                    .stderr(std::process::Stdio::null());
+                let mut child = crate::process::spawn_managed(&mut command)
                     .map_err(|e| format!("Xray spawn failed: {e}"))?;
                 if let Err(e) = crate::xray::wait_ready(
                     &mut child,
                     xray_plan.socks_port,
                     self.xray_ready_timeout,
+                    || self.poll_active_sessions(),
                 ) {
                     self.terminate_child(&mut child);
                     return Err(e.to_string());
@@ -350,7 +352,7 @@ impl RuntimeSupervisor {
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
 
-        let mut child = match cmd.spawn() {
+        let mut child = match crate::process::spawn_managed(&mut cmd) {
             Ok(c) => c,
             Err(e) => {
                 if let Some(child) = xray.as_mut() {
@@ -371,11 +373,17 @@ impl RuntimeSupervisor {
         let browser_pid = child.id();
 
         // 6. Probe CDP readiness
-        let readiness = self
-            .cdp_probe
-            .wait_ready(cdp_port, self.cdp_ready_timeout)
-            .map_err(|e| e.to_string())
-            .and_then(|info| {
+        let deadline = std::time::Instant::now() + self.cdp_ready_timeout;
+        let readiness = loop {
+            self.poll_active_sessions();
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break Err("CDP readiness timed out".to_string());
+            }
+            let live = (|| -> Result<(), String> {
+                if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                    return Err(format!("browser exited during CDP readiness: {status}"));
+                }
                 if let Some(child) = xray.as_mut() {
                     match child.try_wait() {
                         Ok(None) => {}
@@ -385,8 +393,30 @@ impl RuntimeSupervisor {
                         Err(e) => return Err(format!("Xray status check failed: {e}")),
                     }
                 }
-                Ok(info)
-            });
+                Ok(())
+            })();
+            if let Err(error) = live {
+                break Err(error);
+            }
+            match self
+                .cdp_probe
+                .wait_ready(cdp_port, remaining.min(Duration::from_millis(100)))
+            {
+                Ok(info) => {
+                    // Recheck Xray after the probe before advertising Running.
+                    if let Some(xray) = xray.as_mut()
+                        && !matches!(xray.try_wait(), Ok(None))
+                    {
+                        break Err("Xray exited during CDP readiness".into());
+                    }
+                    break Ok(info);
+                }
+                Err(crate::CdpError::Timeout { .. }) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => break Err(error.to_string()),
+            }
+        };
         match readiness {
             Ok(_info) => {
                 let session = ActiveSession {
@@ -512,9 +542,7 @@ impl RuntimeSupervisor {
     }
 
     fn terminate_child(&self, child: &mut std::process::Child) {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
-        }
+        // The group may still contain renderers even after its leader exits.
         let _ = self.process_tree.terminate_tree(child.id());
         // A direct kill is a fallback if the platform tree controller fails.
         let _ = child.kill();
@@ -625,6 +653,7 @@ mod tests {
                 xray_executable: executable,
                 runtime_dir: dir.clone(),
                 xray_ready_timeout: Duration::from_millis(500),
+                cdp_ready_timeout: Duration::from_millis(200),
                 ..Default::default()
             };
             let channels = RuntimeSupervisorChannels::new(128);
@@ -687,6 +716,49 @@ mod tests {
         }
     }
     const XRAY: &str = "#!/usr/bin/env python3\nimport json,socket,sys,time\nc=json.load(open(sys.argv[3]))\ns=socket.socket()\ns.bind(('127.0.0.1',c['inbounds'][0]['port']))\ns.listen()\ntime.sleep(60)\n";
+
+    #[test]
+    fn starting_another_profile_still_reaps_existing_crashed_session() {
+        struct CheckingProbe {
+            snapshots: Arc<RwLock<HashMap<ProfileId, RuntimeSnapshot>>>,
+            crashed: ProfileId,
+        }
+        impl CdpProbe for CheckingProbe {
+            fn wait_ready(&self, _: u16, _: Duration) -> Result<CdpInfo, CdpError> {
+                assert_eq!(
+                    self.snapshots.read().unwrap()[&self.crashed].state,
+                    RuntimeState::Stopped
+                );
+                Ok(CdpInfo::default())
+            }
+        }
+        let mut f = Fixture::new(true, true, XRAY);
+        f.start();
+        let id = f.params.profile.id;
+        let xray = f
+            .supervisor
+            .active_sessions
+            .get_mut(&id)
+            .unwrap()
+            .xray
+            .as_mut()
+            .unwrap();
+        xray.kill().unwrap();
+        xray.wait().unwrap();
+        f.supervisor.cdp_probe = Box::new(CheckingProbe {
+            snapshots: f.supervisor.snapshots.clone(),
+            crashed: id,
+        });
+        let mut next = f.params.clone();
+        next.profile.id = ProfileId::new();
+        next.profile.user_data_dir = f.dir.join("second-profile");
+        let next_id = next.profile.id;
+        f.supervisor.start_profile(next);
+        assert_eq!(
+            f.supervisor.snapshots.read().unwrap()[&next_id].state,
+            RuntimeState::Running
+        );
+    }
 
     #[test]
     fn xray_crash_terminates_browser_and_clears_session() {
