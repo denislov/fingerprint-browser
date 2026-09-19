@@ -10,7 +10,7 @@ mod tests {
     use domain::CoreId;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use storage::MemProfileRepository;
+    use storage::{CoreRepository, MemProfileRepository};
 
     #[test]
     fn test_profile_service_create_and_duplicate() {
@@ -53,5 +53,44 @@ mod tests {
         let remaining = service.list().expect("list profiles");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, dup.id);
+    }
+
+    #[test]
+    fn test_profile_service_with_sqlite_storage() {
+        let storage = storage::SqliteStorage::in_memory().expect("sqlite in memory");
+        let repo = Arc::new(storage.profiles());
+        let base_dir = PathBuf::from("data");
+        let service = DefaultProfileService::new(repo, base_dir);
+
+        let core_id = CoreId::new();
+        let core = domain::BrowserCore {
+            id: core_id,
+            name: "Core 128".to_string(),
+            executable: PathBuf::from("chrome.exe"),
+            version: "128.0".to_string(),
+            major: 128,
+        };
+        storage.cores().save(&core).expect("save core");
+
+        let draft = NewProfile {
+            name: "SQLite Profile".to_string(),
+            core_id,
+            user_data_dir: None,
+            fingerprint: None,
+            proxy_id: None,
+            window: None,
+            start_target: None,
+        };
+
+        let profile = service.create(draft).expect("create profile in sqlite");
+        assert_eq!(profile.name, "SQLite Profile");
+
+        let dup = service
+            .duplicate(profile.id, "SQLite Profile Copy".to_string())
+            .expect("duplicate in sqlite");
+        assert_eq!(dup.name, "SQLite Profile Copy");
+
+        let all = service.list().expect("list from sqlite");
+        assert_eq!(all.len(), 2);
     }
 }
