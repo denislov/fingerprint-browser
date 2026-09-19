@@ -397,7 +397,7 @@ impl RuntimeSupervisor {
             match result {
                 Ok(child) => xray = Some(child),
                 Err(e) => {
-                    Self::remove_config(xray_config.as_deref());
+                    self.clear_start_files(profile_id, xray_config.as_deref());
                     if cancelled {
                         self.stop_profile(profile_id);
                     } else {
@@ -413,7 +413,7 @@ impl RuntimeSupervisor {
             if let Some(child) = xray.as_mut() {
                 self.terminate_child(child);
             }
-            Self::remove_config(xray_config.as_deref());
+            self.clear_start_files(profile_id, xray_config.as_deref());
             self.stop_profile(profile_id);
             return;
         }
@@ -432,7 +432,7 @@ impl RuntimeSupervisor {
                 if let Some(child) = xray.as_mut() {
                     self.terminate_child(child);
                 }
-                Self::remove_config(xray_config.as_deref());
+                self.clear_start_files(profile_id, xray_config.as_deref());
                 self.fail_start(
                     profile_id,
                     format!(
@@ -445,6 +445,43 @@ impl RuntimeSupervisor {
         };
 
         let browser_pid = child.id();
+
+        // Write the session record as soon as both children exist, before the
+        // readiness wait: a process killed during that wait would otherwise
+        // leave a browser running that no later run can find. The start is still
+        // not failed for a record that cannot be written - the browser is up -
+        // and the warning says what is lost.
+        let record = SessionRecord {
+            profile_id,
+            cdp_port,
+            socks_port,
+            started_at: journal::now_millis(),
+            browser: ProcessRecord::captured(
+                browser_pid,
+                &plan.browser_executable,
+                &effective_args,
+                self.process_inspector.as_ref(),
+            ),
+            xray: plan.xray.as_ref().and_then(|xray_plan| {
+                xray_pid.map(|pid| {
+                    ProcessRecord::captured(
+                        pid,
+                        &xray_plan.executable,
+                        &xray_plan.args(),
+                        self.process_inspector.as_ref(),
+                    )
+                })
+            }),
+        };
+        if let Err(error) = journal::write(&self.runtime_dir, &record) {
+            self.emit(RuntimeEvent::Warning {
+                profile_id,
+                message: format!(
+                    "the session record could not be written ({error}); if this process is \
+                     killed, the browser it started will not be reclaimed by the next run"
+                ),
+            });
+        }
 
         // 6. Probe CDP readiness
         let deadline = std::time::Instant::now() + self.cdp_ready_timeout;
@@ -516,38 +553,17 @@ impl RuntimeSupervisor {
 
                 self.active_sessions.insert(profile_id, session);
 
-                // Write down what was launched before announcing it, so a
-                // process killed between here and the next stop can still be
-                // found. The start is not failed for it: the browser is already
-                // running, and the warning says what is lost.
-                let record = SessionRecord {
-                    profile_id,
-                    cdp_port,
-                    socks_port,
-                    started_at: journal::now_millis(),
-                    browser: ProcessRecord::captured(
-                        browser_pid,
-                        &plan.browser_executable,
-                        &effective_args,
-                        self.process_inspector.as_ref(),
-                    ),
-                    xray: plan.xray.as_ref().and_then(|xray_plan| {
-                        xray_pid.map(|pid| {
-                            ProcessRecord::captured(
-                                pid,
-                                &xray_plan.executable,
-                                &xray_plan.args(),
-                                self.process_inspector.as_ref(),
-                            )
-                        })
-                    }),
-                };
-                if let Err(error) = journal::write(&self.runtime_dir, &record) {
+                // The record has to be readable back, or the next run will find
+                // a process it cannot identify. A disagreement is reported now
+                // rather than at the next start.
+                if let Some(disagreement) =
+                    journal::confirm(&record, self.process_inspector.as_ref())
+                {
                     self.emit(RuntimeEvent::Warning {
                         profile_id,
                         message: format!(
-                            "the session record could not be written ({error}); if this process is \
-                             killed, the browser it started will not be reclaimed by the next run"
+                            "the session record does not match the running processes ({disagreement}); \
+                             the next run will not reclaim them"
                         ),
                     });
                 }
@@ -584,7 +600,7 @@ impl RuntimeSupervisor {
                 if let Some(child) = xray.as_mut() {
                     self.terminate_child(child);
                 }
-                Self::remove_config(xray_config.as_deref());
+                self.clear_start_files(profile_id, xray_config.as_deref());
                 if cancelled {
                     self.stop_profile(profile_id);
                 } else {
@@ -777,6 +793,14 @@ impl RuntimeSupervisor {
         // A direct kill is a fallback if the platform tree controller fails.
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// What a failed, cancelled or rolled-back start leaves behind: the
+    /// temporary Xray config, which holds upstream credentials, and the session
+    /// record, which would otherwise name processes that are already gone.
+    fn clear_start_files(&self, profile_id: ProfileId, xray_config: Option<&std::path::Path>) {
+        Self::remove_config(xray_config);
+        journal::remove(&self.runtime_dir, profile_id);
     }
 
     fn remove_config(path: Option<&std::path::Path>) {
@@ -995,6 +1019,34 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "a stopped session leaves no record to reclaim"
+        );
+    }
+
+    /// A start that rolls back has to take its record with it: a record naming
+    /// processes that are already gone would be reported as a leftover at the
+    /// next start.
+    #[test]
+    fn a_start_that_never_reaches_readiness_leaves_no_record() {
+        // The browser starts (it is `/bin/sleep`) but its debugging endpoint
+        // never answers, so the start fails and rolls back.
+        let mut f = Fixture::new(true, false, XRAY);
+        f.start();
+
+        assert!(
+            matches!(f.snapshot().state, RuntimeState::Failed { .. }),
+            "{:?}",
+            f.snapshot().state
+        );
+        assert!(
+            journal::read(&f.dir, f.params.profile.id)
+                .unwrap()
+                .is_none(),
+            "a rolled back start left a record behind"
+        );
+        assert!(!f.config().exists());
+        assert!(
+            f.supervisor.reclaim_orphans().is_empty(),
+            "a rolled back start leaves nothing to reclaim"
         );
     }
 
