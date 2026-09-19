@@ -33,6 +33,18 @@ impl LaunchPlanner for HeadlessPlanner {
     }
 }
 
+/// A planner that re-enables the leaking ICE policy, to prove the probe can
+/// see a leak at all. Nothing in the product emits this.
+struct LeakyWebRtcPlanner;
+impl LaunchPlanner for LeakyWebRtcPlanner {
+    fn build(&self, ctx: LaunchContext<'_>) -> Result<LaunchPlan, LaunchPlanError> {
+        let mut plan = HeadlessPlanner.build(ctx)?;
+        plan.browser_args
+            .insert(0, "--webrtc-ip-handling-policy=default".into());
+        Ok(plan)
+    }
+}
+
 struct Harness {
     facade: ChannelRuntimeFacade,
     sender: crossbeam_channel::Sender<RuntimeCommand>,
@@ -45,6 +57,10 @@ impl Harness {
     /// `major` decides the capability table the supervisor resolves against, so
     /// a test can ask for a legacy or a verified core.
     fn with_major(major: u32) -> Self {
+        Self::with_planner(major, Box::new(HeadlessPlanner))
+    }
+
+    fn with_planner(major: u32, planner: Box<dyn LaunchPlanner>) -> Self {
         let dir = std::env::temp_dir().join(format!("fp-fingerprint-{}", ProfileId::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let channels = RuntimeSupervisorChannels::new(128);
@@ -55,7 +71,7 @@ impl Harness {
             channels.event_tx,
             snapshots,
             SupervisorComponents {
-                planner: Box::new(HeadlessPlanner),
+                planner,
                 // No proxy is assigned in these tests, so Xray is never spawned.
                 xray_executable: dir.join("unused-xray"),
                 runtime_dir: dir.join("runtime"),
@@ -81,6 +97,11 @@ impl Harness {
 
     fn verified() -> Self {
         Self::with_major(148)
+    }
+
+    /// Verified capabilities with the ICE policy forced back open.
+    fn verified_with_leaking_webrtc() -> Self {
+        Self::with_planner(148, Box::new(LeakyWebRtcPlanner))
     }
 
     /// A document for the probe to run on, reachable as a `file:` URL.
@@ -360,4 +381,131 @@ fn excluding_client_rects_removes_only_that_noise() {
         snapshot.effective_args
     );
     harness.stop(snapshot.profile_id);
+}
+
+#[test]
+#[ignore = "requires CHROMIUM_BIN and a real browser"]
+fn audio_spoofing_is_seed_driven_and_can_be_excluded() {
+    // A legacy core keeps the extra noise switches out of the command line, so
+    // the seed is the only thing that can move the audio surface.
+    let harness = Harness::with_major(128);
+    let mut excluded = FingerprintProfile::new_random(0);
+    excluded.disabled_spoofing = vec![SpoofingFeature::Audio];
+
+    let first = harness.profile(11111, excluded.clone());
+    let second = harness.profile(22222, excluded.clone());
+    let (excluded_snapshot, first_observed) = harness.read(&first);
+    let (_, second_observed) = harness.read(&second);
+
+    assert!(
+        first_observed.audio_signature().0.is_some(),
+        "the audio surface must be readable: {first_observed:#?}"
+    );
+    assert_eq!(
+        first_observed.audio_signature(),
+        second_observed.audio_signature(),
+        "with audio spoofing excluded the seed must not reach the audio fingerprint"
+    );
+
+    let spoofed = harness.profile(11111, FingerprintProfile::new_random(0));
+    let (_, spoofed_observed) = harness.read(&spoofed);
+    assert_ne!(
+        spoofed_observed.audio_signature(),
+        first_observed.audio_signature(),
+        "the seed must move the audio fingerprint when nothing is excluded"
+    );
+
+    assert!(
+        excluded_snapshot
+            .effective_args
+            .iter()
+            .any(|arg| arg == "--disable-spoofing=audio"),
+        "the exclusion reaches the command line: {:?}",
+        excluded_snapshot.effective_args
+    );
+    harness.stop(excluded_snapshot.profile_id);
+    harness.stop(spoofed.id);
+}
+
+#[test]
+#[ignore = "requires CHROMIUM_BIN and a real browser"]
+fn no_ice_candidate_leaks_an_address_on_the_product_path() {
+    // First prove the probe can see a leak, or an empty candidate list means
+    // nothing.
+    let leaky = Harness::verified_with_leaking_webrtc();
+    let mut relaxed = FingerprintProfile::new_random(0);
+    relaxed.webrtc_policy = WebRtcPolicy::DefaultPublicAndPrivateInterfaces;
+    let (_, leaky_observed) = leaky.read(&leaky.profile(11111, relaxed));
+
+    assert_eq!(
+        leaky_observed.webrtc_gathering.as_deref(),
+        Some("complete"),
+        "the probe waits for gathering to finish: {leaky_observed:#?}"
+    );
+    assert!(
+        !leaky_observed.leaking_candidates().is_empty(),
+        "with the policy re-opened the probe must see the machine's own \
+         addresses, otherwise the check below is blind: {leaky_observed:#?}"
+    );
+    drop(leaky);
+
+    // Now the product path: the default profile asks for the strict policy.
+    let harness = Harness::verified();
+    let profile = harness.profile(11111, FingerprintProfile::new_random(0));
+    let (snapshot, observed) = harness.read(&profile);
+
+    assert!(
+        snapshot
+            .effective_args
+            .iter()
+            .any(|arg| arg == "--disable-non-proxied-udp"),
+        "the strict policy reaches the command line: {:?}",
+        snapshot.effective_args
+    );
+    assert!(
+        observed.leaking_candidates().is_empty(),
+        "a local or public address reached the page: {:#?}",
+        observed.leaking_candidates()
+    );
+    let discrepancies = verify_fingerprint(
+        &profile.fingerprint,
+        &CoreCapabilities::for_major(harness.core.major),
+        &observed,
+    );
+    assert!(
+        !discrepancies.iter().any(|d| d.claim == "webrtc leak"),
+        "the leak check passes on its own: {discrepancies:#?}"
+    );
+    harness.stop(snapshot.profile_id);
+}
+
+#[test]
+#[ignore = "requires CHROMIUM_BIN and a real browser"]
+fn font_surface_is_readable_and_cjk_is_not_boxed() {
+    let harness = Harness::verified();
+    // The risky case is a spoofed platform whose font set differs from the
+    // host's, which is what the font exclusion exists for.
+    for platform in [Platform::Windows, Platform::MacOs] {
+        let mut fingerprint = FingerprintProfile::new_random(0);
+        fingerprint.platform = platform;
+        fingerprint.disabled_spoofing = vec![SpoofingFeature::Font];
+        let profile = harness.profile(11111, fingerprint);
+
+        let (snapshot, observed) = harness.read(&profile);
+
+        assert!(
+            observed.fonts_readable(),
+            "the font surface must be readable on {platform}: {observed:#?}"
+        );
+        assert_eq!(
+            observed.has_missing_cjk(),
+            Some(false),
+            "CJK text must not render as missing glyphs on {platform}: {observed:#?}"
+        );
+        assert!(
+            observed.font_emoji_width != observed.font_tofu_width,
+            "emoji must not collapse into the missing-glyph box on {platform}: {observed:#?}"
+        );
+        harness.stop(snapshot.profile_id);
+    }
 }

@@ -105,6 +105,9 @@ Effective:
 | `--disable-spoofing=gpu` | WebGL vendor/renderer return to the host values |
 | `--disable-spoofing=font` | not isolatable with this probe: needs a font-listing reading |
 | `--fingerprinting-canvas-image-data-noise` | canvas `toDataURL` hash changes; `getImageData` is **not** affected on this build |
+| `--disable-spoofing=audio` | the audio fingerprint returns to the engine's own value (the seed stops reaching it) |
+| `--disable-non-proxied-udp` | ICE gathering completes with **no candidates at all**; removing the switch exposes the machine's own addresses |
+| `--disable-spoofing=font` | no observable change to the font enumeration or the layout metrics; it is emitted for the host-font case, and CJK glyphs stay present either way |
 
 Accepted and ignored (no observable moved):
 
@@ -118,10 +121,26 @@ Accepted and ignored (no observable moved):
 | `--disable-spoofing=all` / `rects` / `client-rects` / `webrtc` / `timezone` / `screen` / `hardware` / `language` / `navigator` / `webgl` | no observable moved |
 | `--fingerprinting-client-rects-noise` | no change beyond what the seed already applies |
 | `--fingerprinting-canvas-measuretext-noise` | no change beyond what the seed already applies |
+| `--fingerprint-font-list`, `--fingerprint-fonts` | not emitted by this model; the font enumeration measured 13 families and no switch moved it |
 
-Still unverified, because the probe cannot see them yet: audio noise, font
-lists, WebRTC leak behaviour, geolocation, and anything that needs a network
-peer.
+Surfaces that are off by default in this build:
+
+| Surface | Measurement |
+| --- | --- |
+| WebRTC | With no policy switch the browser gathers **zero** ICE candidates, so a local or public address never reaches the page even though nothing asks for that. Re-opening the policy (`--webrtc-ip-handling-policy=default`) leaks the LAN address `192.168.31.222` as a `host` candidate and the public address as an `srflx` candidate, which is how the check is proven to be able to see a leak at all. |
+
+What the probe reads (`PROBE_EXPRESSION`): canvas `toDataURL` and `getImageData`
+hashes, text measurement, client rects, WebGL vendor and renderer,
+`navigator.platform`, user agent, language and languages, timezone, hardware
+concurrency, the user agent data brand list and high-entropy values, an
+`OfflineAudioContext` audio fingerprint, ICE candidates and gathering state, and
+the font enumeration with layout widths for ASCII, Latin, CJK, emoji and a
+codepoint that has no glyph anywhere.
+
+Not verified, and why: geolocation (this model has no location field, so no
+switch is emitted — `--fingerprint-location` also produced no coordinates in
+any test here, which cannot be separated from "this headless browser has no
+location provider"), and anything that needs a network peer.
 
 ## Defects this measurement found
 
@@ -163,11 +182,19 @@ downgraded to "unknown".
 - **Profile fields the engine cannot honour.** Screen size, device scale
   factor, geolocation and the no-effect switches listed above are not modelled
   at all, so there is nothing to clean up yet; adding any of those fields
-  requires re-measuring first.
+  requires re-measuring first. In particular, `--fingerprint-screen-width/height`
+  and `--fingerprint-device-scale-factor` were measured to do nothing on a real
+  display, and `--fingerprint-location` could not be made to produce a
+  coordinate here.
 - **GPU switch migration.** `--disable-gpu-fingerprint` maps to
   `--disable-spoofing=gpu`, and `--fingerprint-gpu-vendor`/`-renderer` are gone
   in 144+. The Rust model exposes only `SpoofingFeature::Gpu`, so the migration
   is implicit.
-- **Surfaces without a reading.** Audio, fonts, WebRTC and geolocation are
-  neither probed nor asserted; a profile can request the audio exclusion and
-  nothing confirms it did anything.
+- **Surfaces a single reading cannot settle.** The audio and canvas
+  fingerprints and the WebGL exclusion are only observable by comparing
+  sessions, so `verify` does not assert them; the acceptance tests compare a
+  spoofed session against an excluded one instead.
+- **Verification has a cost and a footprint.** The probe appends and removes
+  nodes, runs an offline audio render and opens an ICE gathering session in the
+  page it is asked about, so it belongs to an explicit verification action, not
+  to every profile start.

@@ -131,8 +131,23 @@ ShutdownAll；修复正常 Stop 强杀导致 Cookie 丢失的问题。详见 `ch
   “同一 seed 可重现 / 不同 seed 不同 canvas / `--disable-spoofing=canvas` 使 canvas 与 seed 无关 /
   macOS 不被留在宿主平台 / 排除 client rects 只影响 rects”。
 
-已知未验证面：音频噪声、字体列表、WebRTC 泄漏、地理位置（探针读不到），
-以及 `--fingerprinting-client-rects-noise` 在已有 seed 时测不出额外效果。
+### 第三批：音频 / WebRTC / 字体的回读
+
+进度（2026-09-19）：已完成。探针新增三类读数，判定规则按"单次读数能否定论"分开：
+
+- 音频：`OfflineAudioContext` 指纹。**只能对比**——seed 必须改变它，`--disable-spoofing=audio`
+  必须回到"另一个 seed 也排除音频"的同一读数；
+- WebRTC：ICE 候选 + `iceGatheringState`。**单次读数可定论**——严格策略下必须"无 host/srflx
+  候选且 gathering 完成"；验收里先用一个把策略改回 `default` 的 planner 证明探针**看得见泄漏**，
+  否则"零候选"没有意义；
+- 字体：枚举 + 布局度量（canvas measureText 会被 seed 噪声污染，读不到字体）+ CJK/emoji/tofu
+  宽度对比。**单次读数可定论**——CJK 不能渲染成缺字框（这正是跨平台字体规则要防的 bug）。
+
+实测发现：这构建默认 `--disable-non-proxied-udp` 生效（无开关也零候选）；音频噪声确实由 seed 驱动；
+`--disable-spoofing=font` 在枚举与布局度量上测不出独立效果，但 CJK 字形在切换平台时始终正常。
+
+仍未验证：地理位置（模型无字段，不发射开关；`--fingerprint-location` 在本环境产不出坐标，
+无法与"无定位源"区分），以及 `--fingerprinting-client-rects-noise` 在已有 seed 时测不出额外效果。
 
 既有实现：
 
@@ -249,6 +264,13 @@ every claim is checked independently
 a missing reading is a discrepancy, not a pass
 an unsupported brand is not asserted
 noise is visible by comparison only
+a leaking candidate is reported
+candidates through a proxy are not a leak
+gathering that never finished is not a pass
+a relaxed policy makes no leak claim
+missing cjk glyphs are reported
+the font claim is settled by the widths not the enumeration
+audio is read and compared between sessions
 the probe expression never touches the network
 ```
 
@@ -273,6 +295,9 @@ two profiles do not share a canvas surface
 disabling canvas spoofing makes the canvas seed independent
 a macos profile is not left on the host platform
 excluding client rects removes only that noise
+audio spoofing is seed driven and can be excluded
+no ice candidate leaks an address on the product path
+font surface is readable and cjk is not boxed
 ```
 
 ### Version

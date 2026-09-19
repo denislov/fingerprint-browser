@@ -71,11 +71,20 @@ compatibility report, and read-back verification of the fingerprint itself.
   endpoint on loopback and `FingerprintProbe` reads the fingerprint back out of
   a real page; `runtime::verify` compares that reading with the profile and
   reports every claim it does not support (a missing reading is itself a
-  finding). Measuring the verified generation this way found three switches
-  this project was emitting that the engine silently ignores: `mac` instead of
-  `macos`, `client-rects` instead of `clientrects`, and two brands no build
-  honours. All three are fixed and covered by
+  finding, with the probe's own error when it has one). The reading covers the
+  canvas, the audio fingerprint, ICE candidates, the font enumeration and the
+  glyphs they render, the platform, the user agent data brands and the locale.
+  Measuring the verified generation this way found three switches this project
+  was emitting that the engine silently ignores: `mac` instead of `macos`,
+  `client-rects` instead of `clientrects`, and two brands no build honours. All
+  three are fixed and covered by
   [the switch matrix](docs/fingerprint-matrix.md).
+- Two of those surfaces can only be judged by comparing sessions, so `verify`
+  states its limits instead of guessing: the audio and canvas fingerprints and
+  the WebGL exclusion are exposed as signatures for comparison, while the leak
+  check and the CJK glyph check are settled by a single reading. The WebRTC
+  check is proven able to see a leak by a self-check that re-opens the ICE
+  policy in a separate session.
 
 ```sh
 # fingerprint surface, read back out of a real browser

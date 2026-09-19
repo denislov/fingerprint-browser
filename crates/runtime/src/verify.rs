@@ -9,17 +9,27 @@
 //!
 //! [`verify`] then reports every profile claim the observation does not
 //! support. It never reports success for something it could not observe: a
-//! missing reading is itself a discrepancy. Two surfaces cannot be checked
-//! against a single reading — canvas noise and the WebGL exclusion are only
-//! visible by comparing two sessions, which is why the observed values are
-//! exposed for comparison as well.
+//! missing reading is itself a discrepancy.
+//!
+//! Two kinds of surface are read:
+//!
+//! - Claims a single reading can settle: the platform and user agent, the
+//!   language, the timezone, the hardware concurrency, the platform version,
+//!   that no ICE candidate leaks a local or public address, and that CJK text
+//!   still has glyphs.
+//! - Surfaces only a second session can settle, because the reading is
+//!   perturbed rather than replaced: the canvas ([`ObservedFingerprint::canvas_signature`])
+//!   and audio ([`ObservedFingerprint::audio_signature`]) fingerprints. A
+//!   reading cannot say whether it was perturbed; two sessions with different
+//!   seeds must disagree, and two sessions that exclude the same surface must
+//!   agree. The WebGL exclusion is in the same group.
 //!
 //! The vocabulary this module asserts was measured against the verified
 //! generation on Linux; see `docs/fingerprint-matrix.md`.
 
 use crate::cdp::{CdpProbe as _, CdpSession, HttpCdpProbe};
 use crate::error::CdpError;
-use domain::{CoreCapabilities, FingerprintProfile, Platform};
+use domain::{CoreCapabilities, FingerprintProfile, Platform, WebRtcPolicy};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -30,6 +40,7 @@ use std::time::Duration;
 pub const PROBE_EXPRESSION: &str = r#"(function(){
   function hash(text){var h=0;for(var i=0;i<text.length;i++){h=(h*31+text.charCodeAt(i))>>>0}return h}
   function hashBytes(bytes){var h=0;for(var i=0;i<bytes.length;i++){h=(h*31+bytes[i])>>>0}return h}
+  function hashFloats(values){var h=0;for(var i=0;i<values.length;i++){h=(h*31+(Math.round(values[i]*1e7)&0xffff))>>>0}return h}
   var out={};
   var canvas=document.createElement('canvas');canvas.width=200;canvas.height=50;
   var context=canvas.getContext('2d');
@@ -62,18 +73,117 @@ pub const PROBE_EXPRESSION: &str = r#"(function(){
   out.timezone=Intl.DateTimeFormat().resolvedOptions().timeZone;
   out.userAgentDataBrands=(navigator.userAgentData&&navigator.userAgentData.brands)?
     navigator.userAgentData.brands.map(function(b){return b.brand+'/'+b.version}).join(','):null;
-  if(navigator.userAgentData&&navigator.userAgentData.getHighEntropyValues){
-    return navigator.userAgentData.getHighEntropyValues(['platformVersion','architecture','bitness','uaFullVersion','fullVersionList'])
-      .then(function(high){
-        out.platformVersion=high.platformVersion;
-        out.architecture=high.architecture;
-        out.bitness=high.bitness;
-        out.userAgentFullVersion=high.uaFullVersion;
-        out.userAgentFullBrands=(high.fullVersionList||[]).map(function(b){return b.brand+'/'+b.version}).join(',');
-        return JSON.stringify(out);
-      });
+  function highEntropy(){
+    return new Promise(function(resolve){
+      if(!navigator.userAgentData||!navigator.userAgentData.getHighEntropyValues)return resolve();
+      navigator.userAgentData.getHighEntropyValues(['platformVersion','architecture','bitness','uaFullVersion','fullVersionList'])
+        .then(function(high){
+          out.platformVersion=high.platformVersion;
+          out.architecture=high.architecture;
+          out.bitness=high.bitness;
+          out.userAgentFullVersion=high.uaFullVersion;
+          out.userAgentFullBrands=(high.fullVersionList||[]).map(function(b){return b.brand+'/'+b.version}).join(',');
+          resolve();
+        }).catch(function(){resolve()});
+    });
   }
-  return JSON.stringify(out);
+  // Text metrics measured through layout: canvas text metrics are perturbed by
+  // the seed, so they cannot be used to read fonts back.
+  function domWidth(family,text){
+    var span=document.createElement('span');
+    span.style.cssText='position:absolute;left:-9999px;top:-9999px;font-size:48px;white-space:nowrap';
+    if(family)span.style.fontFamily=family;
+    span.textContent=text;
+    document.documentElement.appendChild(span);
+    var width=span.offsetWidth;
+    span.remove();
+    return width;
+  }
+  function fontReading(){
+    return new Promise(function(resolve){
+      var measure=function(){
+        try{
+          var bases=['monospace','sans-serif','serif'];
+          var span=document.createElement('span');
+          span.style.cssText='position:absolute;left:-9999px;top:-9999px;font-size:72px;white-space:nowrap';
+          span.textContent='mmmmmmmmmmlli';
+          document.documentElement.appendChild(span);
+          var base={};
+          bases.forEach(function(b){span.style.fontFamily=b;base[b]=span.offsetWidth+','+span.offsetHeight});
+          var found=[];
+          ['Arial','Helvetica','Times New Roman','Courier New','Georgia','Verdana','Tahoma','Trebuchet MS',
+           'Impact','Comic Sans MS','Segoe UI','Calibri','Cambria','Consolas','Arial Black','DejaVu Sans',
+           'DejaVu Serif','Liberation Sans','Liberation Serif','Noto Sans CJK SC','Noto Color Emoji',
+           'WenQuanYi Micro Hei','Ubuntu','Cantarell','Roboto','DejaVu Sans Mono'].forEach(function(family){
+            var present=bases.some(function(b){
+              span.style.fontFamily="'"+family+"',"+b;
+              return (span.offsetWidth+','+span.offsetHeight)!==base[b];
+            });
+            if(present)found.push(family);
+          });
+          span.remove();
+          out.fonts=found;
+          out.fontAsciiWidth=domWidth(null,'mmmmmmmmmmlli');
+          out.fontLatinWidth=domWidth(null,'abcdefghij');
+          out.fontCjkWidth=domWidth(null,'\u4e2d\u6587\u6d4b\u8bd5');
+          out.fontEmojiWidth=domWidth(null,'\ud83d\ude00');
+          // Codepoints with no glyph anywhere: the width of a missing glyph box.
+          out.fontTofuWidth=domWidth(null,'\uffff\ufffe\ue000\ue001');
+        }catch(e){out.fontError=String(e)}
+        resolve();
+      };
+      try{document.fonts.ready.then(measure).catch(measure)}catch(e){out.fontError=String(e);measure()}
+    });
+  }
+  // OfflineAudioContext needs no gesture and no output device.
+  function audioReading(){
+    return new Promise(function(resolve){
+      try{
+        var context=new OfflineAudioContext(1,44100,44100);
+        var oscillator=context.createOscillator();oscillator.type='triangle';oscillator.frequency.value=10000;
+        var compressor=context.createDynamicsCompressor();
+        compressor.threshold.value=-50;compressor.knee.value=40;compressor.ratio.value=12;
+        compressor.attack.value=0;compressor.release.value=0.25;
+        oscillator.connect(compressor);compressor.connect(context.destination);oscillator.start(0);
+        context.startRendering().then(function(buffer){
+          var data=buffer.getChannelData(0),sum=0;
+          for(var i=0;i<data.length;i++){sum+=Math.abs(data[i])}
+          out.audioHash=hashFloats(data);
+          out.audioSum=Number(sum.toFixed(6));
+          resolve();
+        }).catch(function(e){out.audioError=String(e);resolve()});
+      }catch(e){out.audioError=String(e);resolve()}
+    });
+  }
+  // No STUN server: a host candidate is already a leak, and it needs no
+  // network. The wait is generous because a proxied browser can take longer to
+  // finish gathering, and "still gathering" is reported rather than assumed
+  // empty.
+  function webrtcReading(){
+    return new Promise(function(resolve){
+      var candidates=[];
+      var finished=false;
+      var finish=function(state){
+        if(finished)return;finished=true;
+        out.webrtcCandidates=candidates;
+        out.webrtcGathering=state;
+        resolve();
+      };
+      try{
+        var peer=new RTCPeerConnection({iceServers:[]});
+        peer.onicecandidate=function(event){
+          if(event.candidate)candidates.push(event.candidate.candidate);
+          else finish(peer.iceGatheringState);
+        };
+        peer.createDataChannel('probe');
+        peer.createOffer().then(function(offer){return peer.setLocalDescription(offer)})
+          .catch(function(e){out.webrtcError=String(e)});
+        setTimeout(function(){finish(peer.iceGatheringState);try{peer.close()}catch(e){}},5000);
+      }catch(e){out.webrtcError=String(e);resolve()}
+    });
+  }
+  return Promise.all([highEntropy(),fontReading(),audioReading(),webrtcReading()])
+    .then(function(){return JSON.stringify(out)});
 })()"#;
 
 /// What the page reported, as read back over CDP.
@@ -98,6 +208,25 @@ pub struct ObservedFingerprint {
     pub bitness: Option<String>,
     pub user_agent_full_version: Option<String>,
     pub user_agent_full_brands: Option<String>,
+    /// The audio fingerprint the page produced, and the sum it was hashed from.
+    pub audio_hash: Option<u64>,
+    pub audio_sum: Option<f64>,
+    /// ICE candidates the page gathered, verbatim.
+    pub webrtc_candidates: Vec<String>,
+    /// `RTCPeerConnection.iceGatheringState` once gathering stopped.
+    pub webrtc_gathering: Option<String>,
+    /// Font families the page can see, and the layout widths they produce.
+    pub fonts: Vec<String>,
+    pub font_ascii_width: Option<f64>,
+    pub font_latin_width: Option<f64>,
+    pub font_cjk_width: Option<f64>,
+    pub font_emoji_width: Option<f64>,
+    /// Width of codepoints that have no glyph anywhere.
+    pub font_tofu_width: Option<f64>,
+    /// Why a reading is missing, when the probe could say.
+    pub audio_error: Option<String>,
+    pub webrtc_error: Option<String>,
+    pub font_error: Option<String>,
 }
 
 impl ObservedFingerprint {
@@ -115,6 +244,43 @@ impl ObservedFingerprint {
     /// comparison, since a single reading cannot say whether it was perturbed.
     pub fn canvas_signature(&self) -> (Option<u64>, Option<u64>, Option<f64>) {
         (self.canvas_data_url, self.canvas_pixels, self.measure_text)
+    }
+
+    /// The values an audio fingerprint is computed from.
+    ///
+    /// Like the canvas, an audio reading cannot say whether it was perturbed:
+    /// noise is only visible by comparing sessions.
+    pub fn audio_signature(&self) -> (Option<u64>, Option<f64>) {
+        (self.audio_hash, self.audio_sum)
+    }
+
+    /// Candidates that expose an address without going through the proxy.
+    ///
+    /// A `host` candidate is a local interface address and an `srflx` candidate
+    /// is the public address a STUN server saw; both are what a WebRTC leak
+    /// check is looking for.
+    pub fn leaking_candidates(&self) -> Vec<&str> {
+        self.webrtc_candidates
+            .iter()
+            .filter(|candidate| candidate.contains(" typ host") || candidate.contains(" typ srflx"))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Whether CJK text renders as missing-glyph boxes.
+    ///
+    /// Comparing against a codepoint that has no glyph anywhere avoids
+    /// hard-coding a font size: the box width is whatever this renderer uses.
+    pub fn has_missing_cjk(&self) -> Option<bool> {
+        match (self.font_cjk_width, self.font_tofu_width) {
+            (Some(cjk), Some(tofu)) => Some((cjk - tofu).abs() < 1.0),
+            _ => None,
+        }
+    }
+
+    /// Whether the font surface could be read at all.
+    pub fn fonts_readable(&self) -> bool {
+        !self.fonts.is_empty() && self.font_ascii_width.is_some()
     }
 
     /// Whether the ClientRects surface carries sub-pixel noise.
@@ -274,7 +440,61 @@ pub fn verify(
         );
     }
 
+    // Only the strict policy makes a claim about leaking: the browser may still
+    // gather relay candidates through a proxy, but a local or public address
+    // must never appear.
+    if profile.webrtc_policy == WebRtcPolicy::DisableNonProxiedUdp {
+        match observed.webrtc_gathering.as_deref() {
+            Some("complete") => {
+                let leaking = observed.leaking_candidates();
+                if !leaking.is_empty() {
+                    found.push(Discrepancy {
+                        claim: "webrtc leak",
+                        expected: "no host or srflx candidate".to_string(),
+                        observed: leaking.join(" "),
+                    });
+                }
+            }
+            // Without the end-of-gathering signal an empty list proves nothing:
+            // it is also what a probe that never ran would report.
+            Some(state) => found.push(Discrepancy {
+                claim: "webrtc leak",
+                expected: "ice gathering completes".to_string(),
+                observed: state.to_string(),
+            }),
+            None => found.push(Discrepancy {
+                claim: "webrtc leak",
+                expected: "ice gathering completes".to_string(),
+                observed: unreadable("not reported", observed.webrtc_error.as_deref()),
+            }),
+        }
+    }
+
+    // Missing glyphs are what a platform spoof that forgets the host's fonts
+    // produces, and they are visible in a single reading.
+    match observed.has_missing_cjk() {
+        Some(true) => found.push(Discrepancy {
+            claim: "fonts",
+            expected: "CJK text has glyphs".to_string(),
+            observed: "renders as missing glyphs".to_string(),
+        }),
+        Some(false) => {}
+        None => found.push(Discrepancy {
+            claim: "fonts",
+            expected: "CJK text has glyphs".to_string(),
+            observed: unreadable("not reported", observed.font_error.as_deref()),
+        }),
+    }
+
     found
+}
+
+/// Says a surface was not read, and why when the probe recorded a reason.
+fn unreadable(fallback: &str, reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) => format!("{fallback}: {reason}"),
+        None => fallback.to_string(),
+    }
 }
 
 /// Records a claim the observation does not support.
@@ -359,7 +579,14 @@ mod tests {
       "userAgentDataBrands": "Chromium/148,Google Chrome/148,Not/A)Brand/99",
       "platformVersion": "10.0.0", "architecture": "x86", "bitness": "64",
       "userAgentFullVersion": "148.0.7778.97",
-      "userAgentFullBrands": "Chromium/148.0.7778.97,Google Chrome/148.0.7778.97,Not/A)Brand/99.0.0.0"
+      "userAgentFullBrands": "Chromium/148.0.7778.97,Google Chrome/148.0.7778.97,Not/A)Brand/99.0.0.0",
+      "audioHash": 1171369572, "audioSum": 10749.610675,
+      "webrtcCandidates": [], "webrtcGathering": "complete",
+      "fonts": ["Arial","Helvetica","Times New Roman","Courier New","DejaVu Sans","DejaVu Serif",
+                "Liberation Sans","Liberation Serif","Noto Sans CJK SC","Noto Color Emoji","Ubuntu",
+                "Cantarell","DejaVu Sans Mono"],
+      "fontAsciiWidth": 413, "fontLatinWidth": 203, "fontCjkWidth": 192,
+      "fontEmojiWidth": 60, "fontTofuWidth": 149
     }"#;
 
     fn observed(json: &str) -> ObservedFingerprint {
@@ -416,7 +643,9 @@ mod tests {
                 "language",
                 "languages",
                 "timezone",
-                "platform version"
+                "platform version",
+                "webrtc leak",
+                "fonts"
             ]
         );
         assert_eq!(found[3].expected, "8");
@@ -467,8 +696,148 @@ mod tests {
     }
 
     #[test]
+    fn a_leaking_candidate_is_reported() {
+        let capabilities = CoreCapabilities::for_major(148);
+        let leaking = observed(
+            r#"{
+              "webrtcCandidates": [
+                "candidate:1 1 udp 2113937151 192.168.1.10 54492 typ host generation 0 ufrag a",
+                "candidate:2 1 udp 1677729535 203.0.113.7 53224 typ srflx raddr 192.168.1.10"
+              ],
+              "webrtcGathering": "complete"
+            }"#,
+        );
+
+        let found = verify(&profile(), &capabilities, &leaking);
+
+        let leak = found
+            .iter()
+            .find(|f| f.claim == "webrtc leak")
+            .expect("a host and a srflx candidate are both leaking");
+        assert!(leak.observed.contains("typ host"));
+        assert!(leak.observed.contains("typ srflx"));
+    }
+
+    #[test]
+    fn candidates_through_a_proxy_are_not_a_leak() {
+        let capabilities = CoreCapabilities::for_major(148);
+        let relayed = observed(
+            r#"{
+              "webrtcCandidates": ["candidate:3 1 tcp 1518280447 127.0.0.1 9 typ relay raddr 0.0.0.0"],
+              "webrtcGathering": "complete"
+            }"#,
+        );
+
+        let found = verify(&profile(), &capabilities, &relayed);
+
+        assert!(
+            !found.iter().any(|f| f.claim == "webrtc leak"),
+            "a relay candidate is the proxied path, not a leak: {found:?}"
+        );
+    }
+
+    #[test]
+    fn gathering_that_never_finished_is_not_a_pass() {
+        let capabilities = CoreCapabilities::for_major(148);
+        let unfinished = observed(r#"{"webrtcCandidates": [], "webrtcGathering": "gathering"}"#);
+
+        let found = verify(&profile(), &capabilities, &unfinished);
+
+        let leak = found
+            .iter()
+            .find(|f| f.claim == "webrtc leak")
+            .expect("an empty candidate list only counts once gathering stopped");
+        assert_eq!(leak.observed, "gathering");
+    }
+
+    #[test]
+    fn a_relaxed_policy_makes_no_leak_claim() {
+        let capabilities = CoreCapabilities::for_major(148);
+        let mut fp = profile();
+        fp.webrtc_policy = WebRtcPolicy::DefaultPublicAndPrivateInterfaces;
+        let leaking = observed(
+            r#"{
+              "webrtcCandidates": ["candidate:1 1 udp 2113937151 192.168.1.10 54492 typ host"],
+              "webrtcGathering": "complete"
+            }"#,
+        );
+
+        let found = verify(&fp, &capabilities, &leaking);
+
+        assert!(
+            !found.iter().any(|f| f.claim == "webrtc leak"),
+            "the profile did not ask for the strict policy: {found:?}"
+        );
+    }
+
+    #[test]
+    fn missing_cjk_glyphs_are_reported() {
+        let capabilities = CoreCapabilities::for_major(148);
+        // Width equal to the missing-glyph box means every CJK char is a box.
+        let boxed = observed(r#"{"fontCjkWidth": 149, "fontTofuWidth": 149, "fonts": ["Arial"]}"#);
+        let readable =
+            observed(r#"{"fontCjkWidth": 192, "fontTofuWidth": 149, "fonts": ["Arial"]}"#);
+
+        assert!(
+            verify(&profile(), &capabilities, &boxed)
+                .iter()
+                .any(|f| f.claim == "fonts" && f.observed.contains("missing glyphs"))
+        );
+        assert!(
+            !verify(&profile(), &capabilities, &readable)
+                .iter()
+                .any(|f| f.claim == "fonts")
+        );
+        assert_eq!(boxed.has_missing_cjk(), Some(true));
+        assert_eq!(readable.has_missing_cjk(), Some(false));
+    }
+
+    #[test]
+    fn audio_is_read_and_compared_between_sessions() {
+        let capabilities = CoreCapabilities::for_major(148);
+        let first = observed(MATCHING_READING);
+        let second = observed(r#"{"audioHash": 2544522210, "audioSum": 10748.964798}"#);
+
+        assert_ne!(first.audio_signature(), second.audio_signature());
+        assert!(
+            !verify(&profile(), &capabilities, &second)
+                .iter()
+                .any(|f| f.claim == "audio"),
+            "audio is comparison-only: one reading cannot say whether it was perturbed"
+        );
+    }
+
+    #[test]
+    fn the_font_claim_is_settled_by_the_widths_not_the_enumeration() {
+        let capabilities = CoreCapabilities::for_major(148);
+        // Widths present: the glyph question is answered whether or not the
+        // enumeration found anything.
+        let widths_only = observed(r#"{"fonts": [], "fontCjkWidth": 192, "fontTofuWidth": 149}"#);
+        // Widths absent: nothing was measured, so nothing is certified.
+        let blind = observed(r#"{"fonts": ["Arial"]}"#);
+
+        assert!(!widths_only.fonts_readable(), "no family was enumerated");
+        assert!(
+            !verify(&profile(), &capabilities, &widths_only)
+                .iter()
+                .any(|f| f.claim == "fonts")
+        );
+        assert!(
+            verify(&profile(), &capabilities, &blind)
+                .iter()
+                .any(|f| f.claim == "fonts" && f.observed == "not reported")
+        );
+    }
+
+    #[test]
     fn the_probe_expression_never_touches_the_network() {
-        for forbidden in ["fetch(", "XMLHttpRequest", "WebSocket", "importScripts"] {
+        for forbidden in [
+            "fetch(",
+            "XMLHttpRequest",
+            "WebSocket",
+            "importScripts",
+            "stun:",
+        ] {
             assert!(
                 !PROBE_EXPRESSION.contains(forbidden),
                 "the probe must stay self-contained: {forbidden}"
