@@ -43,6 +43,43 @@ Configure `SupervisorComponents.xray_executable`, `runtime_dir` and
 (`bin/xray.exe` on Windows), `data/runtime` and five seconds. Temporary configs
 live at `<runtime_dir>/<profile-id>/xray.json`; Unix files use mode `0600`.
 
+Phase 5 has its first slice: the GPUI window is wired to the services instead of
+being a static mockup.
+
+- `crates/app/src/state.rs` holds the view-facing state (`AppState`). It owns no
+  runtime state: every read goes through `RuntimeService::snapshot`, and a
+  background tick drains `RuntimeEvent`s and reconciles snapshots every 200 ms
+  (full reconcile every fifth tick) as the façade contract requires.
+- The window renders the profile list with a state badge, Start/Stop/Restart,
+  the Runtime Details panel (PIDs, ports, effective args, last error/warning,
+  dropped events) and a copy-args action. Create, start, stop and restart are
+  covered by a headless GPUI test that clicks the real buttons.
+- On first start one browser core is registered by asking the discovered
+  executable for `--version` and parsing its major. Discovery order is
+  `FP_BROWSER_CHROMIUM_BIN`, then `bin/chromium`, `bin/chrome`, `chrome`, then
+  `PATH`. Phase 4 owns moving real version detection into the runtime crate.
+- Closing the last window and the Quit action both exit through `main`, which
+  sends `ShutdownAll` and waits up to five seconds for the supervisor to reclaim
+  every child process.
+
+Runtime configuration for the window:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `FP_BROWSER_CHROMIUM_BIN` | Browser core executable | discovered |
+| `FP_BROWSER_CHROMIUM_MAJOR` | Major override when `--version` is unusable | detected |
+| `FP_BROWSER_DATA_DIR` | SQLite database, profiles and runtime configs | `data` |
+| `FP_BROWSER_XRAY_BIN` | Per-profile proxy binary | `bin/xray` |
+
+```sh
+FP_BROWSER_CHROMIUM_BIN=/absolute/path/to/chrome cargo run -p app
+```
+
+Known limitation: a window destroyed by another X client without the close
+protocol (for example `xdotool windowclose`) may leave the process running with
+its browsers; the supported exits are the window manager's close button and the
+in-window Quit action.
+
 ## Validation and next steps
 
 ```sh
@@ -107,6 +144,8 @@ Unavailable CDP falls back to forced cleanup; crash/rollback paths skip graceful
 close. Persistence is not guaranteed on a forced exit.
 
 Before declaring Phase 3 fully accepted for the fingerprint browser product,
-repeat acceptance with fingerprint-chromium and wire runtime settings and services
-into the GPUI UI.
+repeat acceptance with fingerprint-chromium. Wiring runtime settings and services
+into the GPUI UI has started (see the Phase 5 slice above) but the Proxies,
+Browser Cores and Settings pages do not exist yet, so proxy assignment and core
+management still happen outside the window.
 Phase 4 then adds version detection and fingerprint capability compatibility.

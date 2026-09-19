@@ -22,7 +22,9 @@ pub use fingerprint_args::serialize_fingerprint_args;
 pub use planner::{DefaultLaunchPlanner, LaunchContext, LaunchPlanner};
 pub use ports::{PortAllocator, PortReservation, TcpPortAllocator};
 pub use process::{DefaultProcessTreeController, ProcessTreeController};
-pub use supervisor::{ChannelRuntimeFacade, RuntimeSupervisor, RuntimeSupervisorChannels};
+pub use supervisor::{
+    ChannelRuntimeFacade, RuntimeSupervisor, RuntimeSupervisorChannels, SupervisorComponents,
+};
 pub use xray::{DefaultXrayConfigBuilder, XrayConfigBuilder};
 
 #[cfg(test)]

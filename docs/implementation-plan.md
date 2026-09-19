@@ -112,25 +112,37 @@ v1 只正式认证一个 fingerprint-chromium major。
 
 ## Phase 5 — GPUI productization
 
+进度（2026-09-19）：第一批 UI 接线已落地。`crates/app` 不再是静态 mockup：
+
+- `AppState` 只持有面向视图的状态，运行时状态一律通过 `RuntimeService::snapshot` 读取；
+  后台 200ms tick 排空 `RuntimeEvent` 并做快照对账（每 5 tick 全量对账），符合 facade 契约。
+- Profiles 页支持新建、Start/Stop/Restart、状态徽章、Runtime Details（PID/端口/effective args/
+  last error/warning/dropped events）与 Copy args。
+- 首次启动用 `--version` 探测并注册一个 browser core；关闭窗口和 Quit 都会走
+  `ShutdownAll` 回收子进程。
+
 页面：
 
 ```text
-Profiles
-Profile Editor
-Proxies
-Browser Cores
-Settings
-Runtime Details
+Profiles            （已接线）
+Profile Editor      （未开始）
+Proxies             （未开始）
+Browser Cores       （未开始）
+Settings            （未开始）
+Runtime Details     （已接线）
 ```
 
-实现：
+仍需实现：
 
 - toast / dialog；
-- runtime status badge；
-- start / stop / restart；
 - open user-data-dir；
-- copy effective args；
-- recent error/log。
+- recent error/log；
+- Profile 表单（目前新建使用自动命名，指纹字段不可编辑）；
+- Proxies / Browser Cores / Settings 页面。
+
+已知限制：非 WM 关闭协议直接销毁窗口（如 `xdotool windowclose`）时，gpui 可能不感知
+窗口已消失，进程会继续运行并持有浏览器；支持的退出方式是窗口管理器关闭按钮与窗口内
+Quit 按钮。该问题在 gpui 的 X11 后端，不在本仓库接线代码。
 
 ---
 
@@ -206,6 +218,21 @@ xray unexpected exit -> browser terminated
 CRUD
 migration from empty DB
 round-trip all domain fields
+```
+
+### App (UI wiring)
+
+```text
+create profile -> row appears, selected, state Stopped
+create without a core -> error notice, no row
+start/stop -> row state follows the snapshot, commands reach the facade
+unknown profile -> NotFound notice
+refresh_runtime -> picks up external state changes
+headless window: click New Profile x2 -> two rows; click Start -> badge Running,
+  the other profile stays Stopped; click Stop -> Stopped
+headless window: no core -> banner shows the discovery hint
+real Chromium (opt-in): AppState start/stop/restart with two live sessions,
+  distinct PIDs/CDP ports/data dirs, seed switches in effective args
 ```
 
 ---
