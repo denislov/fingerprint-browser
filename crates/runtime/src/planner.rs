@@ -98,7 +98,7 @@ impl LaunchPlanner for DefaultLaunchPlanner {
                 let config_dir = ctx.xray_config_dir.clone().unwrap_or_else(|| {
                     PathBuf::from("data/runtime").join(ctx.profile.id.to_string())
                 });
-                let config_path = config_dir.join("xray.json");
+                let config_path = config_dir.join(crate::xray::XRAY_CONFIG_FILE);
 
                 Some(XrayLaunchPlan {
                     executable,

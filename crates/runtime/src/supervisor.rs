@@ -3,9 +3,12 @@ use crate::cdp::{CdpProbe, HttpCdpProbe};
 use crate::error::RuntimeCommandError;
 use crate::events::{RuntimeCommand, RuntimeComponent, RuntimeEvent, StartParams};
 use crate::facade::{RuntimeFacade, RuntimeSnapshot};
+use crate::journal::{self, ProcessRecord, ReclaimReport, SessionRecord};
 use crate::planner::{DefaultLaunchPlanner, LaunchContext, LaunchPlanner};
 use crate::ports::{PortAllocator, TcpPortAllocator};
-use crate::process::{DefaultProcessTreeController, ProcessTreeController};
+use crate::process::{
+    DefaultProcessInspector, DefaultProcessTreeController, ProcessInspector, ProcessTreeController,
+};
 use crate::xray::{DefaultXrayConfigBuilder, XrayConfigBuilder};
 use crossbeam_channel::{Receiver, Sender};
 use domain::{ProfileId, RuntimeState};
@@ -92,7 +95,10 @@ pub struct SupervisorComponents {
     pub port_allocator: Box<dyn PortAllocator>,
     pub cdp_probe: Box<dyn CdpProbe>,
     pub process_tree: Box<dyn ProcessTreeController>,
+    pub process_inspector: Box<dyn ProcessInspector>,
     pub xray_builder: Box<dyn XrayConfigBuilder>,
+    /// How long a reclaimed orphan may take to exit before it is killed.
+    pub orphan_grace: Duration,
     pub cdp_ready_timeout: Duration,
     pub xray_ready_timeout: Duration,
     pub xray_executable: std::path::PathBuf,
@@ -107,7 +113,9 @@ impl Default for SupervisorComponents {
             port_allocator: Box::new(TcpPortAllocator::new()),
             cdp_probe: Box::new(HttpCdpProbe::new()),
             process_tree: Box::new(DefaultProcessTreeController::new()),
+            process_inspector: Box::new(DefaultProcessInspector::new()),
             xray_builder: Box::new(DefaultXrayConfigBuilder::new()),
+            orphan_grace: journal::DEFAULT_GRACE,
             cdp_ready_timeout: Duration::from_secs(12),
             xray_ready_timeout: Duration::from_secs(5),
             xray_executable: if cfg!(windows) {
@@ -133,7 +141,9 @@ pub struct RuntimeSupervisor {
     port_allocator: Box<dyn PortAllocator>,
     cdp_probe: Box<dyn CdpProbe>,
     process_tree: Box<dyn ProcessTreeController>,
+    process_inspector: Box<dyn ProcessInspector>,
     xray_builder: Box<dyn XrayConfigBuilder>,
+    orphan_grace: Duration,
     cdp_ready_timeout: Duration,
     xray_ready_timeout: Duration,
     xray_executable: std::path::PathBuf,
@@ -172,12 +182,28 @@ impl RuntimeSupervisor {
             port_allocator: components.port_allocator,
             cdp_probe: components.cdp_probe,
             process_tree: components.process_tree,
+            process_inspector: components.process_inspector,
             xray_builder: components.xray_builder,
+            orphan_grace: components.orphan_grace,
             cdp_ready_timeout: components.cdp_ready_timeout,
             xray_ready_timeout: components.xray_ready_timeout,
             xray_executable: components.xray_executable,
             runtime_dir: components.runtime_dir,
         }
+    }
+
+    /// Stops what an earlier run left running, and clears the records it left.
+    ///
+    /// Call this before the supervisor accepts its first command: a start would
+    /// otherwise race with a browser that still holds the profile's data
+    /// directory and its debugging port.
+    pub fn reclaim_orphans(&self) -> ReclaimReport {
+        journal::reclaim(
+            &self.runtime_dir,
+            self.process_inspector.as_ref(),
+            self.process_tree.as_ref(),
+            self.orphan_grace,
+        )
     }
 
     pub fn spawn(mut self) -> std::thread::JoinHandle<()> {
@@ -346,9 +372,7 @@ impl RuntimeSupervisor {
                     .map_err(|e| e.to_string())?;
                 let mut command = std::process::Command::new(&xray_plan.executable);
                 command
-                    .arg("run")
-                    .arg("-config")
-                    .arg(&xray_plan.config_path)
+                    .args(xray_plan.args())
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());
@@ -492,6 +516,42 @@ impl RuntimeSupervisor {
 
                 self.active_sessions.insert(profile_id, session);
 
+                // Write down what was launched before announcing it, so a
+                // process killed between here and the next stop can still be
+                // found. The start is not failed for it: the browser is already
+                // running, and the warning says what is lost.
+                let record = SessionRecord {
+                    profile_id,
+                    cdp_port,
+                    socks_port,
+                    started_at: journal::now_millis(),
+                    browser: ProcessRecord::captured(
+                        browser_pid,
+                        &plan.browser_executable,
+                        &effective_args,
+                        self.process_inspector.as_ref(),
+                    ),
+                    xray: plan.xray.as_ref().and_then(|xray_plan| {
+                        xray_pid.map(|pid| {
+                            ProcessRecord::captured(
+                                pid,
+                                &xray_plan.executable,
+                                &xray_plan.args(),
+                                self.process_inspector.as_ref(),
+                            )
+                        })
+                    }),
+                };
+                if let Err(error) = journal::write(&self.runtime_dir, &record) {
+                    self.emit(RuntimeEvent::Warning {
+                        profile_id,
+                        message: format!(
+                            "the session record could not be written ({error}); if this process is \
+                             killed, the browser it started will not be reclaimed by the next run"
+                        ),
+                    });
+                }
+
                 self.update_full_snapshot(RuntimeSnapshot {
                     profile_id,
                     state: RuntimeState::Running,
@@ -627,6 +687,7 @@ impl RuntimeSupervisor {
                 self.terminate_child(child);
             }
             Self::remove_config(session.xray_config.as_deref());
+            journal::remove(&self.runtime_dir, profile_id);
 
             self.set_snapshot_state(profile_id, RuntimeState::Stopped);
             self.emit(RuntimeEvent::Stopped { profile_id });
@@ -786,6 +847,7 @@ impl RuntimeSupervisor {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::process::ProcessReading;
     use crate::{CdpError, CdpInfo, LaunchPlanError};
     use domain::*;
     use std::os::unix::fs::PermissionsExt;
@@ -906,6 +968,85 @@ mod tests {
         }
     }
     const XRAY: &str = "#!/usr/bin/env python3\nimport json,socket,sys,time\nc=json.load(open(sys.argv[3]))\ns=socket.socket()\ns.bind(('127.0.0.1',c['inbounds'][0]['port']))\ns.listen()\ntime.sleep(60)\n";
+
+    #[test]
+    fn a_running_session_writes_a_record_and_stopping_it_removes_it() {
+        let mut f = Fixture::new(true, true, XRAY);
+        f.start();
+
+        let record = journal::read(&f.dir, f.params.profile.id)
+            .unwrap()
+            .expect("a running session writes a record");
+        let session = &f.supervisor.active_sessions[&f.params.profile.id];
+        assert_eq!(record.browser.pid, session.browser.id());
+        assert_eq!(
+            record.xray.as_ref().map(|xray| xray.pid),
+            session.xray.as_ref().map(|xray| xray.id())
+        );
+        assert_eq!(record.cdp_port, f.snapshot().cdp_port.unwrap());
+        assert_eq!(record.browser.args, ["60"]);
+        let xray = record.xray.as_ref().unwrap();
+        assert_eq!(xray.args[0], "run");
+        assert_eq!(xray.args[2], f.config().to_string_lossy());
+
+        f.supervisor.stop_profile(f.params.profile.id);
+        assert!(
+            journal::read(&f.dir, f.params.profile.id)
+                .unwrap()
+                .is_none(),
+            "a stopped session leaves no record to reclaim"
+        );
+    }
+
+    /// A process that was killed - `SIGKILL`, a crash, a window destroyed
+    /// without the close protocol - leaves its children running and its record
+    /// on disk. The next start has to find them from that record alone.
+    #[test]
+    fn reclaiming_orphans_stops_what_a_killed_run_left_running() {
+        let mut f = Fixture::new(true, true, XRAY);
+        f.start();
+        let record = journal::read(&f.dir, f.params.profile.id)
+            .unwrap()
+            .expect("a running session writes a record");
+
+        // Taking the handles away does not stop the children; that is what
+        // makes this the crash case rather than a stop.
+        let session = f
+            .supervisor
+            .active_sessions
+            .remove(&f.params.profile.id)
+            .unwrap();
+        drop(session);
+        assert!(
+            matches!(
+                DefaultProcessInspector.inspect(record.browser.pid),
+                ProcessReading::Live(_)
+            ),
+            "the browser should still be running for this test to mean anything"
+        );
+
+        let report = f.supervisor.reclaim_orphans();
+
+        assert_eq!(report.reclaimed.len(), 1, "{report:?}");
+        assert_eq!(report.reclaimed[0].browser_pid, record.browser.pid);
+        assert_eq!(
+            report.reclaimed[0].xray_pid,
+            record.xray.as_ref().map(|xray| xray.pid)
+        );
+        assert_eq!(
+            DefaultProcessInspector.inspect(record.browser.pid),
+            ProcessReading::Absent
+        );
+        assert!(
+            journal::read(&f.dir, f.params.profile.id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !f.config().exists(),
+            "a killed run leaves the upstream credentials in its temporary config"
+        );
+    }
 
     #[test]
     fn normal_stop_attempts_graceful_close_but_xray_crash_skips_it() {

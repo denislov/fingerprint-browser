@@ -88,6 +88,15 @@ pub enum CdpError {
 }
 
 #[derive(Debug, Error)]
+pub enum JournalError {
+    #[error("session journal IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("session journal serialization failed: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Error)]
 pub enum RuntimeCommandError {
     #[error("profile {profile_id} already running or starting")]
     AlreadyRunning { profile_id: domain::ProfileId },

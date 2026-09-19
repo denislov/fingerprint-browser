@@ -18,3 +18,16 @@ pub struct XrayLaunchPlan {
     pub config_path: PathBuf,
     pub socks_port: u16,
 }
+
+impl XrayLaunchPlan {
+    /// The arguments Xray is started with, after `argv[0]`. One source for the
+    /// process that gets spawned and for the session record that has to
+    /// recognise it later.
+    pub fn args(&self) -> Vec<String> {
+        vec![
+            "run".to_string(),
+            "-config".to_string(),
+            self.config_path.to_string_lossy().into_owned(),
+        ]
+    }
+}

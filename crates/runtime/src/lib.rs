@@ -5,6 +5,7 @@ pub mod error;
 pub mod events;
 pub mod facade;
 pub mod fingerprint_args;
+pub mod journal;
 pub mod planner;
 pub mod ports;
 pub mod process;
@@ -17,15 +18,22 @@ pub use capability::{CapabilityResolver, DefaultCapabilityResolver};
 pub use cdp::{CdpInfo, CdpProbe, CdpSession, CdpTarget, HttpCdpProbe};
 pub use compat::{CompatibilityReport, Finding as CompatibilityFinding};
 pub use error::{
-    CapabilityError, CdpError, LaunchPlanError, PortError, ProcessError, ProxyError,
+    CapabilityError, CdpError, JournalError, LaunchPlanError, PortError, ProcessError, ProxyError,
     RuntimeCommandError, RuntimeError,
 };
 pub use events::{RuntimeCommand, RuntimeComponent, RuntimeEvent, StartParams};
 pub use facade::{RuntimeFacade, RuntimeSnapshot};
 pub use fingerprint_args::serialize_fingerprint_args;
+pub use journal::{
+    ProcessRecord, ReclaimReport, Reclaimed, SessionRecord, Unresolved as UnresolvedSession,
+    reclaim as reclaim_orphans,
+};
 pub use planner::{DefaultLaunchPlanner, LaunchContext, LaunchPlanner};
 pub use ports::{PortAllocator, PortReservation, TcpPortAllocator};
-pub use process::{DefaultProcessTreeController, ProcessTreeController};
+pub use process::{
+    DefaultProcessInspector, DefaultProcessTreeController, ProcessIdentity, ProcessInspector,
+    ProcessTreeController,
+};
 pub use supervisor::{
     ChannelRuntimeFacade, RuntimeSupervisor, RuntimeSupervisorChannels, SupervisorComponents,
 };

@@ -4,6 +4,11 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 
+/// The temporary config a profile's Xray is started with, written inside that
+/// profile's directory under the runtime directory. It holds the upstream
+/// credentials, so a run that is killed has to clear it on the way back in.
+pub const XRAY_CONFIG_FILE: &str = "xray.json";
+
 /// Whether the config builder can turn this outbound into a working config.
 ///
 /// Four of the six protocols the model can store have no builder yet. A stored
