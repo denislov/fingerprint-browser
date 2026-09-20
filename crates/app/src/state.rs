@@ -152,6 +152,43 @@ impl LogFilter {
     }
 }
 
+/// Which view of the selected profile the Runtime Details panel is showing.
+///
+/// The panel used to be one long scroll: identity, diagnostics, findings and the
+/// whole launch line at once. The three views are the three questions asked of a
+/// running profile - what is it, what was it started with, what has it done -
+/// and only one of them is usually being asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailsTab {
+    #[default]
+    Details,
+    Args,
+    Log,
+}
+
+impl DetailsTab {
+    pub const ALL: [DetailsTab; 3] = [Self::Details, Self::Args, Self::Log];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Details => "Details",
+            Self::Args => "Args",
+            Self::Log => "Log",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Details => "details-tab-details",
+            Self::Args => "details-tab-args",
+            Self::Log => "details-tab-log",
+        }
+    }
+}
+
+/// How many of a profile's log lines the panel's Log view shows.
+const PANEL_LOG_LINES: usize = 20;
+
 /// One row of the profiles list with the display names already resolved.
 #[derive(Clone)]
 pub struct ProfileRow {
@@ -424,6 +461,8 @@ pub struct AppState {
     log: Vec<LogEntry>,
     /// Which of those lines the page is showing.
     log_filter: LogFilter,
+    /// Which view the Runtime Details panel is showing.
+    details_tab: DetailsTab,
     /// Where the lines are also written down, when a file could be opened.
     log_file: Option<LogFile>,
     /// Why there is no file, or the first write that failed.
@@ -514,6 +553,7 @@ impl AppState {
             toasts: Vec::new(),
             log: Vec::new(),
             log_filter: LogFilter::default(),
+            details_tab: DetailsTab::default(),
             log_file,
             log_file_error,
         }
@@ -686,6 +726,33 @@ impl AppState {
 
     pub fn set_log_filter(&mut self, filter: LogFilter) {
         self.log_filter = filter;
+    }
+
+    pub fn details_tab(&self) -> DetailsTab {
+        self.details_tab
+    }
+
+    pub fn set_details_tab(&mut self, tab: DetailsTab) {
+        self.details_tab = tab;
+    }
+
+    /// The newest log lines for one profile, for the panel's Log view.
+    ///
+    /// Only this profile's own lines: the Log page is where everything is, and
+    /// the panel is where one profile is being looked at.
+    pub fn log_tail(&self, profile_id: ProfileId) -> Vec<LogRow> {
+        self.log
+            .iter()
+            .rev()
+            .filter(|entry| entry.profile_id == Some(profile_id))
+            .take(PANEL_LOG_LINES)
+            .map(|entry| LogRow {
+                at: entry.at,
+                level: entry.level,
+                who: self.who(entry.profile_id),
+                message: entry.message.clone(),
+            })
+            .collect()
     }
 
     /// Where the log is also written down: the path, or the reason it is not.
@@ -1289,6 +1356,16 @@ pub(crate) mod testing {
                 .entry(id)
                 .or_insert_with(|| snapshot(id, RuntimeState::Stopped));
             snapshot.cdp_port = Some(port);
+        }
+
+        /// Publishes the launch line a running browser was started with.
+        #[cfg(test)]
+        pub fn set_args(&self, id: ProfileId, args: Vec<String>) {
+            let mut snapshots = self.snapshots.write().expect("snapshot lock");
+            let snapshot = snapshots
+                .entry(id)
+                .or_insert_with(|| snapshot(id, RuntimeState::Stopped));
+            snapshot.effective_args = args;
         }
 
         /// Publishes a diagnostic the way the supervisor's warning event does.
@@ -2561,6 +2638,45 @@ mod tests {
             fixture.state.notice().is_none(),
             "clearing the history does not silence a current problem"
         );
+    }
+
+    #[test]
+    fn the_panel_log_tail_is_one_profile_and_newest_first() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+        fixture.state.clear_log();
+        let other = ProfileId::new();
+
+        fixture.state.push_notice("app level", false);
+        fixture
+            .state
+            .record_event(&RuntimeEvent::Stopped { profile_id: id });
+        fixture.state.record_event(&RuntimeEvent::Warning {
+            profile_id: other,
+            message: "another profile".into(),
+        });
+        fixture.state.record_event(&RuntimeEvent::Warning {
+            profile_id: id,
+            message: "this profile".into(),
+        });
+
+        let tail = fixture.state.log_tail(id);
+        assert_eq!(tail.len(), 2, "{tail:?}");
+        assert_eq!(tail[0].message, "this profile", "newest first");
+        assert_eq!(tail[0].who, "verify me", "and named");
+        assert_eq!(tail[1].message, "browser stopped");
+        assert!(
+            tail.iter().all(|row| row.message != "app level"),
+            "the panel shows this profile only; the Log page has everything"
+        );
+    }
+
+    #[test]
+    fn the_details_panel_starts_on_details() {
+        let mut fixture = fixture();
+        assert_eq!(fixture.state.details_tab(), DetailsTab::Details);
+        fixture.state.set_details_tab(DetailsTab::Args);
+        assert_eq!(fixture.state.details_tab(), DetailsTab::Args);
     }
 
     #[test]

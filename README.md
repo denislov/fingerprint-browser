@@ -201,11 +201,11 @@ which is an open too.
   also where drained events - which were previously only a reason to re-read the
   snapshots - are turned into log lines and toasts.
 - The window renders the profile list with a state badge, Start/Stop/Restart,
-  the Runtime Details panel (PIDs, ports, effective args, last error/warning,
-  dropped events, open-data-dir, copy-args) and a fingerprint verification
-  action. Create, start, stop and restart are covered by a headless GPUI test
-  that clicks the real buttons; the toast layer is asserted through the window's
-  own notification list rather than by waiting for the timer.
+  the Runtime Details panel (three views: identity and diagnostics, the launch
+  line, and this profile's own log tail) and a fingerprint verification action.
+  Create, start, stop and restart are covered by a headless GPUI test that clicks
+  the real buttons; the toast layer is asserted through the window's own
+  notification list rather than by waiting for the timer.
 - On first start one browser core is registered by asking the discovered
   executable for `--version` and parsing its major. Discovery order is
   `FP_BROWSER_CHROMIUM_BIN`, then `bin/chromium`, `bin/chrome`, `chrome`, then
@@ -251,8 +251,16 @@ Known limitations:
 
 - A window destroyed by another X client without the close protocol (for example
   `xdotool windowclose`) may leave the process running, and it will not run the
-  exit path a signal or the Quit action runs. What it leaves behind is no longer
-  lost, though: the next start finds the session records and reclaims it.
+  exit path a signal or the Quit action runs. This is upstream and measured: the
+  X11 backend does not handle `DestroyNotify` for its own windows, and it keeps
+  using the destroyed window - the process log fills with `X11 QueryPointer
+  failed ... bad_value: <the gone window>` while nothing exits. A watchdog would
+  mean a second X11 connection of our own and a new dependency, to save one
+  process lifetime; what it would protect is already protected, because the
+  session record and the next start's reclaim are what keep the browsers from
+  being lost (and that reclaim is exercised by `chromium_real`). What it leaves
+  behind is no longer lost, though: the next start finds the session records and
+  reclaims it.
 - Reclaiming trusts a Linux-only reader for process identity (`/proc/<pid>/stat`
   and `/proc/<pid>/cmdline`). On a platform that cannot be asked, records are
   reported as unreadable and nothing is killed, rather than guessed at.

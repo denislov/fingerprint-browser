@@ -176,6 +176,26 @@ Phase 4 的剩余项在第十二批结清，结论与证据见 [fingerprint-matr
 - 测试卫生：`AppState::new` 会写真实数据目录，所以测试改用 `AppState::for_test` /
   `with_log`（显式注入 sink），测试不会往 Cargo.toml 旁边的 `data/` 写东西。
 
+### 第十四批：Runtime Details 分页，以及 X11 窗口被销毁这条限制
+
+进度（2026-09-20）：已完成（面板部分）/ 已定调（窗口部分）。
+
+- **Runtime Details 面板改成三页**：`DetailsTab::{Details, Args, Log}`。面板原来是一条长滚动：
+  身份、诊断、对账结论、整条启动命令行挤在一起，而现在这三个视图对应三个不同的问题
+  （它是什么 / 它是拿什么启的 / 它做了什么），通常只问其中一个。
+  Args 页会滚动（`max_h` 没变），Log 页只列**这个 profile 自己的**行（最新 20 条）——
+  全量在 Log 页，面板只服务“正在看的这个 profile”。标题行保留原来的六个动作。
+  实现上：三个视图一旦 `.id()` 就变成不同类型，所以面板先 `into_any_element()` 再选。
+- **X11 下“窗口被别的客户端销毁”的结论：不做 watchdog，靠 journal 兑现可靠性。**
+  实测（`xdotool windowclose`）：进程不退出，且 gpui 的 X11 后端会不断打
+  `X11 QueryPointer failed ... bad_value: <window>` —— 它**知道**窗口不在了（那些错误），
+  只是当成错误日志丢弃。上游没有对主窗口处理 `DestroyNotify`（grep 确认：只有 clipboard
+  那条路径处理）。自己加 watchdog 需要：新增 `x11rb` 直接依赖 + 用第二个连接按窗口名轮询根
+  窗口子树 + 处理“刚启动还没窗口”的误判，代价不小。而它要保护的东西（子进程与状态）已经由
+  `session.json` + 下一次启动的 reclaim 兑现——**而这个 reclaim 在此之前是坏的**（见第十二批
+  修掉的 start time bug），修完后 `chromium_real` 的“被杀死的一轮留下的浏览器被回收”在真机上
+  通过。所以这一项的结论是：限制留在 README，不上 X11 依赖；要真要 watchdog，那是另一个有界任务。
+
 ### 第二批：开关词汇的实测与回读验证
 
 进度（2026-09-19）：已完成。方法与全部实测数据见 [fingerprint-matrix.md](fingerprint-matrix.md)。
@@ -844,6 +864,8 @@ real Chromium (opt-in): AppState start/stop/restart with two live sessions,
 headless window: creating a profile shows one toast in the notification list,
   and showing the queue again does not duplicate it
 headless window: a refused setting keeps the banner and is also toasted
+headless window: the details panel switches between details, args and log, one
+  view at a time, and the log view is this profile's own lines
 headless window: the sidebar switches to the Log page and only that page renders
 headless window: the newest log line says what happened and at what level, and
   Clear empties the history
@@ -869,6 +891,8 @@ log rows name the profile and put the newest line first
 the log page filter hides lines without losing them
 the activity log is written to the file as well
 a log file that cannot be written is reported once
+the panel log tail is one profile and newest first
+the details panel starts on details
 ```
 
 ### Activity log file

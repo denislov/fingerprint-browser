@@ -10,8 +10,8 @@ use crate::open_dir::DirectoryOpener;
 use crate::proxy_editor::ProxyEditor;
 use crate::settings::SettingKey;
 use crate::state::{
-    AppState, CoreRow, LogFilter, LogLevel, LogRow, Page, ProfileRow, ProxyRow, Toast, ToastKind,
-    Verification,
+    AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Page, ProfileRow, ProxyRow, Toast,
+    ToastKind, Verification,
 };
 use crate::verifier::FingerprintVerifier;
 use crossbeam_channel::{Receiver, Sender};
@@ -294,6 +294,11 @@ impl AppView {
 
     fn on_set_log_filter(&mut self, filter: LogFilter, cx: &mut Context<Self>) {
         self.state.set_log_filter(filter);
+        cx.notify();
+    }
+
+    fn on_set_details_tab(&mut self, tab: DetailsTab, cx: &mut Context<Self>) {
+        self.state.set_details_tab(tab);
         cx.notify();
     }
 
@@ -884,6 +889,10 @@ impl Render for AppView {
         let verification = selected_id.and_then(|id| verifications.get(&id).cloned());
         let notice = self.state.notice().cloned();
         let has_core = self.state.has_core();
+        let details_tab = self.state.details_tab();
+        let log_tail = selected_id
+            .map(|id| self.state.log_tail(id))
+            .unwrap_or_default();
 
         div()
             .flex()
@@ -959,6 +968,8 @@ impl Render for AppView {
                                 .child(details_panel(
                                     selected.as_ref(),
                                     verification,
+                                    details_tab,
+                                    &log_tail,
                                     cx,
                                 ))
                             })
@@ -1889,15 +1900,26 @@ fn state_badge(row: &ProfileRow) -> impl IntoElement {
 fn details_panel(
     selected: Option<&ProfileRow>,
     verification: Option<Verification>,
+    tab: DetailsTab,
+    log_tail: &[LogRow],
     cx: &mut Context<AppView>,
 ) -> Div {
-    let body = match selected {
+    // The three views are different element types once an id makes them
+    // stateful, so the panel erases them before choosing one.
+    let body: AnyElement = match selected {
         None => div()
             .text_xs()
             .text_color(rgb(MUTED))
-            .child("Select a profile to inspect its runtime."),
+            .child("Select a profile to inspect its runtime.")
+            .into_any_element(),
         Some(row) => {
-            let mut grid = div().flex().flex_wrap().gap_x_6().gap_y_2();
+            let mut grid = div()
+                .id("details-grid")
+                .test_support()
+                .flex()
+                .flex_wrap()
+                .gap_x_6()
+                .gap_y_2();
             let verification = verification.clone();
             for (label, value) in [
                 ("Profile ID", row.profile.id.to_string()),
@@ -1931,9 +1953,7 @@ fn details_panel(
                 grid = grid.child(key_value(label, value));
             }
 
-            // The panel scrolls (see the container below), so a long list of
-            // findings stays reachable instead of being clipped.
-            div()
+            let details = div()
                 .flex()
                 .flex_col()
                 .gap_3()
@@ -1950,8 +1970,22 @@ fn details_panel(
                         .text_xs()
                         .text_color(rgb(0xf87171))
                         .child(format!("error: {error}"))
-                }))
-                .child(effective_args(row))
+                }));
+
+            // Only one of the three questions is answered at a time, so the
+            // panel scrolls a view rather than the whole history of the session.
+            match tab {
+                DetailsTab::Details => details.into_any_element(),
+                DetailsTab::Args => div()
+                    .id("args-body")
+                    .test_support()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(effective_args(row))
+                    .into_any_element(),
+                DetailsTab::Log => panel_log(log_tail).into_any_element(),
+            }
         }
     };
 
@@ -2080,6 +2114,24 @@ fn details_panel(
         )
         .child(
             div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .children(DetailsTab::ALL.map(|candidate| {
+                    let active = candidate == tab;
+                    Button::new(candidate.id())
+                        .label(candidate.label())
+                        .when(active, |button| button.primary())
+                        .when(!active, |button| button.ghost())
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.on_set_details_tab(candidate, cx)
+                            }),
+                        )
+                })),
+        )
+        .child(
+            div()
                 .id("details-scroll")
                 .test_support()
                 .flex_1()
@@ -2087,6 +2139,64 @@ fn details_panel(
                 .overflow_y_scroll()
                 .child(body),
         )
+}
+
+/// The tail of one profile's activity log, for the panel's Log view.
+fn panel_log(rows: &[LogRow]) -> impl IntoElement {
+    if rows.is_empty() {
+        return div()
+            .id("panel-log-body")
+            .test_support()
+            .text_xs()
+            .text_color(rgb(DIM))
+            .child(
+                "Nothing logged for this profile yet. The Log page has the whole session, \
+                 including window-level lines.",
+            );
+    }
+
+    div()
+        .id("panel-log-body")
+        .test_support()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(MUTED))
+                .child(format!("This profile, newest first ({})", rows.len())),
+        )
+        .children(rows.iter().enumerate().map(|(index, row)| {
+            div()
+                .id(("panel-log", index))
+                .test_support()
+                .flex()
+                .items_center()
+                .gap_3()
+                .text_xs()
+                .child(
+                    div()
+                        .w(px(56.0))
+                        .flex_shrink_0()
+                        .text_color(rgb(log_level_color(row.level)))
+                        .child(row.level.label()),
+                )
+                .child(
+                    div()
+                        .w(px(48.0))
+                        .flex_shrink_0()
+                        .text_color(rgb(DIM))
+                        .child(format_age(row.at)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(rgb(0xd4d4d8))
+                        .child(row.message.clone()),
+                )
+        }))
 }
 
 /// Whether the selected profile can be verified right now.
@@ -2254,7 +2364,7 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext, px, size};
-    use runtime::Discrepancy;
+    use runtime::{Discrepancy, RuntimeEvent};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
@@ -3328,6 +3438,73 @@ mod tests {
             cx.update(|window, _| window.try_find("logs-scroll").is_some()),
             "the page stays put with an empty history"
         );
+    }
+
+    #[gpui_kit::test]
+    fn the_details_panel_switches_between_views(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        // A launch line to show, and a line of this profile's own history.
+        runtime.set_args(
+            id,
+            vec!["--fingerprint=1".to_string(), "about:blank".to_string()],
+        );
+        view.update(cx, |view, cx| {
+            view.state_mut()
+                .record_event(&RuntimeEvent::Stopped { profile_id: id });
+            view.state_mut().refresh_runtime();
+            cx.notify();
+        });
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("details-grid").is_some()),
+            "the panel opens on the profile itself"
+        );
+        assert!(cx.update(|window, _| window.try_find("args-body").is_none()));
+
+        cx.update(|window, cx| window.click("details-tab-args", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("args-body").is_some()),
+            "the launch line has a view of its own"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("details-grid").is_none()),
+            "one view at a time: the panel is no longer one long scroll"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view
+                .state()
+                .selected()
+                .map(|row| row.effective_args().len())),
+            Some(2)
+        );
+
+        cx.update(|window, cx| window.click("details-tab-log", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("panel-log-body").is_some()),
+            "the third view is this profile's own history"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find(("panel-log", 0usize)).is_some()),
+            "with the newest line in it"
+        );
+        assert!(cx.update(|window, _| window.try_find("details-grid").is_none()));
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().details_tab()),
+            crate::state::DetailsTab::Log
+        );
+
+        cx.update(|window, cx| window.click("details-tab-details", cx));
+        settle(cx);
+        assert!(cx.update(|window, _| window.try_find("details-grid").is_some()));
+        assert!(cx.update(|window, _| window.try_find("panel-log-body").is_none()));
     }
 
     #[gpui_kit::test]
