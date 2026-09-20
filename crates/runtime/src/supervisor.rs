@@ -728,30 +728,38 @@ impl RuntimeSupervisor {
                 std::iter::once((RuntimeComponent::Browser, &mut session.browser))
                     .chain(session.xray.as_mut().map(|c| (RuntimeComponent::Xray, c)))
             {
-                let message = match child.try_wait() {
+                let outcome = match child.try_wait() {
                     Ok(None) => continue,
                     Ok(Some(status)) => {
-                        format!("{component:?} process exited unexpectedly: {status}")
+                        let clean = component == RuntimeComponent::Browser && status.success();
+                        (component, status.to_string(), clean)
                     }
-                    Err(e) => format!("{component:?} process status unavailable: {e}"),
+                    Err(e) => (component, e.to_string(), false),
                 };
-                exited.push((*id, component, message));
+                exited.push((*id, outcome));
                 break;
             }
         }
-        for (profile_id, component, message) in exited {
-            let state = RuntimeState::Crashed {
-                message: message.clone(),
-            };
-            self.set_snapshot_state(profile_id, state.clone());
-            self.emit(RuntimeEvent::Crashed {
-                profile_id,
-                component,
-                message,
-            });
-            self.emit(RuntimeEvent::StateChanged { profile_id, state });
-            // Always reclaim both components before publishing Stopped.
-            self.stop_session(profile_id, false);
+        for (profile_id, (component, detail, clean)) in exited {
+            if clean {
+                // Browser exited cleanly with exit code 0 (e.g. user closed the browser window).
+                // This is a normal user exit, so reclaim without raising a false crash alarm.
+                self.stop_session(profile_id, false);
+            } else {
+                let message = format!("{component:?} process exited unexpectedly: {detail}");
+                let state = RuntimeState::Crashed {
+                    message: message.clone(),
+                };
+                self.set_snapshot_state(profile_id, state.clone());
+                self.emit(RuntimeEvent::Crashed {
+                    profile_id,
+                    component,
+                    message,
+                });
+                self.emit(RuntimeEvent::StateChanged { profile_id, state });
+                // Always reclaim both components before publishing Stopped.
+                self.stop_session(profile_id, false);
+            }
         }
     }
 
@@ -788,10 +796,12 @@ impl RuntimeSupervisor {
     }
 
     fn terminate_child(&self, child: &mut std::process::Child) {
-        // The group may still contain renderers even after its leader exits.
-        let _ = self.process_tree.terminate_tree(child.id());
-        // A direct kill is a fallback if the platform tree controller fails.
-        let _ = child.kill();
+        if matches!(child.try_wait(), Ok(None)) {
+            // The group may still contain renderers even after its leader exits.
+            let _ = self.process_tree.terminate_tree(child.id());
+            // A direct kill is a fallback if the platform tree controller fails.
+            let _ = child.kill();
+        }
         let _ = child.wait();
     }
 

@@ -399,6 +399,8 @@ impl ProcessTreeController for DefaultProcessTreeController {
         {
             let status = Command::new("taskkill")
                 .args(["/F", "/T", "/PID", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status()
                 .map_err(ProcessError::SpawnFailed)?;
 
