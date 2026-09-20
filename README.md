@@ -148,14 +148,42 @@ dialog open with the reason when one fails; fields the form does not edit (core,
 proxy assignment, data directory, start target) are carried through untouched.
 Deleting asks first and keeps the profile's browser data on disk.
 
+Feedback is a toast, and what happened is a page. A success is a toast and
+leaves the banner clear; a problem owns the banner until it is dismissed, and is
+toasted while it happens, because the banner is the current problem rather than
+every problem ever seen. Either way the line is kept: the Log page lists starts
+and stops with the pids, ports and argument count they got, warnings, crashes,
+refused commands and the outcome of every fingerprint reading, newest first,
+attributed to the profile it is about or to `app` for the window itself. The
+page has Copy and Clear actions, and the history is capped at 500 lines so a
+long session does not grow without bound. Toasts are pushed from the background
+tick into the component library's notification layer, not from the click
+handler, so a warning that arrives on its own - a legacy core omitting a switch,
+a browser that crashed - is shown the same way a button press is. The data
+directory of the selected profile can be opened in the desktop's file manager
+(`xdg-open`, `open` or `explorer`) from Runtime Details; a profile that has never
+run has no directory yet, and the refusal names the path instead of creating an
+empty folder that looks like state. A relative data directory is resolved
+against the working directory first, the same way the Settings page shows it,
+because the opener is a foreign process that may not share this one's. The
+opener is reaped on a worker so a slow file manager cannot leave a zombie or
+block the window. A spawn is not a window appearing, though: an opener that
+exits non-zero - a desktop with no handler registered - is written to the
+process log, because the window cannot see it from the spawn and claiming the
+directory was opened would be a guess.
+
 - `crates/app/src/state.rs` holds the view-facing state (`AppState`). It owns no
   runtime state: every read goes through `RuntimeService::snapshot`, and a
   background tick drains `RuntimeEvent`s and reconciles snapshots every 200 ms
-  (full reconcile every fifth tick) as the façade contract requires.
+  (full reconcile every fifth tick) as the façade contract requires. The tick is
+  also where drained events - which were previously only a reason to re-read the
+  snapshots - are turned into log lines and toasts.
 - The window renders the profile list with a state badge, Start/Stop/Restart,
   the Runtime Details panel (PIDs, ports, effective args, last error/warning,
-  dropped events) and a copy-args action. Create, start, stop and restart are
-  covered by a headless GPUI test that clicks the real buttons.
+  dropped events, open-data-dir, copy-args) and a fingerprint verification
+  action. Create, start, stop and restart are covered by a headless GPUI test
+  that clicks the real buttons; the toast layer is asserted through the window's
+  own notification list rather than by waiting for the timer.
 - On first start one browser core is registered by asking the discovered
   executable for `--version` and parsing its major. Discovery order is
   `FP_BROWSER_CHROMIUM_BIN`, then `bin/chromium`, `bin/chrome`, `chrome`, then
@@ -171,9 +199,11 @@ Deleting asks first and keeps the profile's browser data on disk.
   ports, the arguments they were started with and the kernel start time of each.
   A run that is killed outright - `SIGKILL`, a crash, a window destroyed without
   the close protocol - leaves those browsers running and that record behind; the
-  next start reads it back before the window opens and stops what it finds, and
-  says so in the banner. Nothing is killed on a pid alone: the record is only
-  acted on when the live process is still the instance it captured (same pid and
+  next start reads it back before the window opens and stops what it finds: a
+  clean reclaim is a toast and a Log line, and a record that could not be
+  honoured is a banner, which stays. Nothing is killed on a pid alone: the
+  record is only acted on when the live process is still the instance it
+  captured (same pid and
   kernel start time), or - where a platform cannot report a start time - when its
   command line still carries the recorded arguments as the tail of the argument
   vector, or as the end of the single string a process like Chromium leaves
@@ -245,7 +275,8 @@ cargo test -p runtime --test chromium_real -- --ignored --test-threads=1
 ```
 
 Both were also walked through the window by hand: start a profile, `kill -9` the
-app, and the next start reclaims the browser and says so in the banner; with a
+app, and the next start reclaims the browser and says so in a toast and in the
+Log page; with a
 browser running, `kill -TERM` the app and it exits with nothing left behind. See
 [the acceptance report](docs/chromium-acceptance.md) for reproduction and limits.
 Actual remote upstreams and Windows process-tree cleanup still need acceptance.

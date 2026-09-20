@@ -350,19 +350,57 @@ Profile Editor      （已完成，第五批）
 Proxies             （已完成，第六批）
 Browser Cores       （已完成，第七批）
 Settings            （已完成，第八批）
+Log                 （已完成，第十一批）
 Runtime Details     （已完成）
 ```
 
-仍未实现（都是“锦上添花”，不是缺口）：
-
-- 行内 toast（目前用横幅 + 对话框内错误行）；
-- open user-data-dir（打开 profile 的数据目录）；
-- recent error/log 面板（目前只有 Runtime Details 里的 last error/warning）。
+仍未实现：无。三个「锦上添花」（toast / open user-data-dir / 日志面板）
+已在第十一批完成，见下。
 
 已知限制：非 WM 关闭协议直接销毁窗口（如 `xdotool windowclose`）时，gpui 可能不感知
 窗口已消失，进程会继续运行并持有浏览器；支持的退出方式是窗口管理器关闭按钮、窗口内
 Quit 按钮，以及 `SIGINT`/`SIGTERM`/`SIGHUP`（第十批）。该问题在 gpui 的 X11 后端，
 不在本仓库接线代码；它留下的子进程由下一次启动的 reclaim 兜底。
+
+---
+
+### 第十一批：三个锦上添花（toast / open user-data-dir / 日志面板）
+
+进度（2026-09-20）：已完成。**这一批不新增页面能力，而是把“发生了什么”变得看得见、
+留得住。**
+
+- **toast**：`AppState` 新增 `Toast` 队列（`ToastKind::{Success, Warning, Error}`），
+  由 `drain_toasts()` 交给视图。真正推送在**后台 tick 里**、而不是点击处理函数里
+  （`poll_runtime` → `cx.update_window` → `window.push_notification`），
+  所以“内核忽略某个开关”“浏览器崩了”这类自己到来的事件和按钮一样能弹出来。
+  这里有个 gpui 的实现细节：push 会去改通知层所在的 root view，所以必须在
+  `this.update(...)` 返回之后再 `update_window`，不能在实体更新闭包里做。
+- **横幅语义变了**，这是一次行为修正而不是换皮：横幅只留给**问题**——它留到用户点
+  Dismiss；成功只发 toast（且会清掉当前横幅，因为横幅是“当前的问题”而不是“所有历史问题”）。
+  被判为错误的操作是两处都出：横幅留证，toast 当场可见。
+- **日志面板**（新的 Log 页，侧边栏第五页）：`AppState::record_event` 把 `RuntimeEvent`
+  翻成人话——starting/stopping、failed、`browser started (pid, cdp port, socks port, xray pid)`、
+  browser stopped、`xray crashed: …`、warning、`launching with N arguments`。
+  Running/Stopped/Crashed 的 `StateChanged` 有意不记，因为 `Started`/`Stopped`/`Crashed`
+  已经各有一行——同一件事不写两遍。每条 notice（成功或失败）、每次指纹回读结论
+  （confirmed / N claims not confirmed / unreadable）也进日志。行按最新在前，带
+  相对时间、级别、profile 名（或 `app`），容量 500 行，有 Copy / Clear。
+  `RuntimeEvent` 以前只是“该重读快照了”的信号，事件载荷**当场丢弃**；现在它至少有了
+  一份会话内的成文记录（仍不是持久化审计，契约不变）。
+- **open user-data-dir**：`app::open_dir` 新增 `DirectoryOpener` trait + `SystemDirectoryOpener`
+  （`xdg-open` / `open` / `explorer`，由纯函数 `opener(path, os)` 给出，三个平台都可测）。
+  子进程 spawn 后在独立线程 wait 回收，避免僵尸进程、也不阻塞 UI；
+  opener 退出码非 0（桌面没注册 handler）只写 `tracing::warn`，因为从 spawn 看不出来，
+  也不好意思把它当成“已打开”。
+  目录不存在时**拒绝**并报出路径（提示先启动一次让浏览器创建），而不是顺手建个空目录——
+  空目录看起来像状态。相对路径先按工作目录解析（与 Settings 页的展示一致），因为 opener
+  是外部进程，不保证共享本进程的 cwd。视图注入 opener（同 verifier 的做法），headless 测试
+  点真实按钮、由 fake 收下路径，真机不会弹文件管理器。
+- 测试：state 侧覆盖 toast 入队/出队、notice→日志、事件→日志（逐条断言文案）、
+  容量裁剪、`log_rows` 命名与倒序；UI 侧覆盖“点一下就能在窗口的通知列表里看到一个 toast”、
+  “问题同时在横幅和 toast 里”、“Log 页只渲染自己”、“日志行内容与清空”、“open dir 收到
+  正确路径”、“open 失败给出原因”。UI 测试直接调 `show_toasts`（即 tick 用的那段逻辑），
+  不等 200ms 定时器。
 
 ---
 
@@ -740,6 +778,38 @@ headless window: click New Profile x2 -> two rows; click Start -> badge Running,
 headless window: no core -> banner shows the discovery hint
 real Chromium (opt-in): AppState start/stop/restart with two live sessions,
   distinct PIDs/CDP ports/data dirs, seed switches in effective args
+headless window: creating a profile shows one toast in the notification list,
+  and showing the queue again does not duplicate it
+headless window: a refused setting keeps the banner and is also toasted
+headless window: the sidebar switches to the Log page and only that page renders
+headless window: the newest log line says what happened and at what level, and
+  Clear empties the history
+headless window: clicking open-dir hands the profile's data directory to the
+  opener, and a failed open is refused with the reason
+```
+
+### Activity log and toasts
+
+```text
+a success is a toast and leaves the banner clear
+a problem owns the banner until it is dismissed
+draining toasts leaves nothing to show twice
+every notice is written to the log
+runtime events are written to the log once each
+  (running/stopped/crashed state changes are the events' own lines)
+a crash and a refused start are logged as errors
+a failed reading is logged as an error
+the log is capped and the newest line survives
+log rows name the profile and put the newest line first
+```
+
+### Open data directory
+
+```text
+the opener matches the platform
+the directory is passed as one argument
+a directory that does not exist is refused with its path
+a relative directory is named against the working directory
 ```
 
 ---
