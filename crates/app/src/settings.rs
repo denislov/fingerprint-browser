@@ -355,7 +355,7 @@ impl Settings {
     /// A relative path is shown with the directory it resolves against, so the
     /// window never shows a path the user cannot find.
     fn rendered(&self, path: &Path) -> String {
-        if path.is_absolute() {
+        if path.is_absolute() || path.has_root() {
             return path.to_string_lossy().to_string();
         }
         match std::env::current_dir() {
