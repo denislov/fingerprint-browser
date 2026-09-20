@@ -94,7 +94,8 @@ reading the surface back out of the same binaries (see
 `docs/fingerprint-matrix.md`), not by this report - majors 142, 144 and 148 were
 each measured to honour the switches this report only passes.
 
-Remote proxy endpoints, Windows/macOS process-tree cleanup and visible GPUI
-operation remain separate acceptance work. Process identity for reclaim is read
-from `/proc`, so that path is Linux-only today: on a platform that cannot be
-asked, records are reported as unreadable and nothing is killed.
+This report covers Linux. Windows process-tree cleanup and recovery are now
+implemented and tested separately in [windows-acceptance.md](windows-acceptance.md).
+Windows uses Job Objects and native process creation times; Linux uses `/proc`.
+Remote proxy endpoints, macOS process-identity recovery and additional visible
+GPUI acceptance remain separate work. Unreadable identities are left untouched.

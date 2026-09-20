@@ -251,7 +251,7 @@ fn stream_json(stream: &StreamSettings) -> Option<serde_json::Value> {
 
 /// Require a live child and a listening loopback endpoint before launching Chromium.
 pub(crate) fn wait_ready(
-    child: &mut std::process::Child,
+    child: &mut crate::process::ManagedChild,
     port: u16,
     timeout: std::time::Duration,
     mut keep_waiting: impl FnMut() -> bool,

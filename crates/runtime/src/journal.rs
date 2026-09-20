@@ -297,16 +297,31 @@ pub fn reclaim(
         }
 
         let mut forced = false;
+        let mut failures = Vec::new();
         if browser_running {
-            forced |= stop(record.browser.pid, inspector, tree, graceful);
+            match stop(&record.browser, inspector, tree, graceful) {
+                Ok(killed) => forced |= killed,
+                Err(error) => failures.push(error),
+            }
         }
         let xray_pid = record
             .xray
             .as_ref()
             .filter(|_| xray_running)
             .map(|process| process.pid);
-        if let Some(pid) = xray_pid {
-            forced |= stop(pid, inspector, tree, graceful);
+        if let Some(process) = record.xray.as_ref().filter(|_| xray_running) {
+            match stop(process, inspector, tree, graceful) {
+                Ok(killed) => forced |= killed,
+                Err(error) => failures.push(error),
+            }
+        }
+        if !failures.is_empty() {
+            report.unresolved.push(Unresolved {
+                profile_id: Some(record.profile_id),
+                path,
+                reason: failures.join("; "),
+            });
+            continue;
         }
         remove_xray_config(runtime_dir, &record);
         remove(runtime_dir, record.profile_id);
@@ -332,6 +347,12 @@ fn verdict(record: &ProcessRecord, inspector: &dyn ProcessInspector) -> Verdict 
         }
         ProcessReading::Live(live) => live,
     };
+    if live.argv.is_empty() && (record.start_time.is_none() || live.start_time.is_none()) {
+        return Verdict::Unreadable(format!(
+            "pid {} has no comparable creation time or command line; left untouched",
+            record.pid
+        ));
+    }
     let describes_this_process = describes(&live, record);
     if describes_this_process {
         Verdict::Ours
@@ -380,18 +401,30 @@ fn command_line_matches(live: &crate::process::ProcessIdentity, record: &Process
 
 /// Returns whether the process had to be killed.
 fn stop(
-    pid: u32,
+    record: &ProcessRecord,
     inspector: &dyn ProcessInspector,
     tree: &dyn ProcessTreeController,
     graceful: Duration,
-) -> bool {
+) -> Result<bool, String> {
+    let pid = record.pid;
+    // Re-read after earlier components' grace periods, before touching this PID.
+    match verdict(record, inspector) {
+        Verdict::Gone => return Ok(false),
+        Verdict::Ours => {}
+        Verdict::Foreign(reason) | Verdict::Unreadable(reason) => return Err(reason),
+    }
     let _ = tree.request_tree_exit(pid);
     if wait_gone(pid, inspector, graceful) {
-        return false;
+        return Ok(false);
     }
-    let _ = tree.terminate_tree(pid);
-    let _ = wait_gone(pid, inspector, DEFAULT_GRACE);
-    true
+    tree.terminate_instance(pid, record.start_time)
+        .map_err(|e| format!("pid {pid}: {e}"))?;
+    if !wait_gone(pid, inspector, DEFAULT_GRACE) {
+        return Err(format!(
+            "pid {pid} did not exit after cleanup; session record retained"
+        ));
+    }
+    Ok(true)
 }
 
 fn wait_gone(pid: u32, inspector: &dyn ProcessInspector, timeout: Duration) -> bool {

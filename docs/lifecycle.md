@@ -369,24 +369,30 @@ CDP 和 SOCKS TCP 端口在规划阶段由监听句柄预留，直到对应子�
 
 Chromium 为多进程结构。
 
-v1 架构上预留：
-
-```rust
-trait ProcessTreeController
-```
-
-Windows 实现推荐最终使用 Job Object：
+Windows 10+ 已实现独立 Job Object。Chromium 和 Xray 各自一个 Job，句柄由
+Supervisor 所有，不被子进程继承：
 
 ```text
 create Job
-spawn Chromium
-assign process to Job
-on stop -> terminate Job
+set JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+CreateProcessW + PROC_THREAD_ATTRIBUTE_JOB_LIST (atomic assignment)
+normal stop -> CDP Browser.close -> bounded wait -> terminate Job
+manager killed -> OS closes Job handles -> children terminated
 ```
 
-这样能可靠回收 renderer / GPU / utility 等子进程。
+创建与绑定是同一步，避免 spawn 后尚未 assign 时管理器死亡留下孤儿。
+主进程已退出时仍会终止 Job，回收 renderer / GPU / utility 等后代。
+不支持 Job 绑定的环境会启动失败，不退回无保护的启动方式。
 
-Xray 也可以放入独立 Job，或由同一 RuntimeSession 管理。
+Windows 进程身份使用 PID + GetProcessTimes 创建时间（FILETIME）；退出态通过
+进程句柄检查。权限不足返回 Unknown，不当成已退出。恢复旧会话时只处理身份匹配者，
+终止前再次核对创建时间，并持有进程句柄直到 taskkill /T 完成，防止 PID 被复用。
+新会话通常已经由 Job 清理，下一次启动只需删除 stale journal 和临时代理配置。
+旧 Windows journal 没有创建时间时保留并报告；不会只凭 PID 杀进程。
+恢复失败不会删除 journal/config，也不会报成回收成功。
+
+测试与边界见 [windows-acceptance.md](windows-acceptance.md)。强制清理不保证 Cookie
+落盘，正常停止仍优先 CDP 关闭。
 
 ---
 

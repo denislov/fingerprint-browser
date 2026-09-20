@@ -9,8 +9,12 @@ env:
 
 jobs:
   gate:
-    name: workspace gate
-    runs-on: ubuntu-latest
+    name: workspace gate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +24,7 @@ jobs:
       # tests render headless: no display is needed, and python3 - required by
       # the runtime lifecycle tests - is already on the runner image.
       - name: Install the system libraries the workspace links against
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
@@ -32,4 +37,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run the gate
+        if: runner.os == 'Linux'
         run: ./scripts/check.sh
+
+      - name: Run the Windows gate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check.ps1

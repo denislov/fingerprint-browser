@@ -280,11 +280,20 @@ v1 允许“探测空闲端口 -> 立即 spawn -> 失败重试”的简单策略
 8. state -> Stopped
 ```
 
-Windows 后期应使用 Job Object；v1 若先做主进程终止，也应把“进程树回收”作为独立接口保留。
+Windows 10+ 运行时已使用独立 Job Object：进程创建时原子绑定，Job 句柄不继承，
+由 Supervisor 持有。正常停止先 CDP 关闭，再终止 Job；管理器异常结束也由系统关闭
+Job 并清理后代。ProcessTreeController 保留为 Unix 进程组与旧会话恢复接口，
+Windows 恢复通过 terminate_instance(pid, start_time) 再次核对创建时间。
+失败必须保留会话记录并报告，不能把未终止的进程视为已回收。
 
 ```rust
 pub trait ProcessTreeController: Send + Sync {
     fn terminate_tree(&self, pid: u32) -> Result<(), ProcessError>;
+
+    /// Windows 旧会话恢复在终止前再次核对创建时间。
+    fn terminate_instance(&self, pid: u32, start_time: Option<u64>) -> Result<(), ProcessError> {
+        self.terminate_tree(pid)
+    }
 
     /// 回收孤儿时先请求退出（Unix：信号进程组），默认实现不做任何事。
     fn request_tree_exit(&self, pid: u32) -> Result<(), ProcessError> {

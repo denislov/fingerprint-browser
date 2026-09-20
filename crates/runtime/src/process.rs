@@ -1,14 +1,33 @@
 use crate::error::ProcessError;
-use std::process::{Child, Command};
+#[cfg(not(windows))]
+use std::process::Child;
+use std::process::Command;
 
-/// All supervised children must lead their own process group on Unix.
-pub(crate) fn spawn_managed(command: &mut Command) -> std::io::Result<Child> {
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+pub(crate) use windows::ManagedChild;
+#[cfg(not(windows))]
+pub(crate) type ManagedChild = Child;
+
+/// Unix children lead their own process group. Windows children are created
+/// atomically inside a private kill-on-close job (see the runtime-only contract
+/// of windows::spawn for the supported Command fields).
+pub(crate) fn spawn_managed(command: &mut Command) -> std::io::Result<ManagedChild> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    command.spawn()
+    #[cfg(windows)]
+    {
+        windows::spawn(command)
+    }
+    #[cfg(not(windows))]
+    {
+        command.spawn()
+    }
 }
 
 /// What a live process reports about itself, read back rather than assumed.
@@ -22,8 +41,8 @@ pub struct ProcessIdentity {
     /// rewrite that file: Chromium replaces it with a single string holding the
     /// whole command line, which arrives here as one entry containing spaces.
     pub argv: Vec<String>,
-    /// Kernel start time in clock ticks since boot, where the platform exposes
-    /// it. Together with the pid this survives pid recycling.
+    /// Platform-native creation time: Linux ticks since boot or Windows FILETIME
+    /// (100 ns since 1601). Together with the pid this survives pid recycling.
     pub start_time: Option<u64>,
 }
 
@@ -127,7 +146,12 @@ impl ProcessInspector for DefaultProcessInspector {
         read_stat(&stat)?.1
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    fn inspect(&self, pid: u32) -> ProcessReading {
+        windows::inspect(pid)
+    }
+
+    #[cfg(not(any(target_os = "linux", windows)))]
     fn inspect(&self, _pid: u32) -> ProcessReading {
         // Reading another process's command line and start time portably would
         // mean shelling out to `ps` and parsing its output. Rather than guess,
@@ -349,6 +373,11 @@ mod tests {
 pub trait ProcessTreeController: Send + Sync {
     fn terminate_tree(&self, pid: u32) -> Result<(), ProcessError>;
 
+    /// Recheck the recorded identity at the point of termination where supported.
+    fn terminate_instance(&self, pid: u32, _start_time: Option<u64>) -> Result<(), ProcessError> {
+        self.terminate_tree(pid)
+    }
+
     /// Ask a managed tree to exit on its own before [`Self::terminate_tree`]
     /// escalates to a kill.
     ///
@@ -397,24 +426,25 @@ impl ProcessTreeController for DefaultProcessTreeController {
     fn terminate_tree(&self, pid: u32) -> Result<(), ProcessError> {
         #[cfg(target_os = "windows")]
         {
-            let status = Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map_err(ProcessError::SpawnFailed)?;
-
-            if !status.success() {
-                // Non-zero exit code might mean process already terminated
-                tracing::debug!("taskkill exited with non-zero status for pid {}", pid);
-            }
-            Ok(())
+            windows::terminate(pid, None)
+                .map_err(|e| ProcessError::TerminationFailed(e.to_string()))
         }
 
         #[cfg(unix)]
         {
             Self::signal_group(pid, libc::SIGKILL)
         }
+    }
+
+    #[cfg(windows)]
+    fn terminate_instance(&self, pid: u32, start_time: Option<u64>) -> Result<(), ProcessError> {
+        let start_time = start_time.ok_or_else(|| {
+            ProcessError::TerminationFailed(
+                "Windows session has no recorded creation time; left untouched".into(),
+            )
+        })?;
+        windows::terminate(pid, Some(start_time))
+            .map_err(|e| ProcessError::TerminationFailed(e.to_string()))
     }
 
     fn request_tree_exit(&self, pid: u32) -> Result<(), ProcessError> {

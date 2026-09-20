@@ -18,8 +18,8 @@ use std::time::{Duration, SystemTime};
 
 struct ActiveSession {
     _profile_id: ProfileId,
-    browser: std::process::Child,
-    xray: Option<std::process::Child>,
+    browser: crate::process::ManagedChild,
+    xray: Option<crate::process::ManagedChild>,
     xray_config: Option<std::path::PathBuf>,
     _cdp_port: u16,
     _socks_port: Option<u16>,
@@ -365,7 +365,7 @@ impl RuntimeSupervisor {
         let mut cancelled = false;
         let xray_config = plan.xray.as_ref().map(|p| p.config_path.clone());
         if let Some(xray_plan) = &plan.xray {
-            let result = (|| -> Result<std::process::Child, String> {
+            let result = (|| -> Result<crate::process::ManagedChild, String> {
                 let proxy = params.proxy.as_ref().ok_or("missing proxy configuration")?;
                 self.xray_builder
                     .build(proxy, xray_plan.socks_port, &xray_plan.config_path)
@@ -407,7 +407,7 @@ impl RuntimeSupervisor {
                 }
             }
         }
-        let xray_pid = xray.as_ref().map(std::process::Child::id);
+        let xray_pid = xray.as_ref().map(crate::process::ManagedChild::id);
 
         if self.poll_start_commands(profile_id) {
             if let Some(child) = xray.as_mut() {
@@ -795,9 +795,13 @@ impl RuntimeSupervisor {
         }
     }
 
-    fn terminate_child(&self, child: &mut std::process::Child) {
+    fn terminate_child(&self, child: &mut crate::process::ManagedChild) {
+        #[cfg(windows)]
+        if let Err(error) = child.terminate_tree() {
+            tracing::error!("failed to terminate managed job: {error}");
+        }
         if matches!(child.try_wait(), Ok(None)) {
-            // The group may still contain renderers even after its leader exits.
+            #[cfg(unix)]
             let _ = self.process_tree.terminate_tree(child.id());
             // A direct kill is a fallback if the platform tree controller fails.
             let _ = child.kill();
