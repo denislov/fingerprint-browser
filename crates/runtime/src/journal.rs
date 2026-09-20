@@ -47,24 +47,25 @@ pub struct ProcessRecord {
 impl ProcessRecord {
     /// Records a process that was just spawned. The start time is read back out
     /// of the live process rather than assumed, so a record written here can
-    /// tell the same process apart from a recycled pid later. It is `None` when
-    /// the process is still between `fork` and `execve`, or when the platform
-    /// cannot report it; identity then rests on the arguments alone.
+    /// tell the same process apart from a recycled pid later.
+    ///
+    /// It is read from the pid, not from the command line: a record is written
+    /// as soon as the child exists, which is before it reaches `execve`, and a
+    /// start time lost there leaves the record identifiable only by a command
+    /// line the browser will have rewritten by the time anyone reads it back.
+    /// `None` means the platform cannot report it, and identity then rests on the
+    /// arguments alone.
     pub fn captured(
         pid: u32,
         executable: &Path,
         args: &[String],
         inspector: &dyn ProcessInspector,
     ) -> Self {
-        let start_time = match inspector.inspect(pid) {
-            ProcessReading::Live(live) => live.start_time,
-            ProcessReading::Absent | ProcessReading::Unknown => None,
-        };
         Self {
             pid,
             executable: executable.to_path_buf(),
             args: args.to_vec(),
-            start_time,
+            start_time: inspector.start_time(pid),
         }
     }
 }
@@ -505,6 +506,46 @@ mod tests {
         fn inspect(&self, _pid: u32) -> ProcessReading {
             ProcessReading::Unknown
         }
+    }
+
+    /// A child that exists but has not reached `execve`: no command line, but
+    /// its `/proc` entry - and its start time - are there.
+    struct PreExecInspector;
+    impl ProcessInspector for PreExecInspector {
+        fn inspect(&self, _pid: u32) -> ProcessReading {
+            ProcessReading::Unknown
+        }
+
+        fn start_time(&self, _pid: u32) -> Option<u64> {
+            Some(424_242)
+        }
+    }
+
+    /// The record is written before readiness on purpose, so it is written
+    /// before the child has a command line. Losing the start time there leaves
+    /// the record identified by a command line the browser rewrites, which is
+    /// how a session this run started became one the next run refused to
+    /// reclaim.
+    #[test]
+    fn a_record_keeps_the_start_time_before_the_command_line_exists() {
+        let record = ProcessRecord::captured(
+            4321,
+            std::path::Path::new("/opt/chrome"),
+            &["--fingerprint=42".to_string()],
+            &PreExecInspector,
+        );
+
+        assert_eq!(record.start_time, Some(424_242));
+
+        // And a platform that cannot report one still records the arguments.
+        let blind = ProcessRecord::captured(
+            4321,
+            std::path::Path::new("/opt/chrome"),
+            &["--fingerprint=42".to_string()],
+            &BlindInspector,
+        );
+        assert_eq!(blind.start_time, None);
+        assert_eq!(blind.args, ["--fingerprint=42"]);
     }
 
     fn record_for(profile_id: ProfileId, child: &std::process::Child) -> SessionRecord {

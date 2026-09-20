@@ -57,6 +57,26 @@ pub enum ProcessReading {
 
 pub trait ProcessInspector: Send + Sync {
     fn inspect(&self, pid: u32) -> ProcessReading;
+
+    /// The kernel start time of a pid, read without needing its command line.
+    ///
+    /// A process has a `/proc` entry from the moment it is created, while its
+    /// command line only becomes readable at `execve`. A session record is
+    /// written as soon as the child exists - before readiness, on purpose, so a
+    /// run killed during that wait still leaves a record - and the start time
+    /// is the part of the child's identity that survives a pid being recycled.
+    /// Reading it separately from the command line is what keeps a record
+    /// written that early identifiable later.
+    ///
+    /// The default derives it from [`Self::inspect`], which is all a platform
+    /// that cannot be asked has; the Linux inspector reads `/proc/<pid>/stat`
+    /// directly, where the value is available before the command line is.
+    fn start_time(&self, pid: u32) -> Option<u64> {
+        match self.inspect(pid) {
+            ProcessReading::Live(live) => live.start_time,
+            ProcessReading::Absent | ProcessReading::Unknown => None,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -75,20 +95,7 @@ impl ProcessInspector for DefaultProcessInspector {
             Ok(stat) => stat,
             Err(error) => return reading_for_error(&error),
         };
-        // The second field of `stat` is the executable name in parentheses and
-        // may itself contain spaces, so only what follows the last ')' can be
-        // split. The first token there is field 3, which makes field 22 - the
-        // start time - the twentieth.
-        let (state, start_time) = stat
-            .rsplit_once(") ")
-            .map(|(_, rest)| {
-                let mut fields = rest.split_whitespace();
-                (
-                    fields.next().and_then(|state| state.chars().next()),
-                    fields.nth(18).and_then(|value| value.parse().ok()),
-                )
-            })
-            .unwrap_or((None, None));
+        let (state, start_time) = read_stat(&stat).unwrap_or((None, None));
         // A zombie still holds its pid and its entry in `stat`, but it cannot
         // run and it holds no argument vector to compare against.
         if matches!(state, Some('Z' | 'X')) {
@@ -113,6 +120,13 @@ impl ProcessInspector for DefaultProcessInspector {
         ProcessReading::Live(ProcessIdentity { argv, start_time })
     }
 
+    /// Read from `stat` alone, which exists before `execve` does.
+    #[cfg(target_os = "linux")]
+    fn start_time(&self, pid: u32) -> Option<u64> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        read_stat(&stat)?.1
+    }
+
     #[cfg(not(target_os = "linux"))]
     fn inspect(&self, _pid: u32) -> ProcessReading {
         // Reading another process's command line and start time portably would
@@ -121,6 +135,23 @@ impl ProcessInspector for DefaultProcessInspector {
         // its records alone instead of deciding they describe dead processes.
         ProcessReading::Unknown
     }
+}
+
+/// The state character and start time from `/proc/<pid>/stat`.
+///
+/// The second field is the executable name in parentheses and may itself
+/// contain spaces, so only what follows the last ')' can be split. The first
+/// token there is field 3, which makes field 22 - the start time - the
+/// twentieth.
+#[cfg(target_os = "linux")]
+fn read_stat(stat: &str) -> Option<(Option<char>, Option<u64>)> {
+    stat.rsplit_once(") ").map(|(_, rest)| {
+        let mut fields = rest.split_whitespace();
+        (
+            fields.next().and_then(|state| state.chars().next()),
+            fields.nth(18).and_then(|value| value.parse().ok()),
+        )
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -207,6 +238,35 @@ mod tests {
         assert_eq!(identity.args(), ["60"]);
         assert_eq!(identity.argv[0], "/bin/sleep");
         assert!(identity.start_time.is_some(), "{identity:?}");
+
+        DefaultProcessTreeController
+            .terminate_tree(child.id())
+            .unwrap();
+        child.wait().unwrap();
+    }
+
+    /// A session record is written as soon as the child exists, which is before
+    /// `execve` and therefore before a command line can be read. The start time
+    /// has to be available then: it is the half of the identity that survives the
+    /// process rewriting its own command line later.
+    #[test]
+    fn a_start_time_is_readable_before_the_command_line_is() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60");
+        let mut child = spawn(&mut command);
+
+        let start_time = DefaultProcessInspector.start_time(child.id());
+        assert!(
+            start_time.is_some(),
+            "the start time is in /proc/<pid>/stat from the moment the child exists: {:?}",
+            DefaultProcessInspector.inspect(child.id())
+        );
+
+        // And it is the same value the full reading reports once there is one.
+        assert_eq!(
+            Some(start_time.unwrap()),
+            live_identity(child.id()).start_time
+        );
 
         DefaultProcessTreeController
             .terminate_tree(child.id())
