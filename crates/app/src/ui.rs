@@ -6,9 +6,12 @@
 
 use crate::core_editor::CoreEditor;
 use crate::editor::ProfileEditor;
+use crate::open_dir::DirectoryOpener;
 use crate::proxy_editor::ProxyEditor;
 use crate::settings::SettingKey;
-use crate::state::{AppState, CoreRow, Page, ProfileRow, ProxyRow, Verification};
+use crate::state::{
+    AppState, CoreRow, LogLevel, LogRow, Page, ProfileRow, ProxyRow, Toast, ToastKind, Verification,
+};
 use crate::verifier::FingerprintVerifier;
 use crossbeam_channel::{Receiver, Sender};
 use domain::{CoreId, ProfileId, ProxyId, RuntimeState};
@@ -18,6 +21,7 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::*;
 use gpui_kit::component::dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::notification::{Notification, NotificationType};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use runtime::{Discrepancy, RuntimeEvent};
@@ -50,6 +54,8 @@ pub struct AppView {
     /// Which setting that field belongs to.
     setting_key: Option<SettingKey>,
     verifier: Arc<dyn FingerprintVerifier>,
+    /// Opens a profile's data directory. Injected so a test does not open one.
+    opener: Arc<dyn DirectoryOpener>,
     verifications: Receiver<(ProfileId, Result<Vec<Discrepancy>, String>)>,
     verification_tx: Sender<(ProfileId, Result<Vec<Discrepancy>, String>)>,
     state: AppState,
@@ -63,6 +69,7 @@ impl AppView {
         state: AppState,
         events: Receiver<RuntimeEvent>,
         verifier: Arc<dyn FingerprintVerifier>,
+        opener: Arc<dyn DirectoryOpener>,
     ) -> Self {
         // A reading takes seconds and blocks on the browser, so it runs on a
         // worker thread and reports back through this channel.
@@ -74,6 +81,7 @@ impl AppView {
             setting_editor: None,
             setting_key: None,
             verifier,
+            opener,
             verifications,
             verification_tx,
             state,
@@ -151,7 +159,7 @@ impl AppView {
                     if cx.windows().is_empty() {
                         quit = true;
                         cx.quit();
-                        return;
+                        return (false, Vec::new(), Vec::new());
                     }
 
                     let notified = view.drain_events();
@@ -160,21 +168,37 @@ impl AppView {
                         view.state.refresh_runtime();
                         cx.notify();
                     }
+                    // The toasts are pushed from outside this update: showing
+                    // one updates the root view the notification layer lives
+                    // on, which is a different entity.
+                    (true, view.state.drain_toasts(), cx.windows())
                 });
 
                 // The entity is gone, or the last window was closed.
-                if updated.is_err() || quit {
+                let Ok((alive, toasts, windows)) = updated else {
                     break;
+                };
+                if !alive || quit {
+                    break;
+                }
+                if !toasts.is_empty() {
+                    for window in windows {
+                        let _ = cx.update_window(window, |_, window, cx| {
+                            push_toasts(&toasts, window, cx);
+                        });
+                    }
                 }
             }
         })
         .detach();
     }
 
-    /// Drain queued notifications. Events are never replayed as state.
-    fn drain_events(&self) -> bool {
+    /// Drain queued notifications into the activity log. Events are never
+    /// replayed as state, but they are the only record of a crash or a warning.
+    fn drain_events(&mut self) -> bool {
         let mut notified = false;
-        while self.events.try_recv().is_ok() {
+        while let Ok(event) = self.events.try_recv() {
+            self.state.record_event(&event);
             notified = true;
         }
         notified
@@ -196,6 +220,59 @@ impl AppView {
             received = true;
         }
         received
+    }
+
+    /// Show every queued toast in one window.
+    ///
+    /// The tick drains the queue and calls `push_toasts` with each open window;
+    /// a test calls this directly, because it should not have to wait for the
+    /// timer to fire before it can assert that an action was acknowledged.
+    #[cfg(test)]
+    pub(crate) fn show_toasts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let toasts = self.state.drain_toasts();
+        push_toasts(&toasts, window, cx);
+    }
+
+    /// Opens a profile's browser data directory.
+    ///
+    /// The directory is not created here: a profile that has never run has no
+    /// browser data, and the refusal says so rather than leaving an empty
+    /// folder behind that looks like state.
+    fn on_open_data_dir(&mut self, id: ProfileId, cx: &mut Context<Self>) {
+        let path = match self.state.profile(id) {
+            Some(profile) => profile.user_data_dir,
+            None => {
+                self.state
+                    .push_notice(format!("profile {id} is no longer there"), true);
+                cx.notify();
+                return;
+            }
+        };
+        match self.opener.open(&path) {
+            Ok(()) => self
+                .state
+                .push_notice(format!("Opened {}", path.display()), false),
+            Err(reason) => self.state.push_notice(reason, true),
+        }
+        cx.notify();
+    }
+
+    fn on_clear_log(&mut self, cx: &mut Context<Self>) {
+        self.state.clear_log();
+        cx.notify();
+    }
+
+    fn on_copy_log(&mut self, cx: &mut Context<Self>) {
+        let text: String = self
+            .state
+            .log_rows()
+            .iter()
+            .map(|row| format!("{} [{}] {}", row.who, row.level.label(), row.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
     }
 
     /// Opens the editor for a profile and saves it through the dialog.
@@ -791,6 +868,7 @@ impl Render for AppView {
                         let proxy_rows = self.state.proxy_rows().unwrap_or_default();
                         let core_rows = self.state.core_rows().unwrap_or_default();
                         let setting_rows = self.state.setting_rows();
+                        let log_rows = self.state.log_rows();
                         div()
                             .flex()
                             .flex_col()
@@ -802,6 +880,7 @@ impl Render for AppView {
                             .child(match page {
                                 Page::Proxies => proxies_header(cx),
                                 Page::Cores => cores_header(cx),
+                                Page::Log => logs_header(cx),
                                 Page::Settings => settings_header(),
                                 Page::Profiles => profiles_header(cx),
                             })
@@ -811,6 +890,9 @@ impl Render for AppView {
                             })
                             .when(page == Page::Cores, |this| {
                                 this.child(cores_body(&core_rows, cx))
+                            })
+                            .when(page == Page::Log, |this| {
+                                this.child(logs_body(&log_rows, cx))
                             })
                             .when(page == Page::Settings, |this| {
                                 this.child(settings_body(&setting_rows, cx))
@@ -882,7 +964,13 @@ fn header(cx: &mut Context<AppView>) -> Div {
         )
 }
 
-const PAGES: [Page; 4] = [Page::Profiles, Page::Proxies, Page::Cores, Page::Settings];
+const PAGES: [Page; 5] = [
+    Page::Profiles,
+    Page::Proxies,
+    Page::Cores,
+    Page::Log,
+    Page::Settings,
+];
 
 fn sidebar(page: Page, cx: &mut Context<AppView>) -> Div {
     div()
@@ -1357,6 +1445,153 @@ fn settings_body(
         }))
 }
 
+fn logs_header(cx: &mut Context<AppView>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Log"))
+                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                    "What this window has done and seen: starts, stops, warnings, errors and reads, newest first.",
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new("copy-log")
+                        .label("Copy")
+                        .outline()
+                        .on_click(cx.listener(|this, _, _, cx| this.on_copy_log(cx))),
+                )
+                .child(
+                    Button::new("clear-log")
+                        .label("Clear")
+                        .outline()
+                        .on_click(cx.listener(|this, _, _, cx| this.on_clear_log(cx))),
+                ),
+        )
+}
+
+fn logs_body(rows: &[LogRow], _cx: &mut Context<AppView>) -> impl IntoElement {
+    div()
+        .id("logs-scroll")
+        .test_support()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .gap_1()
+        .overflow_y_scroll()
+        .when(rows.is_empty(), |this| {
+            this.child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .bg(rgb(PANEL))
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child("Nothing has happened yet in this window."),
+            )
+        })
+        .children(rows.iter().enumerate().map(|(index, row)| {
+            let label = format!("{} [{}] {}", row.who, row.level.label(), row.message);
+            div()
+                .id(format!("log-{index}"))
+                .test_support()
+                .aria_label(label)
+                .flex()
+                .items_center()
+                .gap_3()
+                .px_4()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    div()
+                        .w(px(64.0))
+                        .flex_shrink_0()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(log_level_color(row.level)))
+                        .child(row.level.label()),
+                )
+                .child(
+                    div()
+                        .w(px(56.0))
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(rgb(DIM))
+                        .child(format_age(row.at)),
+                )
+                .child(
+                    div()
+                        .w(px(140.0))
+                        .flex_shrink_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(row.who.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(rgb(0xd4d4d8))
+                        .child(row.message.clone()),
+                )
+        }))
+}
+
+fn log_level_color(level: LogLevel) -> u32 {
+    match level {
+        LogLevel::Info => MUTED,
+        LogLevel::Warning => 0xfbbf24,
+        LogLevel::Error => 0xf87171,
+    }
+}
+
+/// How long ago a line was written, freshly computed on each render.
+fn format_age(at: SystemTime) -> String {
+    let seconds = SystemTime::now()
+        .duration_since(at)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    match seconds {
+        0..=1 => "now".to_string(),
+        seconds if seconds < 60 => format!("{seconds}s"),
+        seconds if seconds < 3600 => format!("{}m", seconds / 60),
+        seconds => format!("{}h", seconds / 3600),
+    }
+}
+
+/// One toast as the notification layer shows it.
+fn toast_notification(toast: &Toast) -> Notification {
+    let note = Notification::new().message(toast.message.clone());
+    match toast.kind {
+        ToastKind::Success => note.with_type(NotificationType::Success),
+        ToastKind::Warning => note.with_type(NotificationType::Warning),
+        ToastKind::Error => note.with_type(NotificationType::Error),
+    }
+}
+
+/// Push every toast into a window's notification layer.
+fn push_toasts(toasts: &[Toast], window: &mut Window, cx: &mut App) {
+    for toast in toasts {
+        window.push_notification(toast_notification(toast), cx);
+    }
+}
+
 fn notice_banner(notice: crate::state::Notice, cx: &mut Context<AppView>) -> Div {
     let (background, foreground) = if notice.error {
         (0x2a1a1a, 0xfca5a5)
@@ -1667,6 +1902,22 @@ fn details_panel(
                         .child(
                             Button::new(
                                 selected
+                                    .map(|row| format!("open-dir-{}", row.profile.id))
+                                    .unwrap_or_else(|| "open-dir".to_string()),
+                            )
+                            .label("Open data dir")
+                            .outline()
+                            .disabled(selected.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(row) = this.state.selected() {
+                                    let id = row.profile.id;
+                                    this.on_open_data_dir(id, cx);
+                                }
+                            })),
+                        )
+                        .child(
+                            Button::new(
+                                selected
                                     .map(|row| format!("verify-{}", row.profile.id))
                                     .unwrap_or_else(|| "verify".to_string()),
                             )
@@ -1899,6 +2150,7 @@ fn elapsed(row: &ProfileRow) -> String {
 #[cfg(test)]
 mod tests {
     use super::AppView;
+    use crate::open_dir::testing::FakeOpener;
     use crate::state::AppState;
     use crate::state::Verification;
     use crate::state::testing::{FakeRuntime, core};
@@ -1906,6 +2158,7 @@ mod tests {
     use application::{DefaultProfileService, DefaultProxyService, ProxyService, RuntimeService};
     use domain::CoreId;
     use gpui_kit::component::Root;
+    use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext, px, size};
     use runtime::Discrepancy;
@@ -1938,6 +2191,18 @@ mod tests {
         verifier: Arc<FakeVerifier>,
         config: Option<&std::path::Path>,
     ) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>) {
+        let (view, runtime, _) =
+            view_with_opener(cx, verifier, config, Arc::new(FakeOpener::working()));
+        (view, runtime)
+    }
+
+    /// The same view, with the directory opener the test drives.
+    fn view_with_opener(
+        cx: &mut TestAppContext,
+        verifier: Arc<FakeVerifier>,
+        config: Option<&std::path::Path>,
+        opener: Arc<FakeOpener>,
+    ) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>, Arc<FakeOpener>) {
         let profile_repo: Arc<MemProfileRepository> = Arc::new(MemProfileRepository::new());
         let core_repo: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
         let proxy_repo: Arc<MemProxyRepository> = Arc::new(MemProxyRepository::new());
@@ -1967,11 +2232,11 @@ mod tests {
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
 
         let view = cx.new(|cx| {
-            let mut view = AppView::new(state, event_rx, verifier);
+            let mut view = AppView::new(state, event_rx, verifier, opener.clone());
             view.boot(cx);
             view
         });
-        (view, runtime)
+        (view, runtime, opener)
     }
 
     fn view(cx: &mut TestAppContext) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>) {
@@ -2820,6 +3085,173 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Show whatever the state has queued, the way the tick does.
+    fn flush_toasts(cx: &mut gpui_kit::VisualTestContext, view: &gpui_kit::Entity<AppView>) {
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.show_toasts(window, cx));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn an_action_is_acknowledged_with_a_toast(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        flush_toasts(cx, &view);
+
+        assert_eq!(
+            cx.update(|window, cx| window.notifications(cx).len()),
+            1,
+            "creating a profile is acknowledged"
+        );
+
+        // A toast is shown once. Draining what was already shown must not
+        // duplicate it on the next tick.
+        flush_toasts(cx, &view);
+        assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
+    }
+
+    #[gpui_kit::test]
+    fn a_problem_keeps_the_banner_and_still_gets_a_toast(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        // A value the settings file refuses is a problem and not a success: it
+        // stays in the banner and is toasted while it happens.
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("edit-setting-data-dir", cx));
+        settle(cx);
+        let field = view
+            .read_with(cx, |view, _| view.setting_editor())
+            .expect("the settings field");
+        cx.update(|window, cx| {
+            field.update(cx, |state, cx| state.set_value("   ", window, cx));
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("dismiss-notice").is_some()),
+            "a problem stays in the banner until it is dismissed"
+        );
+        flush_toasts(cx, &view);
+        assert!(
+            cx.update(|window, cx| window.notifications(cx).len()) >= 1,
+            "the problem is also toasted while it happens"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_sidebar_switches_to_the_log_page(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        assert!(
+            cx.update(|window, _| window.try_find("logs-scroll").is_none()),
+            "the log page is not shown first"
+        );
+
+        cx.update(|window, cx| window.click("nav-Log", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("logs-scroll").is_some()),
+            "the log page is shown"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("profiles-scroll").is_none()),
+            "only one page is rendered at a time"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().page()),
+            crate::state::Page::Log
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_log_page_lists_what_happened_and_can_be_cleared(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        cx.update(|window, cx| window.click("nav-Log", cx));
+        settle(cx);
+
+        let label = cx
+            .update(|window, _| window.find("log-0").label().map(|label| label.to_string()))
+            .expect("the newest line is rendered");
+        assert!(
+            label.contains("Created Profile 1"),
+            "the line says what happened: {label}"
+        );
+        assert!(label.contains("[info]"), "and at what level: {label}");
+
+        cx.update(|window, cx| window.click("clear-log", cx));
+        settle(cx);
+        assert!(
+            view.read_with(cx, |view, _| view.state().log_rows().is_empty()),
+            "clearing empties the history"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("logs-scroll").is_some()),
+            "the page stays put with an empty history"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_profile_data_directory_can_be_opened(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let opener = Arc::new(FakeOpener::working());
+        let (view, _runtime, opener) =
+            view_with_opener(cx, Arc::new(FakeVerifier::passing()), None, opener);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        let path = view.read_with(cx, |view, _| {
+            view.state().profile(id).expect("the profile").user_data_dir
+        });
+
+        cx.update(|window, cx| window.click(format!("open-dir-{id}"), cx));
+        settle(cx);
+
+        assert_eq!(
+            opener.opened(),
+            vec![path.clone()],
+            "the button opens the data directory of the selected profile"
+        );
+        assert!(
+            cx.update(|window, cx| window.notifications(cx).len()) == 0,
+            "the click queues a toast; the tick shows it, not the click itself"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_failed_open_is_refused_with_the_reason(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let opener = Arc::new(FakeOpener::failing("could not run xdg-open: not found"));
+        let (view, _runtime, _opener) =
+            view_with_opener(cx, Arc::new(FakeVerifier::passing()), None, opener);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        cx.update(|window, cx| window.click(format!("open-dir-{id}"), cx));
+        settle(cx);
+
+        let notice = view
+            .read_with(cx, |view, _| view.state().notice().cloned())
+            .expect("the failure is reported");
+        assert!(notice.error);
+        assert!(notice.message.contains("xdg-open"), "{}", notice.message);
+    }
+
     /// Draws enough frames for a layer to mount and then paint at rest.
     fn settle(cx: &mut gpui_kit::VisualTestContext) {
         cx.run_until_parked();
@@ -2969,7 +3401,12 @@ mod tests {
         let state = AppState::new(profiles, runtime_service, cores, proxies, settings);
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
         let view = cx.new(|cx| {
-            let mut view = AppView::new(state, event_rx, Arc::new(FakeVerifier::passing()));
+            let mut view = AppView::new(
+                state,
+                event_rx,
+                Arc::new(FakeVerifier::passing()),
+                Arc::new(FakeOpener::working()),
+            );
             view.boot(cx);
             view
         });

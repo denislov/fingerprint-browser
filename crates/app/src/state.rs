@@ -14,12 +14,17 @@ use domain::{
     BrowserCore, BrowserProfile, CoreCapabilities, CoreId, FingerprintProfile, ProfileId, ProxyId,
     ProxyOutbound, ProxyProfile, RuntimeState,
 };
-use runtime::{Discrepancy, RuntimeSnapshot};
+use runtime::{Discrepancy, RuntimeComponent, RuntimeEvent, RuntimeSnapshot};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// A user-facing message shown in the window banner.
+///
+/// The banner is for problems: it stays until it is dismissed. Anything that
+/// succeeded is a [`Toast`], which is transient and does not need an
+/// acknowledgement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
     pub error: bool,
@@ -41,6 +46,63 @@ impl Notice {
         }
     }
 }
+
+/// How a [`Toast`] should read at a glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Success,
+    Warning,
+    Error,
+}
+
+/// A transient message the window shows and then forgets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Toast {
+    pub kind: ToastKind,
+    pub message: String,
+}
+
+/// Severity of one line in the activity log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+impl LogLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// One line of the activity log, as it is stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEntry {
+    pub at: SystemTime,
+    pub level: LogLevel,
+    /// The profile the line is about, when it is about one.
+    pub profile_id: Option<ProfileId>,
+    pub message: String,
+}
+
+/// One line of the activity log with the profile name resolved, newest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogRow {
+    pub at: SystemTime,
+    pub level: LogLevel,
+    /// A profile name, or `app` for a window-level line.
+    pub who: String,
+    pub message: String,
+}
+
+/// How many log lines are kept. The window is a session tool, not an audit
+/// system, and an unbounded vector would grow with every restart.
+const LOG_CAPACITY: usize = 500;
 
 /// One row of the profiles list with the display names already resolved.
 #[derive(Clone)]
@@ -213,6 +275,7 @@ pub enum Page {
     Profiles,
     Proxies,
     Cores,
+    Log,
     Settings,
 }
 
@@ -222,6 +285,7 @@ impl Page {
             Self::Profiles => "Profiles",
             Self::Proxies => "Proxies",
             Self::Cores => "Browser Cores",
+            Self::Log => "Log",
             Self::Settings => "Settings",
         }
     }
@@ -306,6 +370,10 @@ pub struct AppState {
     selected: Option<ProfileId>,
     notice: Option<Notice>,
     verifications: HashMap<ProfileId, Verification>,
+    /// Toasts the window has not shown yet.
+    toasts: Vec<Toast>,
+    /// What happened this session, oldest first.
+    log: Vec<LogEntry>,
 }
 
 impl AppState {
@@ -327,6 +395,8 @@ impl AppState {
             selected: None,
             notice: None,
             verifications: HashMap::new(),
+            toasts: Vec::new(),
+            log: Vec::new(),
         }
     }
 
@@ -337,7 +407,7 @@ impl AppState {
     pub fn load(&mut self) -> Result<(), AppError> {
         let result = self.load_rows();
         if let Err(error) = &result {
-            self.notice = Some(Notice::error(error.to_string()));
+            self.set_notice(Notice::error(error.to_string()));
         }
         result
     }
@@ -413,7 +483,7 @@ impl AppState {
 
     /// Surface a bootstrap-level message (core discovery, version detection).
     pub fn push_notice(&mut self, message: impl Into<String>, error: bool) {
-        self.notice = Some(if error {
+        self.set_notice(if error {
             Notice::error(message)
         } else {
             Notice::info(message)
@@ -422,6 +492,168 @@ impl AppState {
 
     pub fn dismiss_notice(&mut self) {
         self.notice = None;
+    }
+
+    /// Show a message and remember it.
+    ///
+    /// A problem owns the banner until it is dismissed or a later action
+    /// succeeds; a success clears the banner and is only a toast. Either way
+    /// the line is kept in the [`AppState::log_rows`] history, which is what
+    /// survives for as long as the window is open.
+    fn set_notice(&mut self, notice: Notice) {
+        let level = if notice.error {
+            LogLevel::Error
+        } else {
+            LogLevel::Info
+        };
+        let kind = if notice.error {
+            ToastKind::Error
+        } else {
+            ToastKind::Success
+        };
+        self.append_log(level, None, notice.message.clone());
+        self.toast(kind, notice.message.clone());
+        self.notice = notice.error.then_some(notice);
+    }
+
+    /// Queue a toast the window has not shown yet.
+    fn toast(&mut self, kind: ToastKind, message: impl Into<String>) {
+        self.toasts.push(Toast {
+            kind,
+            message: message.into(),
+        });
+    }
+
+    /// Toasts the window has not shown yet, oldest first.
+    pub fn drain_toasts(&mut self) -> Vec<Toast> {
+        std::mem::take(&mut self.toasts)
+    }
+
+    #[cfg(test)]
+    pub fn toasts(&self) -> &[Toast] {
+        &self.toasts
+    }
+
+    /// The activity log, oldest first.
+    #[cfg(test)]
+    pub fn log_entries(&self) -> &[LogEntry] {
+        &self.log
+    }
+
+    /// The activity log with profile names resolved and the newest line first,
+    /// which is the order the Log page reads in.
+    pub fn log_rows(&self) -> Vec<LogRow> {
+        let names: HashMap<ProfileId, String> = self
+            .rows
+            .iter()
+            .map(|row| (row.profile.id, row.profile.name.clone()))
+            .collect();
+        self.log
+            .iter()
+            .rev()
+            .map(|entry| LogRow {
+                at: entry.at,
+                level: entry.level,
+                who: match entry.profile_id {
+                    None => "app".to_string(),
+                    Some(id) => names
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| "a removed profile".to_string()),
+                },
+                message: entry.message.clone(),
+            })
+            .collect()
+    }
+
+    pub fn clear_log(&mut self) {
+        self.log.clear();
+    }
+
+    /// Record one runtime notification.
+    ///
+    /// Events are best-effort and never replayed as state, but they are the
+    /// only place a crash, a warning or the pids a run got are ever written
+    /// down; the snapshot keeps only the latest of each.
+    pub fn record_event(&mut self, event: &RuntimeEvent) {
+        let entry = match event {
+            // Starting, stopping and a refused start are only visible as a
+            // state change; running and stopped have their own event, and are
+            // not repeated here.
+            RuntimeEvent::StateChanged { profile_id, state } => match state {
+                RuntimeState::Starting => (LogLevel::Info, *profile_id, "starting".to_string()),
+                RuntimeState::Stopping => (LogLevel::Info, *profile_id, "stopping".to_string()),
+                RuntimeState::Failed { message } => {
+                    (LogLevel::Error, *profile_id, format!("failed: {message}"))
+                }
+                RuntimeState::Running | RuntimeState::Stopped | RuntimeState::Crashed { .. } => {
+                    return;
+                }
+            },
+            RuntimeEvent::EffectiveLaunchArgs { profile_id, args } => (
+                LogLevel::Info,
+                *profile_id,
+                format!("launching with {} arguments", args.len()),
+            ),
+            RuntimeEvent::Started {
+                profile_id,
+                browser_pid,
+                xray_pid,
+                cdp_port,
+                socks_port,
+            } => {
+                let mut message =
+                    format!("browser started (pid {browser_pid}, cdp port {cdp_port}");
+                if let Some(port) = socks_port {
+                    message.push_str(&format!(", socks port {port}"));
+                }
+                if let Some(pid) = xray_pid {
+                    message.push_str(&format!(", xray pid {pid}"));
+                }
+                message.push(')');
+                (LogLevel::Info, *profile_id, message)
+            }
+            RuntimeEvent::Stopped { profile_id } => {
+                (LogLevel::Info, *profile_id, "browser stopped".to_string())
+            }
+            RuntimeEvent::Crashed {
+                profile_id,
+                component,
+                message,
+            } => (
+                LogLevel::Error,
+                *profile_id,
+                format!("{} crashed: {message}", component_label(*component)),
+            ),
+            RuntimeEvent::Warning {
+                profile_id,
+                message,
+            } => {
+                // A warning is exactly the kind of thing the row shows but the
+                // user does not necessarily go looking for.
+                self.toast(ToastKind::Warning, message.clone());
+                (LogLevel::Warning, *profile_id, message.clone())
+            }
+        };
+        self.append_log(entry.0, Some(entry.1), entry.2);
+    }
+
+    fn append_log(
+        &mut self,
+        level: LogLevel,
+        profile_id: Option<ProfileId>,
+        message: impl Into<String>,
+    ) {
+        self.log.push(LogEntry {
+            at: SystemTime::now(),
+            level,
+            profile_id,
+            message: message.into(),
+        });
+        if self.log.len() > LOG_CAPACITY {
+            let excess = self.log.len() - LOG_CAPACITY;
+            self.log.drain(..excess);
+        }
     }
 
     /// Placeholder naming until the Profile Editor page exists.
@@ -490,13 +722,13 @@ impl AppState {
             outbound,
         }))?;
         let id = created.id;
-        self.notice = Some(Notice::info(format!("Created proxy {}", created.name)));
+        self.set_notice(Notice::info(format!("Created proxy {}", created.name)));
         Ok(id)
     }
 
     pub fn update_proxy(&mut self, proxy: ProxyProfile) -> Result<(), AppError> {
         self.record(self.proxies.update(proxy.clone()))?;
-        self.notice = Some(Notice::info(format!(
+        self.set_notice(Notice::info(format!(
             "Saved {}. Running profiles keep the proxy they started with.",
             proxy.name
         )));
@@ -511,7 +743,7 @@ impl AppState {
             .map(|proxy| proxy.name)
             .unwrap_or_else(|| id.to_string());
         self.record(self.proxies.delete(id))?;
-        self.notice = Some(Notice::info(format!("Deleted proxy {name}")));
+        self.set_notice(Notice::info(format!("Deleted proxy {name}")));
         Ok(())
     }
 
@@ -528,13 +760,13 @@ impl AppState {
         let result = self.settings.set(key, value).map_err(AppError::Conflict);
         match &result {
             Ok(()) => {
-                self.notice = Some(Notice::info(format!(
+                self.set_notice(Notice::info(format!(
                     "Saved {}. It takes effect at the next start.",
                     key.label()
                 )));
             }
             Err(error) => {
-                self.notice = Some(Notice::error(error.to_string()));
+                self.set_notice(Notice::error(error.to_string()));
             }
         }
         result
@@ -563,7 +795,7 @@ impl AppState {
     pub fn add_core(&mut self, name: Option<String>, path: PathBuf) -> Result<CoreId, AppError> {
         let core = self.record(self.cores.add(name, path))?;
         let id = core.id;
-        self.notice = Some(Notice::info(format!(
+        self.set_notice(Notice::info(format!(
             "Added {} ({}, major {})",
             core.name, core.version, core.major
         )));
@@ -573,7 +805,7 @@ impl AppState {
     /// Saves a core, re-reading the version when its executable changed.
     pub fn update_core(&mut self, core: BrowserCore) -> Result<(), AppError> {
         let saved = self.record(self.cores.update(core))?;
-        self.notice = Some(Notice::info(format!(
+        self.set_notice(Notice::info(format!(
             "Saved {} ({}, major {})",
             saved.name, saved.version, saved.major
         )));
@@ -585,7 +817,7 @@ impl AppState {
     /// Re-reads a core's version, for a binary that was replaced in place.
     pub fn redetect_core(&mut self, id: CoreId) -> Result<(), AppError> {
         let refreshed = self.record(self.cores.redetect(id))?;
-        self.notice = Some(Notice::info(format!(
+        self.set_notice(Notice::info(format!(
             "{} is {} (major {})",
             refreshed.name, refreshed.version, refreshed.major
         )));
@@ -600,7 +832,7 @@ impl AppState {
             .map(|core| core.name)
             .unwrap_or_else(|| id.to_string());
         self.record(self.cores.delete(id))?;
-        self.notice = Some(Notice::info(format!("Deleted core {name}")));
+        self.set_notice(Notice::info(format!("Deleted core {name}")));
         Ok(())
     }
 
@@ -640,7 +872,7 @@ impl AppState {
         let id = profile.id;
         self.load()?;
         self.selected = Some(id);
-        self.notice = Some(Notice::info(format!("Created {}", profile.name)));
+        self.set_notice(Notice::info(format!("Created {}", profile.name)));
         Ok(id)
     }
 
@@ -733,6 +965,44 @@ impl AppState {
             Ok(found) => Verification::Disagreements(found),
             Err(reason) => Verification::Unreadable(reason),
         };
+        // A reading is the answer to a question the user asked, so it belongs
+        // in the history as well as on the row.
+        match &verification {
+            Verification::Confirmed => {
+                self.append_log(
+                    LogLevel::Info,
+                    Some(id),
+                    "fingerprint confirmed by reading the running browser",
+                );
+                self.toast(ToastKind::Success, "Fingerprint confirmed.");
+            }
+            Verification::Disagreements(found) => {
+                let message = format!(
+                    "fingerprint read back with {} claim(s) not confirmed",
+                    found.len()
+                );
+                self.toast(
+                    ToastKind::Warning,
+                    format!(
+                        "{} claim(s) the browser did not reproduce; see Runtime Details",
+                        found.len()
+                    ),
+                );
+                self.append_log(LogLevel::Warning, Some(id), message);
+            }
+            Verification::Unreadable(reason) => {
+                self.toast(
+                    ToastKind::Error,
+                    format!("Fingerprint could not be read: {reason}"),
+                );
+                self.append_log(
+                    LogLevel::Error,
+                    Some(id),
+                    format!("fingerprint could not be read: {reason}"),
+                );
+            }
+            Verification::Running => {}
+        }
         self.verifications.insert(id, verification);
     }
 
@@ -787,10 +1057,18 @@ impl AppState {
         match result {
             Ok(value) => Ok(value),
             Err(error) => {
-                self.notice = Some(Notice::error(error.to_string()));
+                self.set_notice(Notice::error(error.to_string()));
                 Err(error)
             }
         }
+    }
+}
+
+/// How a crashed component is named in the log.
+fn component_label(component: RuntimeComponent) -> &'static str {
+    match component {
+        RuntimeComponent::Browser => "browser",
+        RuntimeComponent::Xray => "xray",
     }
 }
 
@@ -1327,12 +1605,15 @@ mod tests {
             "editing a proxy does not disturb a running profile"
         );
         assert!(
-            fixture
-                .state
-                .notice()
-                .is_some_and(|notice| notice.message.contains("next start")
-                    || notice.message.contains("keep")),
-            "the banner says when the change takes effect"
+            fixture.state.toasts().iter().any(|toast| toast
+                .message
+                .contains("next start")
+                || toast.message.contains("keep")),
+            "the toast says when the change takes effect"
+        );
+        assert!(
+            fixture.state.notice().is_none(),
+            "a success is not a banner: it is a toast and a log line"
         );
     }
 
@@ -1442,9 +1723,10 @@ mod tests {
         assert!(
             fixture
                 .state
-                .notice()
-                .is_some_and(|notice| notice.message.contains("128")),
-            "the banner says what it found"
+                .toasts()
+                .iter()
+                .any(|toast| toast.message.contains("128")),
+            "the toast says what it found"
         );
     }
 
@@ -1530,12 +1812,19 @@ mod tests {
 
         let stored = std::fs::read_to_string(&config).expect("the config file was written");
         assert!(stored.contains("/srv/fp"), "{stored}");
-        let notice = fixture.state.notice().expect("a notice");
-        assert!(!notice.error);
+        let toast = fixture
+            .state
+            .toasts()
+            .last()
+            .expect("a toast saying what happened");
         assert!(
-            notice.message.contains("next start"),
-            "the banner says when it applies: {}",
-            notice.message
+            toast.message.contains("next start"),
+            "the toast says when it applies: {}",
+            toast.message
+        );
+        assert!(
+            fixture.state.notice().is_none(),
+            "saving a setting is not a problem, so the banner stays clear"
         );
         assert_eq!(
             fixture
@@ -1832,5 +2121,244 @@ mod tests {
             .map(|row| row.profile.name.as_str())
             .collect();
         assert_eq!(names, ["Alpha", "Bravo"]);
+    }
+
+    #[test]
+    fn a_success_is_a_toast_and_leaves_the_banner_clear() {
+        let mut fixture = fixture();
+
+        fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+
+        let toast = fixture.state.toasts().last().expect("a toast");
+        assert_eq!(toast.kind, ToastKind::Success);
+        assert!(toast.message.contains("Office"), "{}", toast.message);
+        assert!(
+            fixture.state.notice().is_none(),
+            "a success does not need an acknowledgement"
+        );
+    }
+
+    #[test]
+    fn a_problem_owns_the_banner_until_it_is_dismissed() {
+        let mut fixture = fixture();
+
+        fixture
+            .state
+            .create_proxy("Broken", socks5("", 1080))
+            .expect_err("refused");
+
+        let notice = fixture.state.notice().expect("the banner");
+        assert!(notice.error);
+        assert_eq!(
+            fixture.state.toasts().last().map(|toast| toast.kind),
+            Some(ToastKind::Error),
+            "the problem is a toast as well, so it is seen while it happens"
+        );
+
+        // A later success clears the problem: the banner is the current
+        // problem, not every problem ever seen.
+        fixture.state.dismiss_notice();
+        assert!(fixture.state.notice().is_none());
+        fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create");
+        assert!(fixture.state.notice().is_none());
+    }
+
+    #[test]
+    fn draining_toasts_leaves_nothing_to_show_twice() {
+        let mut fixture = fixture();
+        fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create");
+        assert!(!fixture.state.toasts().is_empty());
+
+        let drained = fixture.state.drain_toasts();
+
+        assert_eq!(drained.len(), 1);
+        assert!(drained[0].message.contains("Office"));
+        assert!(fixture.state.toasts().is_empty());
+        assert!(fixture.state.drain_toasts().is_empty());
+    }
+
+    #[test]
+    fn every_notice_is_written_to_the_log() {
+        let mut fixture = fixture();
+        assert!(fixture.state.log_entries().is_empty());
+
+        fixture.state.push_notice("Saved.", false);
+        fixture.state.push_notice("it broke", true);
+
+        let entries = fixture.state.log_entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].level, LogLevel::Info);
+        assert_eq!(entries[0].message, "Saved.");
+        assert_eq!(entries[0].profile_id, None, "a window-level line");
+        assert_eq!(entries[1].level, LogLevel::Error);
+        assert_eq!(entries[1].message, "it broke");
+    }
+
+    #[test]
+    fn runtime_events_are_written_to_the_log_once_each() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+        let profile_id = id;
+        // The profile creation is its own line; this test is about events.
+        fixture.state.clear_log();
+
+        for event in [
+            RuntimeEvent::StateChanged {
+                profile_id,
+                state: RuntimeState::Starting,
+            },
+            RuntimeEvent::EffectiveLaunchArgs {
+                profile_id,
+                args: vec!["a".into(), "b".into(), "c".into()],
+            },
+            RuntimeEvent::Started {
+                profile_id,
+                browser_pid: 4242,
+                xray_pid: Some(4343),
+                cdp_port: 9222,
+                socks_port: Some(1080),
+            },
+            RuntimeEvent::StateChanged {
+                profile_id,
+                state: RuntimeState::Running,
+            },
+            RuntimeEvent::Warning {
+                profile_id,
+                message: "legacy core".into(),
+            },
+            RuntimeEvent::Stopped { profile_id },
+            RuntimeEvent::StateChanged {
+                profile_id,
+                state: RuntimeState::Stopped,
+            },
+        ] {
+            fixture.state.record_event(&event);
+        }
+
+        let messages: Vec<(&str, String)> = fixture
+            .state
+            .log_entries()
+            .iter()
+            .map(|entry| (entry.level.label(), entry.message.clone()))
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                ("info", "starting".to_string()),
+                ("info", "launching with 3 arguments".to_string()),
+                (
+                    "info",
+                    "browser started (pid 4242, cdp port 9222, socks port 1080, xray pid 4343)"
+                        .to_string()
+                ),
+                ("warning", "legacy core".to_string()),
+                ("info", "browser stopped".to_string()),
+            ],
+            "running and stopped state changes are the events' own lines, not extra ones"
+        );
+        assert!(
+            fixture
+                .state
+                .log_entries()
+                .iter()
+                .all(|entry| entry.profile_id == Some(profile_id))
+        );
+    }
+
+    #[test]
+    fn a_crash_and_a_refused_start_are_logged_as_errors() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture.state.create_profile("Primary").expect("create");
+        // Creating the profile is its own (informational) line.
+        fixture.state.clear_log();
+
+        fixture.state.record_event(&RuntimeEvent::Crashed {
+            profile_id: id,
+            component: RuntimeComponent::Xray,
+            message: "process exited unexpectedly: signal: 11".into(),
+        });
+        fixture.state.record_event(&RuntimeEvent::StateChanged {
+            profile_id: id,
+            state: RuntimeState::Failed {
+                message: "no browser core".into(),
+            },
+        });
+
+        let entries = fixture.state.log_entries();
+        assert_eq!(entries[0].level, LogLevel::Error);
+        assert_eq!(
+            entries[0].message,
+            "xray crashed: process exited unexpectedly: signal: 11"
+        );
+        assert_eq!(entries[1].level, LogLevel::Error);
+        assert_eq!(entries[1].message, "failed: no browser core");
+    }
+
+    #[test]
+    fn a_failed_reading_is_logged_as_an_error() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+
+        fixture
+            .state
+            .finish_verification(id, Err("no debug port".to_string()));
+
+        let entry = fixture.state.log_entries().last().expect("a line");
+        assert_eq!(entry.level, LogLevel::Error);
+        assert!(entry.message.contains("no debug port"), "{}", entry.message);
+    }
+
+    #[test]
+    fn the_log_is_capped_and_the_newest_line_survives() {
+        let mut fixture = fixture();
+
+        for index in 0..LOG_CAPACITY + 100 {
+            fixture.state.push_notice(format!("line {index}"), false);
+        }
+
+        let entries = fixture.state.log_entries();
+        assert_eq!(entries.len(), LOG_CAPACITY);
+        assert_eq!(entries[0].message, "line 100", "the oldest lines fell off");
+        assert_eq!(
+            entries[LOG_CAPACITY - 1].message,
+            format!("line {}", LOG_CAPACITY + 99)
+        );
+    }
+
+    #[test]
+    fn log_rows_name_the_profile_and_put_the_newest_line_first() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+        fixture.state.clear_log();
+
+        fixture
+            .state
+            .record_event(&RuntimeEvent::Stopped { profile_id: id });
+        fixture.state.push_notice("Saved.", false);
+
+        let rows = fixture.state.log_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].who, "app", "the newest line is a window-level one");
+        assert_eq!(rows[0].message, "Saved.");
+        assert_eq!(rows[1].who, "verify me", "the profile is named, not its id");
+        assert_eq!(rows[1].message, "browser stopped");
+
+        fixture.state.clear_log();
+        assert!(fixture.state.log_rows().is_empty());
+        assert!(
+            fixture.state.notice().is_none(),
+            "clearing the history does not silence a current problem"
+        );
     }
 }

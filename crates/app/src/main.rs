@@ -7,6 +7,7 @@
 mod core_detect;
 mod core_editor;
 mod editor;
+mod open_dir;
 mod proxy_editor;
 #[cfg(all(test, target_os = "linux"))]
 mod real_browser;
@@ -117,9 +118,9 @@ fn main() {
     if let Some((message, error)) = settings_notice {
         app_state.push_notice(message, error);
     }
-    // Last, so it wins the single banner line: a settings or core problem is
-    // still on its own page afterwards, while a browser that was stopped at
-    // startup is reported nowhere else.
+    // Last, so that a problem found here is the one the banner shows: a settings
+    // or core problem is still on its own page afterwards, while a browser that
+    // was stopped at startup is reported nowhere else.
     if let Some((message, error)) = reclaim::reclaim_notice(&reclaim, |profile_id| {
         profile_repo
             .get(profile_id)
@@ -189,6 +190,7 @@ fn main() {
                             app_state,
                             event_rx,
                             Arc::new(CdpFingerprintVerifier::default()),
+                            Arc::new(open_dir::SystemDirectoryOpener),
                         );
                         view.boot(cx);
                         view
