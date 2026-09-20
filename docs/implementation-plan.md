@@ -260,6 +260,31 @@ Phase 4 的剩余项在第十二批结清，结论与证据见 [fingerprint-matr
   导入”，是下一批。`runtime::is_supported` 现在的含义是“表单能不能填”，不是“配置能不能建”。
 - 真实远端出口的验收仍需真服务器：本批证明的是“生成的配置引擎接受”，不是“这个服务器能通”。
 
+### 第十七批：分享链接的解析
+
+进度（2026-09-20）：已完成（解析层；界面下一批）。
+
+- `domain::uri`（新）：`ss://` / `vmess://` / `vless://` / `trojan://` 解析成现有模型。新增三个
+  依赖（`base64`、`url`、`percent-encoding`），三个都早已在依赖图里（由 gpui 那条链引入），
+  不是新的构建成本。
+- **规则写在模块文档里**：认识的字段但模型装不下 → 点名拒绝（`plugin`、`type=kcp|xhttp|raw`、
+  `headerType=http`、`mode=multi`）；完全不认识的 query 参数 → 放过（客户端会加自己的参数，
+  为没见过的名字拒绝可用链接更糟）。
+- **三个由实测决定的取值**：
+  1. vmess 链接的 `aid` **保留**而不是丢掉：`xray run -test` 接受非零 alterId，而按 0 发出去
+     只会得到一个连不上且没有解释的配置。模型因此新增 `VmessOutbound::alter_id`，非零才写出
+     （0 就是引擎默认值，用“不写”表达）。
+  2. trojan 链接默认 TLS（显式写 `security=none` 才关），因为这个协议在现实里没有明文部署；
+     引擎接受明文，所以显式写 none 的链接按它说的来。
+  3. `type=raw` 与 `type=xhttp` 引擎都接受，但模型没有它们 → 拒绝并点名，而不是当成 tcp 混过去。
+- 解析出的东西**必然也能过 `validate_proxy`**：`Transport::stream` 结尾直接调同一份
+  `validate_stream`，所以“reality 走 ws”这类矛盾在粘贴那一刻就被拒绝，错误信息就是 domain 那句。
+- 验收闭环（opt-in）：`links_from_the_wild_become_configs_the_engine_accepts` 让 8 个真实形状的
+  链接走完 解析 → 模型 → 配置 → `xray run -test`，全部被引擎接受；第 9 个（带 `plugin` 的 ss）
+  必须被本程序拒绝。
+- 界面还没接：下一批做粘贴对话框，并顺手拆掉 `ProxyService` 那道协议闸门——构建器现在六种都能建，
+  真正的限制是“表单能不能填”。
+
 ### 第二批：开关词汇的实测与回读验证
 
 进度（2026-09-19）：已完成。方法与全部实测数据见 [fingerprint-matrix.md](fingerprint-matrix.md)。

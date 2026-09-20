@@ -126,6 +126,15 @@ pub struct VmessOutbound {
     pub port: u16,
     pub uuid: String,
     pub security: String,
+    /// The legacy alteration count a `vmess://` link carries as `aid`.
+    ///
+    /// Zero is what the engine assumes when the field is absent, and what every
+    /// current server uses. A link that says otherwise is honoured rather than
+    /// dropped: the engine reads this value (measured: `xray run -test` accepts
+    /// a non-zero one), and a client that quietly sent zero to a server
+    /// expecting 64 would fail to connect for no visible reason.
+    #[serde(default)]
+    pub alter_id: u32,
     #[serde(default)]
     pub stream: StreamSettings,
 }

@@ -7,6 +7,7 @@ pub mod profile;
 pub mod proxy;
 pub mod runtime;
 pub mod start_target;
+pub mod uri;
 pub mod validation;
 pub mod window;
 
@@ -23,6 +24,7 @@ pub use proxy::{
 };
 pub use runtime::{RuntimeSession, RuntimeState};
 pub use start_target::StartTarget;
+pub use uri::{ParsedProxy, UriError, parse_proxy_uri};
 pub use validation::{
     validate_core, validate_fingerprint, validate_profile, validate_proxy, validate_window,
 };

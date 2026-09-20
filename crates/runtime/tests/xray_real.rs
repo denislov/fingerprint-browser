@@ -178,6 +178,59 @@ fn proxy(name: &str, outbound: ProxyOutbound) -> ProxyProfile {
     }
 }
 
+/// A share link, all the way to a config the engine accepts.
+///
+/// The parser's own tests check the model it produces; this checks that what a
+/// provider hands out actually becomes a config Xray will run - the one path a
+/// paste goes through end to end.
+#[test]
+#[ignore = "requires XRAY_BIN pointing to a real Xray executable"]
+fn links_from_the_wild_become_configs_the_engine_accepts() {
+    let executable = std::env::var_os("XRAY_BIN").expect("set XRAY_BIN");
+    let uuid = "b831381d-6324-4d53-ad4f-8cda48b30811";
+    let public_key = "LOLTG162EtSegCnMAofVY3oKrbrCvH8zOTZEPd1GRQU";
+    let links = [
+        format!("vless://{uuid}@node.example:443?encryption=none&security=reality&sni=front.example&fp=chrome&pbk={public_key}&sid=ab12&type=tcp#Reality"),
+        format!("vless://{uuid}@node.example:443?encryption=none&flow=xtls-rprx-vision&security=tls&sni=front.example#Vision"),
+        format!("vless://{uuid}@node.example:443?encryption=none&security=tls&sni=front.example&type=ws&path=%2Fws&host=front.example#Websocket"),
+        format!("vless://{uuid}@node.example:443?encryption=none&type=grpc&serviceName=svc&security=tls#Grpc"),
+        // A vmess link is base64 JSON, and the `aid` it carries is read back out
+        // of the config this builds.
+        format!(
+            "vmess://{}",
+            base64_of(&format!(
+                r#"{{"v":"2","ps":"Vm","add":"node.example","port":"443","id":"{uuid}","aid":"64","scy":"auto","net":"ws","type":"none","host":"front.example","path":"/ws","tls":"tls","sni":"front.example"}}"#
+            ))
+        ),
+        "trojan://secret@node.example:443?sni=front.example#Trojan".to_string(),
+        "trojan://secret@node.example:443?security=reality&sni=front.example&pbk=LOLTG162EtSegCnMAofVY3oKrbrCvH8zOTZEPd1GRQU&sid=ab12".to_string(),
+        "ss://YWVzLTI1Ni1nY206c2VjcmV0@node.example:8388#Shadowsocks".to_string(),
+        "ss://YWVzLTI1Ni1nY206c2VjcmV0@node.example:8388?plugin=obfs-local".to_string(),
+    ];
+
+    for link in &links[..links.len() - 1] {
+        let parsed = domain::parse_proxy_uri(link).expect("the link should parse");
+        let profile = proxy(&parsed.suggested_name(), parsed.outbound);
+        if let Err(reason) = engine_verdict(&executable, &profile) {
+            panic!(
+                "the engine refused the config from {}: {reason}",
+                profile.name
+            );
+        }
+    }
+
+    // The one link in that list this program refuses: it asks for a plugin, and
+    // a config built without it would connect to nothing.
+    let plugin = links.last().expect("the plugin link");
+    let error = domain::parse_proxy_uri(plugin).expect_err("a plugin link is refused");
+    assert!(error.to_string().contains("plugin"), "{error}");
+}
+
+fn base64_of(value: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(value)
+}
+
 /// What the engine says about a config this builder wrote.
 ///
 /// `xray run -test` parses the file and builds every handler without opening a
@@ -304,6 +357,7 @@ fn every_shape_the_builder_makes_is_accepted_by_the_engine() {
                 port: 10086,
                 uuid: "b831381d-6324-4d53-ad4f-8cda48b30811".into(),
                 security: "auto".into(),
+                alter_id: 0,
                 stream: StreamSettings::plain(),
             }),
         ),
@@ -314,6 +368,7 @@ fn every_shape_the_builder_makes_is_accepted_by_the_engine() {
                 port: 443,
                 uuid: "b831381d-6324-4d53-ad4f-8cda48b30811".into(),
                 security: "auto".into(),
+                alter_id: 0,
                 stream: tls_over_ws.clone(),
             }),
         ),

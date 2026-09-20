@@ -107,19 +107,27 @@ impl XrayConfigBuilder for DefaultXrayConfigBuilder {
                     }]
                 }
             }),
-            ProxyOutbound::Vmess(v) => json!({
-                "protocol": "vmess",
-                "settings": {
-                    "vnext": [{
-                        "address": v.host,
-                        "port": v.port,
-                        "users": [{
-                            "id": v.uuid,
-                            "security": v.security
-                        }]
-                    }]
+            ProxyOutbound::Vmess(v) => {
+                let mut user = json!({
+                    "id": v.uuid,
+                    "security": v.security
+                });
+                // Zero is the engine's own default, so it is expressed by
+                // leaving it out rather than by saying it.
+                if v.alter_id != 0 {
+                    user["alterId"] = json!(v.alter_id);
                 }
-            }),
+                json!({
+                    "protocol": "vmess",
+                    "settings": {
+                        "vnext": [{
+                            "address": v.host,
+                            "port": v.port,
+                            "users": [user]
+                        }]
+                    }
+                })
+            }
             ProxyOutbound::Vless(v) => json!({
                 "protocol": "vless",
                 "settings": {
@@ -199,7 +207,6 @@ fn stream_json(stream: &StreamSettings) -> Option<serde_json::Value> {
     let mut settings = serde_json::Map::new();
     settings.insert("network".into(), json!(stream.network.as_str()));
     settings.insert("security".into(), json!(stream.security.as_str()));
-
     if let Some(tls) = &stream.tls {
         let mut tls_json = serde_json::Map::new();
         if let Some(server_name) = &tls.server_name {
@@ -336,6 +343,7 @@ mod tests {
             port: 443,
             uuid: "the-uuid".into(),
             security: "auto".into(),
+            alter_id: 0,
             stream: StreamSettings::plain(),
         }));
         let outbound = &vmess["outbounds"][0];
@@ -401,6 +409,7 @@ mod tests {
             port: 443,
             uuid: "the-uuid".into(),
             security: "auto".into(),
+            alter_id: 0,
             stream: StreamSettings {
                 network: StreamNetwork::Ws,
                 security: StreamSecurity::Tls,

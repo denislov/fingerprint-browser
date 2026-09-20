@@ -46,7 +46,13 @@ runtime implementation for SOCKS5/HTTP upstream proxies:
   (the replacement is a certificate pin). The editor still offers only SOCKS5
   and HTTP, and the proxy service refuses to store the other four: the form
   cannot fill in their stream settings yet, so the model and the builder handle
-  all six while the window does not.
+  all six while the window does not. A share link (`ss://`, `vmess://`,
+  `vless://`, `trojan://`) is read into that same model by `domain::uri`, which
+  refuses by name what it cannot carry (`plugin`, `type=xhttp`, `type=raw`,
+  `headerType=http`, `mode=multi`) rather than dropping it; the opt-in
+  `xray_real` suite takes eight links of that shape through the parser, the
+  config builder and `xray run -test`, and the ninth - an `ss://` link asking for
+  a plugin - is refused before a config exists.
 
 Configure `SupervisorComponents.xray_executable`, `runtime_dir` and
 `xray_ready_timeout` when constructing the supervisor. Defaults are `bin/xray`

@@ -95,7 +95,7 @@ pub fn validate_proxy(proxy: &ProxyProfile) -> Result<(), ValidationError> {
 /// nobody and reported by nobody (measured: exit 0). The second kind is why
 /// this function exists: a setting that would be dropped in silence is refused
 /// here instead, by name.
-fn validate_stream(stream: &StreamSettings) -> Result<(), ValidationError> {
+pub(crate) fn validate_stream(stream: &StreamSettings) -> Result<(), ValidationError> {
     match stream.security {
         StreamSecurity::None => {
             for (field, present) in [
@@ -507,6 +507,7 @@ mod tests {
                     port: 443,
                     uuid: "uuid".to_string(),
                     security: String::new(),
+                    alter_id: 0,
                     stream: StreamSettings::plain(),
                 }),
                 "security",

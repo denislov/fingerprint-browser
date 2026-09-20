@@ -1541,9 +1541,12 @@ dependencies = [
 name = "domain"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "percent-encoding",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "url",
  "uuid",
 ]
 
@@ -5799,6 +5802,7 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "crossbeam-channel",
  "domain",
  "libc",
