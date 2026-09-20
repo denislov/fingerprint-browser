@@ -85,9 +85,21 @@ compatibility report, and read-back verification of the fingerprint itself.
 - Two of those surfaces can only be judged by comparing sessions, so `verify`
   states its limits instead of guessing: the audio and canvas fingerprints and
   the WebGL exclusion are exposed as signatures for comparison, while the leak
-  check and the CJK glyph check are settled by a single reading. The WebRTC
-  check is proven able to see a leak by a self-check that re-opens the ICE
-  policy in a separate session.
+  check and the three font readings are settled by a single measurement. Those
+  three are whether the font surface can be read at all (an enumeration and a
+  width, and the finding says which half is missing), whether CJK has glyphs,
+  and whether emoji do - the last one catches a host with no emoji font, which
+  any page can see and no profile claim can explain. The WebRTC check is proven
+  able to see a leak by a self-check that re-opens the ICE policy in a separate
+  session.
+- The font list is the one surface a platform spoof cannot render: the engine
+  fabricates which fonts the page can enumerate, while the glyphs come from the
+  host either way. Measuring that (Windows and macOS claims on a Linux host, with
+  and without `--disable-spoofing=font`, identical widths in all six readings)
+  is why this project does **not** add `font` to the exclusion when the profile
+  claims another platform - it would replace a fabricated list with the host's
+  own and admit the host. The exclusion remains a per-profile choice. See
+  [the switch matrix](docs/fingerprint-matrix.md) for the readings.
 
 ```sh
 # fingerprint surface, read back out of a real browser

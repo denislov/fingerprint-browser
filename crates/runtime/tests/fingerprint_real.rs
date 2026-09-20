@@ -612,6 +612,149 @@ fn font_surface_is_readable_and_cjk_is_not_boxed() {
     }
 }
 
+/// What `--disable-spoofing=font` actually changes on a spoofed platform.
+///
+/// This is the measurement the cross-platform font strategy is built on, and it
+/// says the exclusion is not a rendering fix: the glyphs come from the host
+/// either way, and the widths below are identical with and without it. What it
+/// changes is the font list the page can enumerate, which is the only part of
+/// the surface the engine fabricates - so excluding font spoofing for a
+/// cross-platform profile would replace a fabricated list with the host's list,
+/// and admit the host platform. The product therefore does not add it; the
+/// profile editor still offers it per profile. See docs/fingerprint-matrix.md.
+#[test]
+#[ignore = "requires CHROMIUM_BIN and a real browser"]
+fn the_font_exclusion_changes_what_a_spoofed_platform_enumerates() {
+    let mut readings: Vec<(Platform, bool, ObservedFingerprint)> = Vec::new();
+    for platform in [Platform::Windows, Platform::MacOs, Platform::Linux] {
+        for excluded in [false, true] {
+            let planner: Box<dyn LaunchPlanner> = if excluded {
+                Box::new(RawArgsPlanner(vec!["--disable-spoofing=font".into()]))
+            } else {
+                Box::new(HeadlessPlanner)
+            };
+            let harness = Harness::with_capabilities(
+                128,
+                planner,
+                CoreCapabilities {
+                    supports_disable_spoofing: false,
+                    ..CoreCapabilities::for_major(128)
+                },
+            );
+            let mut fingerprint = FingerprintProfile::new_random(0);
+            fingerprint.platform = platform;
+            let profile = harness.profile(11111, fingerprint);
+            let (snapshot, observed) = harness.read(&profile);
+            harness.stop(snapshot.profile_id);
+            readings.push((platform, excluded, observed));
+        }
+    }
+
+    let reading = |platform: Platform, excluded: bool| {
+        readings
+            .iter()
+            .find(|(candidate, flag, _)| *candidate == platform && *flag == excluded)
+            .map(|(_, _, observed)| observed)
+            .expect("every platform was read with and without the exclusion")
+    };
+    let widths = |observed: &ObservedFingerprint| {
+        (
+            observed.font_ascii_width,
+            observed.font_latin_width,
+            observed.font_cjk_width,
+            observed.font_emoji_width,
+            observed.font_tofu_width,
+        )
+    };
+
+    println!(
+        "{}",
+        readings
+            .iter()
+            .map(|(platform, excluded, observed)| format!(
+                "platform={platform} --disable-spoofing=font:{excluded}\n\
+                 \tfonts={:?}\n\
+                 \twidths(ascii,latin,cjk,emoji,tofu)={:?}\n\
+                 \tmissing_cjk={:?} boxed_emoji={:?}",
+                observed.fonts,
+                widths(observed),
+                observed.has_missing_cjk(),
+                observed.has_boxed_emoji(),
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // This file only runs on Linux, which is therefore the host here.
+    let host = Platform::Linux;
+    assert_eq!(
+        reading(host, false).fonts,
+        reading(host, true).fonts,
+        "the exclusion is a no-op when the profile already claims the host"
+    );
+
+    // A spoofed platform enumerates fonts this host does not have. That is what
+    // the font spoof is for, on every build measured here.
+    for platform in [Platform::Windows, Platform::MacOs] {
+        assert_ne!(
+            reading(platform, false).fonts,
+            reading(host, false).fonts,
+            "without an exclusion, {platform} must enumerate a list this host does not \
+             have; if this fails the engine stopped spoofing fonts and the strategy has \
+             to be decided again"
+        );
+    }
+
+    // Whether the exclusion is honoured is a measurement, and the table is a
+    // claim about it: the two have to agree, on whichever build this runs.
+    // Measured: honoured on 148, ignored on 142 - the same split as the other
+    // exclusion features, which is why one capability flag covers them.
+    let honoured = [Platform::Windows, Platform::MacOs]
+        .iter()
+        .all(|platform| reading(*platform, true).fonts == reading(host, true).fonts);
+    let major = Harness::detected_major();
+    assert_eq!(
+        honoured,
+        CoreCapabilities::for_major(major).supports_disable_spoofing,
+        "the table and the engine disagree about --disable-spoofing=font on major {major}"
+    );
+    for platform in [Platform::Windows, Platform::MacOs] {
+        if honoured {
+            assert_eq!(
+                reading(platform, true).fonts,
+                reading(host, true).fonts,
+                "with the exclusion, {platform} enumerates the host's fonts"
+            );
+        } else {
+            assert_eq!(
+                reading(platform, true).fonts,
+                reading(platform, false).fonts,
+                "a build that ignores the exclusion keeps the spoofed font list"
+            );
+        }
+    }
+
+    // The exclusion moves the claim, not the rendering: the widths are the
+    // host's in every reading, which is why no switch can fix a missing glyph.
+    for (platform, _, observed) in &readings {
+        assert_eq!(
+            widths(observed),
+            widths(reading(*platform, false)),
+            "the exclusion must not change what is rendered on {platform}"
+        );
+        assert_eq!(
+            observed.has_missing_cjk(),
+            Some(false),
+            "CJK must have glyphs on {platform}"
+        );
+        assert_eq!(
+            observed.has_boxed_emoji(),
+            Some(false),
+            "emoji must have glyphs on {platform}"
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires CHROMIUM_BIN and a real browser"]
 fn a_fresh_reading_repeats_and_leaves_the_session_as_it_was() {

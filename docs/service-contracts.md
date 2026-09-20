@@ -302,6 +302,12 @@ pub enum ProcessReading {
 
 pub trait ProcessInspector: Send + Sync {
     fn inspect(&self, pid: u32) -> ProcessReading;
+    /// 只读 start time，不需要命令行。
+    ///
+    /// 记录在子进程一存在时就写（readiness 之前，有意为之），那时它还没 execve，
+    /// 没有 cmdline 可读；而 `/proc/<pid>/stat` 从进程创建起就在。
+    /// 默认实现从 `inspect` 推导（平台问不到时的唯一办法），Linux 实现单独读 stat。
+    fn start_time(&self, pid: u32) -> Option<u64>;
 }
 ```
 

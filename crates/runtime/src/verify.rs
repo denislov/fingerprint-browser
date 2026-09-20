@@ -275,10 +275,16 @@ impl ObservedFingerprint {
     /// Comparing against a codepoint that has no glyph anywhere avoids
     /// hard-coding a font size: the box width is whatever this renderer uses.
     pub fn has_missing_cjk(&self) -> Option<bool> {
-        match (self.font_cjk_width, self.font_tofu_width) {
-            (Some(cjk), Some(tofu)) => Some((cjk - tofu).abs() < 1.0),
-            _ => None,
-        }
+        boxed(self.font_cjk_width, self.font_tofu_width)
+    }
+
+    /// Whether emoji render as missing-glyph boxes.
+    ///
+    /// The same reading as CJK, and the same kind of host artefact: a host with
+    /// no emoji font renders the emoji codepoint with the box, whatever the
+    /// profile claims its platform is.
+    pub fn has_boxed_emoji(&self) -> Option<bool> {
+        boxed(self.font_emoji_width, self.font_tofu_width)
     }
 
     /// Whether the font surface could be read at all.
@@ -473,23 +479,60 @@ pub fn verify(
         }
     }
 
-    // Missing glyphs are what a platform spoof that forgets the host's fonts
-    // produces, and they are visible in a single reading.
-    match observed.has_missing_cjk() {
-        Some(true) => found.push(Discrepancy {
+    // The font surface is a single reading that settles itself: what a page can
+    // measure is the glyphs the host can actually render, and that is true
+    // whatever font list the engine claims for the profile's platform. The
+    // reading is checked in a fixed order - can it be read at all, then the two
+    // scripts whose absence is visible in one measurement.
+    if !observed.fonts_readable() {
+        // Say which half is missing: an enumeration with no width and a width
+        // with no enumeration are different failures.
+        let missing = match (
+            observed.fonts.is_empty(),
+            observed.font_ascii_width.is_none(),
+        ) {
+            (true, true) => "no family and no width were reported",
+            (true, false) => "no family was enumerated",
+            _ => "no width was reported",
+        };
+        found.push(Discrepancy {
             claim: "fonts",
-            expected: "CJK text has glyphs".to_string(),
-            observed: "renders as missing glyphs".to_string(),
-        }),
-        Some(false) => {}
-        None => found.push(Discrepancy {
-            claim: "fonts",
-            expected: "CJK text has glyphs".to_string(),
-            observed: unreadable("not reported", observed.font_error.as_deref()),
-        }),
+            expected: "the font surface can be read".to_string(),
+            observed: unreadable(missing, observed.font_error.as_deref()),
+        });
+    }
+    for (script, expected, boxed) in [
+        ("CJK", "CJK text has glyphs", observed.has_missing_cjk()),
+        ("emoji", "emoji has glyphs", observed.has_boxed_emoji()),
+    ] {
+        match boxed {
+            Some(true) => found.push(Discrepancy {
+                claim: "fonts",
+                expected: expected.to_string(),
+                observed: format!("{script} renders as missing glyphs"),
+            }),
+            Some(false) => {}
+            None => found.push(Discrepancy {
+                claim: "fonts",
+                expected: expected.to_string(),
+                observed: unreadable("not reported", observed.font_error.as_deref()),
+            }),
+        }
     }
 
     found
+}
+
+/// Whether a measured width is the missing-glyph box.
+///
+/// Both the box and the glyph are measured in the same renderer, so equality
+/// with the tofu width is the whole test: a host with no glyph for the script
+/// cannot produce another width for it.
+fn boxed(width: Option<f64>, tofu: Option<f64>) -> Option<bool> {
+    match (width, tofu) {
+        (Some(width), Some(tofu)) => Some((width - tofu).abs() < 1.0),
+        _ => None,
+    }
 }
 
 /// Says a surface was not read, and why when the probe recorded a reason.
@@ -668,7 +711,9 @@ mod tests {
               "userAgent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/148.0.0.0 Safari/537.36",
               "language": "zh-CN", "languages": "zh-CN,zh", "timezone": "Asia/Shanghai",
               "userAgentDataBrands": "Not/A)Brand/99,Chromium/148",
-              "platformVersion": "6.14.0"
+              "platformVersion": "6.14.0",
+              "fonts": ["DejaVu Sans"], "fontAsciiWidth": 413, "fontLatinWidth": 203,
+              "fontCjkWidth": 192, "fontEmojiWidth": 60, "fontTofuWidth": 149
             }"#,
         );
 
@@ -686,9 +731,9 @@ mod tests {
                 "languages",
                 "timezone",
                 "platform version",
-                "webrtc leak",
-                "fonts"
-            ]
+                "webrtc leak"
+            ],
+            "the font reading here is faithful, so it makes no claim of its own"
         );
         assert_eq!(found[3].expected, "8");
         assert_eq!(found[3].observed, "26");
@@ -816,12 +861,17 @@ mod tests {
     fn missing_cjk_glyphs_are_reported() {
         let capabilities = CoreCapabilities::for_major(148);
         // Width equal to the missing-glyph box means every CJK char is a box.
-        let boxed = observed(r#"{"fontCjkWidth": 149, "fontTofuWidth": 149, "fonts": ["Arial"]}"#);
-        let readable =
-            observed(r#"{"fontCjkWidth": 192, "fontTofuWidth": 149, "fonts": ["Arial"]}"#);
+        let boxed_cjk = observed(
+            r#"{"fontAsciiWidth": 413, "fontCjkWidth": 149, "fontEmojiWidth": 60,
+                 "fontTofuWidth": 149, "fonts": ["Arial"]}"#,
+        );
+        let readable = observed(
+            r#"{"fontAsciiWidth": 413, "fontCjkWidth": 192, "fontEmojiWidth": 60,
+                 "fontTofuWidth": 149, "fonts": ["Arial"]}"#,
+        );
 
         assert!(
-            verify(&profile(), &capabilities, &boxed)
+            verify(&profile(), &capabilities, &boxed_cjk)
                 .iter()
                 .any(|f| f.claim == "fonts" && f.observed.contains("missing glyphs"))
         );
@@ -830,8 +880,76 @@ mod tests {
                 .iter()
                 .any(|f| f.claim == "fonts")
         );
-        assert_eq!(boxed.has_missing_cjk(), Some(true));
+        assert_eq!(boxed_cjk.has_missing_cjk(), Some(true));
         assert_eq!(readable.has_missing_cjk(), Some(false));
+    }
+
+    /// A host without an emoji font renders the emoji codepoint with the box,
+    /// which is a host artefact a page can see and the profile cannot explain.
+    #[test]
+    fn an_emoji_that_collapses_into_the_tofu_box_is_reported() {
+        let capabilities = CoreCapabilities::for_major(148);
+        let boxed_emoji = observed(
+            r#"{"fontAsciiWidth": 413, "fontCjkWidth": 192, "fontEmojiWidth": 149,
+                 "fontTofuWidth": 149, "fonts": ["Arial"]}"#,
+        );
+        let readable = observed(
+            r#"{"fontAsciiWidth": 413, "fontCjkWidth": 192, "fontEmojiWidth": 60,
+                 "fontTofuWidth": 149, "fonts": ["Arial"]}"#,
+        );
+
+        let found = verify(&profile(), &capabilities, &boxed_emoji);
+        assert!(
+            found
+                .iter()
+                .any(|f| f.claim == "fonts" && f.observed.contains("emoji")),
+            "{found:?}"
+        );
+        assert_eq!(boxed_emoji.has_boxed_emoji(), Some(true));
+        assert_eq!(readable.has_boxed_emoji(), Some(false));
+        assert!(
+            !verify(&profile(), &capabilities, &readable)
+                .iter()
+                .any(|f| f.claim == "fonts")
+        );
+    }
+
+    /// The font surface needs both halves of the reading, and a missing half is
+    /// a finding rather than a pass.
+    #[test]
+    fn the_font_surface_needs_an_enumeration_and_the_widths() {
+        let capabilities = CoreCapabilities::for_major(148);
+        // An enumeration with no widths: the glyph question was never answered.
+        let blind = observed(r#"{"fonts": ["Arial"]}"#);
+        // Widths with no enumeration: nothing was found to read.
+        let no_families = observed(
+            r#"{"fonts": [], "fontAsciiWidth": 413, "fontCjkWidth": 192,
+                 "fontEmojiWidth": 60, "fontTofuWidth": 149}"#,
+        );
+        let complete = observed(
+            r#"{"fonts": ["Arial"], "fontAsciiWidth": 413, "fontCjkWidth": 192,
+                 "fontEmojiWidth": 60, "fontTofuWidth": 149}"#,
+        );
+
+        assert!(!blind.fonts_readable());
+        assert!(
+            verify(&profile(), &capabilities, &blind)
+                .iter()
+                .any(|f| f.claim == "fonts" && f.observed.contains("not reported"))
+        );
+        assert!(!no_families.fonts_readable());
+        assert!(
+            verify(&profile(), &capabilities, &no_families)
+                .iter()
+                .any(|f| f.claim == "fonts" && f.observed.contains("no family")),
+            "an empty enumeration is not a readable font surface"
+        );
+        assert!(complete.fonts_readable());
+        assert!(
+            !verify(&profile(), &capabilities, &complete)
+                .iter()
+                .any(|f| f.claim == "fonts")
+        );
     }
 
     #[test]
@@ -852,22 +970,29 @@ mod tests {
     #[test]
     fn the_font_claim_is_settled_by_the_widths_not_the_enumeration() {
         let capabilities = CoreCapabilities::for_major(148);
-        // Widths present: the glyph question is answered whether or not the
-        // enumeration found anything.
-        let widths_only = observed(r#"{"fonts": [], "fontCjkWidth": 192, "fontTofuWidth": 149}"#);
-        // Widths absent: nothing was measured, so nothing is certified.
-        let blind = observed(r#"{"fonts": ["Arial"]}"#);
+        // A complete reading is quiet whether or not a family matched: the
+        // widths are what say the glyphs are there.
+        let complete = observed(
+            r#"{"fonts": ["Arial"], "fontAsciiWidth": 413, "fontCjkWidth": 192,
+                 "fontEmojiWidth": 60, "fontTofuWidth": 149}"#,
+        );
+        // A boxed script is reported from the widths alone, with no family
+        // needed to compare against.
+        let boxed = observed(
+            r#"{"fonts": [], "fontAsciiWidth": 413, "fontCjkWidth": 149,
+                 "fontEmojiWidth": 60, "fontTofuWidth": 149}"#,
+        );
 
-        assert!(!widths_only.fonts_readable(), "no family was enumerated");
         assert!(
-            !verify(&profile(), &capabilities, &widths_only)
+            !verify(&profile(), &capabilities, &complete)
                 .iter()
                 .any(|f| f.claim == "fonts")
         );
         assert!(
-            verify(&profile(), &capabilities, &blind)
+            verify(&profile(), &capabilities, &boxed)
                 .iter()
-                .any(|f| f.claim == "fonts" && f.observed == "not reported")
+                .any(|f| f.claim == "fonts" && f.observed.contains("CJK")),
+            "the width reading is what settles the glyph question"
         );
     }
 

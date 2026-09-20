@@ -202,6 +202,57 @@ a fingerprint nobody asked for:
 Each fix has a regression test in `crates/runtime/tests/fingerprint_real.rs`
 that reads the value back, not just the command line.
 
+## Fonts: what `--disable-spoofing=font` does, and why the product does not add it
+
+`Ant-Browser` appends `font` to `--disable-spoofing` when the profile's platform
+differs from the host's, so the host's real fonts are used instead of a spoofed
+list. That rule was inherited, not measured, and measuring it on a real 148 (and
+142) changed the answer.
+
+Same seed, same host (Linux), read back with `FingerprintProbe`; the switch was
+added as a raw argument so the measurement does not depend on the capability
+table under test (`the_font_exclusion_changes_what_a_spoofed_platform_enumerates`):
+
+| Claimed platform | `--disable-spoofing=font` | Fonts the page enumerates |
+| --- | --- | --- |
+| windows | off | `Georgia`, `Verdana`, `Tahoma`, `Comic Sans MS`, `Cambria`, `Arial Black`, ... |
+| windows | on | `DejaVu Sans`, `Liberation Sans`, `Noto Sans CJK SC`, `Noto Color Emoji`, `Ubuntu`, `Cantarell`, ... |
+| macos | off | `Georgia`, `Verdana`, `Tahoma`, `Comic Sans MS`, ... |
+| macos | on | the same host list as above |
+| linux (host) | either | the host list; the switch changes nothing |
+
+The widths (`mmmmmmmmmmlli`, latin, CJK, emoji and the missing-glyph box) are
+**identical in all six readings**, and CJK and emoji have glyphs in all six.
+Two conclusions follow, and both are the opposite of the inherited rule:
+
+1. The switch changes the claim, not the rendering. The glyphs are the host's
+   whatever the engine reports, so excluding font spoofing **cannot fix a
+   missing glyph** - that was the stated reason for the rule. What renders is
+   decided by which fonts the host has installed, in both cases.
+2. With the switch off, a Windows- or macOS-claiming profile enumerates fonts
+   this host does not have (Tahoma, Cambria, Comic Sans MS, ...), which is what
+   the font spoof is for. Excluding it would replace a fabricated list with the
+   host's own and admit the host platform to any page that enumerates fonts.
+
+So the product keeps the engine's font spoof and **does not add `font` to
+`--disable-spoofing`**. `SpoofingFeature::Font` is still offered per profile in
+the editor, so a user who would rather have the host's list than a consistent
+claim can ask for exactly that.
+
+The measurement also settled two things about the exclusion itself:
+
+- It is honoured on **148** and ignored on **142** (the two lists are identical
+  with and without it), which is the same split as `canvas`, `clientrects` and
+  `audio` - so one `supports_disable_spoofing` flag covers all of them, and
+  `the_font_exclusion_changes_what_a_spoofed_platform_enumerates` now checks the
+  table against the engine for this feature too.
+- The font surface is a **host** artefact, so what is worth reading back is
+  what the host can render. `verify` now settles all three single-reading font
+  questions - the surface is readable at all, CJK has glyphs, emoji has glyphs -
+  instead of only CJK. The emoji reading is the one that catches a host with no
+  emoji font, which is visible to any page and has nothing to do with the
+  platform the profile claims.
+
 ## Version detection
 
 `BrowserCore.major` comes from the binary: `runtime::version::VersionReport`
@@ -217,10 +268,6 @@ downgraded to "unknown".
 
 ## Not implemented yet
 
-- **Cross-platform font handling.** When the spoofed platform differs from the
-  host, `Ant-Browser` appends `font` to `--disable-spoofing` so the host's real
-  fonts are used and CJK text does not render as missing glyphs. The Rust model
-  has no host-platform policy yet, so this is not done.
 - **Legacy switch names.** Pre-144 cores used `--fingerprint-canvas-noise` /
   `--fingerprint-client-rects-noise`. This model does not carry them; those
   cores simply do not get canvas noise.

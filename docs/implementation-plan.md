@@ -111,11 +111,45 @@ ProxyProfile
 ShutdownAll；修复正常 Stop 强杀导致 Cookie 丢失的问题。详见 `chromium-acceptance.md`。
 指纹能力随后由回读认证：148（已验证代）与 **142（低于 pivot 的最后一版）**都在本机实测过。
 
-仍需实现：
+Phase 4 的剩余项在第十二批结清，结论与证据见 [fingerprint-matrix.md](fingerprint-matrix.md)：
 
-- browser version detection 在启动时复核（目前开工时复核）；
-- 跨平台字体策略（目标平台不等于宿主平台时补 `font` 到 `--disable-spoofing`）；
-- 音频/字体/WebRTC 泄漏/地理位置的运行时回读（当前探针看不到这些面）。
+- **跨平台字体策略：实测推翻了继承来的规则。** `Ant-Browser` 的“目标平台≠宿主平台就补
+  `font` 到 `--disable-spoofing`”在本机实测下会把一个伪造但对齐的字体清单换成宿主的真清单，
+  反而向页面暴露宿主平台；而它原本要修的缺字问题，它根本修不了（字形永远是宿主的）。
+  因此产品**不自动加** `font`，每个 profile 仍可在编辑器里自己勾选。
+- 音频 / WebRTC / 字体的运行时回读在第三、四批完成；第十二批把字体面补齐为三条可单次定论的读数
+  （可读性 / CJK 字形 / emoji 字形），emoji 是新增的那条。
+- browser version detection 每次开工都会复核（`app::core_detect::maintain`）。
+- 地理位置仍无模型字段，`--fingerprint-location` 在本环境产不出坐标，见
+  [fingerprint-matrix.md](fingerprint-matrix.md) 的“尚未实现”。
+
+### 第十二批：跨平台字体的实测与结算（结清 Phase 4 的最后一条）
+
+进度（2026-09-20）：已完成。**这一批的产出是一个被推翻的假设，而不是一个新开关。**
+
+- 新增可重复的实测：`the_font_exclusion_changes_what_a_spoofed_platform_enumerates`。
+  同一 seed、同一 Linux 宿主，三种声明平台 × 有/无 `--disable-spoofing=font` 共六次回读，
+  开关作为**原始参数**注入（用 `RawArgsPlanner`），所以测的是引擎而不是能力表。
+  结果：声明 windows/macos 时，不加开关会枚举到 Tahoma/Cambria/Comic Sans MS 这类**宿主没有**
+  的字体；加开关后回落到宿主真实清单；声明 linux（即宿主）时开关是 no-op。
+  六次读数的宽度集合完全一致，CJK 与 emoji 在六次里都有字形。
+  也就是说：**开关换的是“声称”，不是“渲染”**。
+- 结论：字形永远是宿主的——所以“排除 font 以免缺字”在机制上不可能成立；而排除之后清单会变成
+  宿主清单，等于向任何枚举字体的页面宣布“我不是 Windows”。产品因此不自动加 `font`，
+  把选择留给 profile 编辑器（`SpoofingFeature::Font` 本来就在那里）。
+- 同一实测顺手认证了能力表在这个特性上的取值：148 尊重该开关、142 忽略（两两清单相同），
+  与 canvas/clientrects/audio 同一分界，所以 `supports_disable_spoofing` 一个标志覆盖它们是对的。
+- 回读面按实测补齐：`verify_fingerprint` 原来只判 CJK，现在判三条单次读数可定论的问题——
+  **字体面是否读得到**（枚举与宽度缺一不可，且会说缺的是哪一半）、**CJK 是否有字形**、
+  **emoji 是否有字形**。emoji 那条抓的是“宿主没装 emoji 字体”，与声明的平台无关，
+  这正是跨平台字体里真正可验证的部分。`ObservedFingerprint::has_boxed_emoji()` 与
+  `has_missing_cjk()` 共用同一个 `boxed()` 判定。
+- 实测还抓出一个与本批无关但必须修的旧 bug（已单独提交）：会话记录写得太早（readiness 之前，
+  这是上一批有意改的），而 `ProcessRecord::captured` 拿 start time 走的是 `inspect`，
+  需要 `/proc/<pid>/cmdline`——没 exec 完的进程没有 cmdline，于是 start time 记成了 `None`。
+  等到回读时，Chromium 已经重写并追加过自己的参数，记录与进程对不上，启动时报
+  “the next run will not reclaim them”。修法是 `ProcessInspector::start_time`：
+  从 `/proc/<pid>/stat` 单独读第 22 个字段，进程一创建就有。
 
 ### 第二批：开关词汇的实测与回读验证
 
@@ -529,6 +563,8 @@ candidates through a proxy are not a leak
 gathering that never finished is not a pass
 a relaxed policy makes no leak claim
 missing cjk glyphs are reported
+an emoji that collapses into the tofu box is reported
+the font surface needs an enumeration and the widths
 the font claim is settled by the widths not the enumeration
 audio is read and compared between sessions
 the probe expression never touches the network
@@ -712,6 +748,8 @@ excluding client rects removes only that noise
 audio spoofing is seed driven and can be excluded
 no ice candidate leaks an address on the product path
 font surface is readable and cjk is not boxed
+the font exclusion changes what a spoofed platform enumerates, and agrees with
+the capability table about whether this build honours it
 real chromium fingerprint verification through the verifier
 ```
 
