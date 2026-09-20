@@ -128,7 +128,9 @@ pub fn moved_data_dir_notice(data_dir: &Path, legacy: &Path) -> Option<(String, 
 
 /// The XDG spec says a relative `$XDG_*_HOME` is to be ignored, not resolved.
 fn absolute(value: &Option<PathBuf>) -> Option<PathBuf> {
-    value.clone().filter(|path| path.is_absolute())
+    value
+        .clone()
+        .filter(|path| path.is_absolute() || path.has_root())
 }
 
 #[cfg(test)]
