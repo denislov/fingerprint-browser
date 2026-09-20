@@ -148,6 +148,20 @@ move. A config file that cannot be read is reported rather than treated as
 empty, and saving is refused until it is fixed, so a typo cannot cost the
 settings it still holds.
 
+The data directory defaults to the platform's own place for application data:
+`~/.local/share/FpBrowser` on Linux (`$XDG_DATA_HOME` is honoured when it is
+absolute), `%LOCALAPPDATA%\FpBrowser` on Windows - which is
+`%APPDATA%\Local\FpBrowser` on a default profile, and the roaming variable is
+only the fallback - and `~/Library/Application Support/FpBrowser` on macOS. It
+used to be the relative `data`, next to wherever the program was started; that
+is now only the fallback for a host with no home directory at all. A run that
+finds a database in the old `./data` and none in the new place says so in the
+window rather than showing an empty list, and it moves nothing: the old
+directory is one field away on the Settings page. The config file stays where it
+already was (`$XDG_CONFIG_HOME/fp-browser/config.json`), now computed the same way
+for Windows and macOS - renaming it would move the file and forget the settings
+it holds.
+
 Browser cores have a page of their own. A core is added by pointing at a
 fingerprint-chromium binary; the version is read from it with `--version` rather
 than typed, because the detected major is what decides which switches a profile

@@ -15,13 +15,17 @@
 //! reported, the defaults are used, and saving is refused until it is fixed, so
 //! a typo cannot cost the user the settings it still holds.
 
+use crate::paths;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 /// Data root: profiles, cores, the database, runtime files.
+///
+/// The default for it is the platform's own place for application data, which
+/// lives in [`crate::paths`]; this is the environment variable that overrides
+/// it.
 pub const DATA_DIR_ENV: &str = "FP_BROWSER_DATA_DIR";
-pub const DEFAULT_DATA_DIR: &str = "data";
 /// Xray executable, used when a profile has a proxy.
 pub const XRAY_BIN_ENV: &str = "FP_BROWSER_XRAY_BIN";
 /// Chromium binary registered at startup; cores are managed on their own page.
@@ -173,6 +177,11 @@ pub struct Environment {
     pub chromium_bin: Option<String>,
     pub chromium_major: Option<String>,
     pub config: Option<String>,
+    /// The host's own directories, so a test can say which platform it means.
+    ///
+    /// `Default` is a host with no home directory, which is what most tests
+    /// want: the relative fallback, as the default used to be for every host.
+    pub host: paths::Host,
 }
 
 impl Environment {
@@ -184,18 +193,16 @@ impl Environment {
             chromium_bin: read(CHROMIUM_BIN_ENV),
             chromium_major: read(CHROMIUM_MAJOR_ENV),
             config: read(CONFIG_ENV),
+            host: paths::Host::from_process(),
         }
     }
 }
 
 /// Where the config file lives when nothing overrides it.
-fn default_config_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("fp-browser").join("config.json")
+fn default_config_path(host: &paths::Host) -> PathBuf {
+    paths::config_dir(host)
+        .unwrap_or_else(|| PathBuf::from(".").join(paths::CONFIG_DIR))
+        .join("config.json")
 }
 
 pub struct Settings {
@@ -218,7 +225,7 @@ impl Settings {
             .config
             .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(default_config_path);
+            .unwrap_or_else(|| default_config_path(&env.host));
 
         let (stored, config_error) = match read_config(&config_path) {
             Ok(stored) => (stored, None),
@@ -230,7 +237,7 @@ impl Settings {
             .as_ref()
             .map(PathBuf::from)
             .or_else(|| stored.data_dir.as_ref().map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+            .unwrap_or_else(|| paths::data_dir_or_fallback(&env.host));
         let xray_executable = env
             .xray_executable
             .as_ref()
@@ -407,7 +414,7 @@ impl Settings {
             .as_ref()
             .map(PathBuf::from)
             .or_else(|| self.stored.data_dir.as_ref().map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+            .unwrap_or_else(|| paths::data_dir_or_fallback(&self.env.host));
         self.xray_executable = self
             .env
             .xray_executable
@@ -461,6 +468,7 @@ fn write_config(path: &Path, stored: &Stored) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::FALLBACK_DATA_DIR;
 
     /// A config file in its own directory, removed when the test ends.
     struct TempConfig {
@@ -499,13 +507,64 @@ mod tests {
         }
     }
 
+    /// The default is the platform's own place for application data; the
+    /// relative `data` is only what is left for a host with no home directory.
+    #[test]
+    fn the_default_data_directory_follows_the_platform() {
+        let config = TempConfig::new("platform");
+        let with_home = |os: &'static str, home: &str| paths::Host {
+            os,
+            home: Some(PathBuf::from(home)),
+            ..paths::Host::default()
+        };
+        let windows_base = PathBuf::from(r"C:\Users\me\AppData\Local");
+        let cases = [
+            (
+                paths::Host {
+                    local_app_data: Some(windows_base.clone()),
+                    app_data: Some(PathBuf::from(r"C:\Users\me\AppData\Roaming")),
+                    ..with_home("windows", r"C:\Users\me")
+                },
+                // Built with the same join rather than written out: `Path::join`
+                // uses the separator of the host the test runs on.
+                windows_base.join(paths::APP_DIR),
+            ),
+            (
+                with_home("linux", "/home/me"),
+                PathBuf::from("/home/me/.local/share/FpBrowser"),
+            ),
+            (
+                with_home("macos", "/Users/me"),
+                PathBuf::from("/Users/me/Library/Application Support/FpBrowser"),
+            ),
+            // No home directory to put it under: the fallback, unchanged from
+            // what every host used to get.
+            (
+                paths::Host {
+                    os: "linux",
+                    ..paths::Host::default()
+                },
+                PathBuf::from(FALLBACK_DATA_DIR),
+            ),
+        ];
+
+        for (host, expected) in cases {
+            let (settings, _) = Settings::load(Environment {
+                config: Some(config.path.to_string_lossy().to_string()),
+                host,
+                ..Environment::default()
+            });
+            assert_eq!(settings.data_dir(), expected);
+        }
+    }
+
     #[test]
     fn with_nothing_set_every_value_is_the_default() {
         let config = TempConfig::new("defaults");
         let (settings, notice) = Settings::load(env(&config));
 
         assert!(notice.is_none(), "a missing config file is not an error");
-        assert_eq!(settings.data_dir(), Path::new(DEFAULT_DATA_DIR));
+        assert_eq!(settings.data_dir(), Path::new(FALLBACK_DATA_DIR));
         assert_eq!(settings.xray_executable(), default_xray());
         let rows = settings.rows();
         assert_eq!(rows.len(), SettingKey::ALL.len());
@@ -581,7 +640,7 @@ mod tests {
         assert!(message.contains("config.json"), "{message}");
         assert_eq!(
             settings.data_dir(),
-            Path::new(DEFAULT_DATA_DIR),
+            Path::new(FALLBACK_DATA_DIR),
             "the defaults are used so the app still starts"
         );
 
@@ -699,7 +758,7 @@ mod tests {
         let config = TempConfig::new("relative");
         let (settings, _) = Settings::load(env(&config));
         let value = &settings.rows()[0].value;
-        assert!(value.starts_with(DEFAULT_DATA_DIR), "{value}");
+        assert!(value.starts_with(FALLBACK_DATA_DIR), "{value}");
         assert!(
             value.contains("relative to"),
             "a relative path is shown with what it is relative to: {value}"

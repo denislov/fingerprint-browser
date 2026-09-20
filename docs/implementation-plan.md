@@ -304,6 +304,29 @@ Phase 4 的剩余项在第十二批结清，结论与证据见 [fingerprint-matr
 - 编译器的提醒：`link_input` / `error` / `proxy_import` 只被测试使用，bin 目标下就是死代码。
   它们现在带 `#[cfg(test)]`——编译器说得对：这三个方法存在的理由就是让测试伸进对话框。
 
+### 第十九批：数据目录按平台放，以及不再把旧库摆在那里不管
+
+进度（2026-09-20）：已完成。
+
+- 默认数据目录从**相对路径 `data`**（跟着启动时的工作目录）改成平台自己的应用数据位置：
+  Linux `~/.local/share/FpBrowser`（`$XDG_DATA_HOME` 绝对路径时优先）、
+  Windows `%LOCALAPPDATA%\FpBrowser`（默认配置下就是 `%APPDATA%\Local\FpBrowser`；
+  只有 roaming 变量时才回退到 `%APPDATA%\Local`）、macOS
+  `~/Library/Application Support/FpBrowser`。找不到 home 的主机仍然回退到相对的 `data`——
+  这是唯一剩下的旧行为，而且 Settings 页会把它解析成什么写出来。
+- `app::paths`（新）：把环境读成 `Host` 值，再把 `Host` 映射成目录，**映射是纯函数**，
+  所以 Windows 的答案在 Linux 上也被测到（与 `open_dir::opener` 同一手法）。XDG 规范里
+  “相对的 `$XDG_*_HOME` 应当被忽略”也照做了。
+- 配置文件也照同一套算（Windows 用 roaming、macOS 用 Application Support），但 **Linux 的路径
+  原样不变**（`$XDG_CONFIG_HOME/fp-browser/config.json`）：改名会移走文件、丢掉里面存的两个设置。
+- **不偷偷搬数据**：如果新位置还没有 `app.db` 而旧的 `./data` 里有，启动时说一句“数据目录已经搬到
+  X，旧的库还在 Y，Settings 一栏就能指过去”，然后什么都不动。这是信息不是错误（进日志与 toast，
+  不占横幅），而且只会说一次——下一次启动就会在新位置建库，条件自然不再成立。
+- 测试：三个平台的基目录与名字（用“基目录 + 名字”断言而不是写死路径字符串——`Path::join` 用的是
+  运行平台的斜线，写死的期望只在本平台成立，这一批自己在这上面绊了两次）、相对 XDG 被忽略、
+  没有 home 时回退、配置目录每平台、旧库提示的三种情况，以及一个用真实环境跑 `Host::from_process()`
+  的检查（防止变量读错而只在用户那里才发现）。
+
 ### 第二批：开关词汇的实测与回读验证
 
 进度（2026-09-19）：已完成。方法与全部实测数据见 [fingerprint-matrix.md](fingerprint-matrix.md)。

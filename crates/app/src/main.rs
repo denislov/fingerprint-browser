@@ -9,6 +9,7 @@ mod core_editor;
 mod editor;
 mod log_file;
 mod open_dir;
+mod paths;
 mod proxy_editor;
 mod proxy_import;
 #[cfg(all(test, target_os = "linux"))]
@@ -51,6 +52,11 @@ fn main() {
     let (settings, settings_notice) =
         settings::Settings::load(settings::Environment::from_process());
     let data_dir = settings.data_dir().to_path_buf();
+
+    // Checked before storage opens, because opening it is what creates the
+    // database in the new place and ends the question this asks.
+    let moved_notice =
+        paths::moved_data_dir_notice(&data_dir, std::path::Path::new(paths::FALLBACK_DATA_DIR));
 
     let storage = SqliteStorage::open(data_dir.join("app.db")).expect("open sqlite storage");
     let profile_repo: Arc<dyn ProfileRepository> = Arc::new(storage.profiles());
@@ -118,6 +124,12 @@ fn main() {
         app_state.push_notice(message, error);
     }
     if let Some((message, error)) = settings_notice {
+        app_state.push_notice(message, error);
+    }
+    if let Some((message, error)) = moved_notice {
+        // The banner is for problems, and this is not one; the log keeps it for
+        // a run that has no window.
+        tracing::info!("{message}");
         app_state.push_notice(message, error);
     }
     // Last, so that a problem found here is the one the banner shows: a settings
