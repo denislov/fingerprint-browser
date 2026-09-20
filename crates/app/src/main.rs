@@ -182,16 +182,22 @@ fn main() {
             cx,
         );
 
+        let window_bounds = WindowBounds::centered(
+            Size {
+                width: px(1200.0),
+                height: px(680.0),
+            },
+            cx,
+        );
+
         cx.spawn(async move |cx| {
             cx.open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds {
-                        origin: Point::new(px(100.0), px(100.0)),
-                        size: Size {
-                            width: px(1280.0),
-                            height: px(860.0),
-                        },
-                    })),
+                    window_bounds: Some(window_bounds),
+                    window_min_size: Some(Size {
+                        width: px(960.0),
+                        height: px(560.0),
+                    }),
                     titlebar: Some(TitlebarOptions {
                         title: Some("Fingerprint Browser".into()),
                         ..Default::default()

@@ -345,10 +345,7 @@ impl AppView {
             dialog
                 .title("Edit profile")
                 .w(px(760.0))
-                .content({
-                    let editor = editor.clone();
-                    move |content, _, _| content.child(editor.clone())
-                })
+                .child(editor.clone())
                 // `Dialog` renders its own footer, not `button_props`; the
                 // confirm button carries the id the tests click.
                 .footer(
@@ -482,37 +479,32 @@ impl AppView {
                     key.effect()
                 ))
                 .w(px(680.0))
-                .content({
-                    let field = field.clone();
-                    move |content, _, _| {
-                        content.child(
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
                             div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child(format!("Now: {now}")),
-                                )
-                                .child(
-                                    // Not `setting-{key}`: the row card already
-                                    // owns that id, and two elements sharing one
-                                    // id in a single tree is ambiguous.
-                                    Input::new(&field)
-                                        .id(format!("setting-field-{}", key.id()))
-                                        .aria_label(key.label()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(0x71717a))
-                                        .child(key_help(key)),
-                                ),
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(format!("Now: {now}")),
                         )
-                    }
-                })
+                        .child(
+                            // Not `setting-{key}`: the row card already
+                            // owns that id, and two elements sharing one
+                            // id in a single tree is ambiguous.
+                            Input::new(&field)
+                                .id(format!("setting-field-{}", key.id()))
+                                .aria_label(key.label()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x71717a))
+                                .child(key_help(key)),
+                        ),
+                )
                 .footer(
                     DialogFooter::new()
                         .child(
@@ -558,10 +550,7 @@ impl AppView {
             dialog
                 .title(title)
                 .w(px(680.0))
-                .content({
-                    let core_editor = core_editor.clone();
-                    move |content, _, _| content.child(core_editor.clone())
-                })
+                .child(core_editor.clone())
                 .footer(
                     DialogFooter::new()
                         .child(
@@ -701,10 +690,7 @@ impl AppView {
             dialog
                 .title(title)
                 .w(px(640.0))
-                .content({
-                    let proxy_editor = proxy_editor.clone();
-                    move |content, _, _| content.child(proxy_editor.clone())
-                })
+                .child(proxy_editor.clone())
                 .footer(
                     DialogFooter::new()
                         .child(
@@ -775,10 +761,7 @@ impl AppView {
             dialog
                 .title(proxy_import.read(cx).title())
                 .w(px(640.0))
-                .content({
-                    let proxy_import = proxy_import.clone();
-                    move |content, _, _| content.child(proxy_import.clone())
-                })
+                .child(proxy_import.clone())
                 .footer(
                     DialogFooter::new()
                         .child(
