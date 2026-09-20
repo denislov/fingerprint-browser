@@ -42,6 +42,12 @@ this repository does not bundle or fork them.
   any, and the import never overwrites: taken identifiers are kept, profiles whose
   core is missing are skipped, and the report says which was which. Browser data
   is not included. See [backup and restore](docs/backup-and-restore.md).
+- Restore makes the installation *be* the file instead of adding to it: an empty
+  installation is restored at once, a populated one asks before replacing
+  anything, and a running profile blocks it either way. Copy each profile's
+  browser data out to a directory of your own and back in; only stopped profiles
+  are copied, a profile that has never run is skipped and named, and the copy
+  reports how many bytes it wrote.
 - Configure data/Xray paths for the next start; Settings shows effective values,
   their sources and any environment overrides.
 
@@ -214,11 +220,11 @@ CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
 - Runtime events are bounded and best-effort; snapshots are authoritative and the
   UI reconciles periodically. CDP is loopback-only, not an automation API.
 
-Next: Windows fingerprint acceptance, backup/restore restore and browser-data
-copy - the rules are settled in [backup-and-restore.md](docs/backup-and-restore.md),
-and export and import are in - and packaging. See the [current plan](docs/implementation-plan.md). A
-profile filter is in; batch operations and multi-select are not planned, for the
-reasons recorded there.
+Next: Windows fingerprint acceptance, and distribution - a repeatable Windows
+release build, first-run executable setup and packaging. The backup and restore
+work is complete; see the [current plan](docs/implementation-plan.md). A profile
+filter is in; batch operations and multi-select are not planned, for the reasons
+recorded there.
 
 ## Design and evidence
 
@@ -226,6 +232,6 @@ reasons recorded there.
   [service contracts](docs/service-contracts.md), [lifecycle](docs/lifecycle.md)
 - [Linux acceptance](docs/chromium-acceptance.md), [Windows acceptance](docs/windows-acceptance.md),
   [fingerprint matrix](docs/fingerprint-matrix.md)
-- [Backup and restore](docs/backup-and-restore.md) - export and import are in;
-  restore and the browser-data copy are designed, not implemented
+- [Backup and restore](docs/backup-and-restore.md) - export, import, restore and
+  the browser-data copy are all in
 - [Current plan](docs/implementation-plan.md), [historical batches](docs/implementation-history.md)

@@ -74,6 +74,16 @@ pub struct ConfigSnapshot {
 }
 
 impl ConfigSnapshot {
+    /// Whether the installation this was read from holds nothing at all.
+    ///
+    /// This is restore's precondition: a configuration with no cores, proxies or
+    /// profiles can be replaced without asking, because there is nothing to
+    /// lose. It is asked of the snapshot rather than of a repository, which has
+    /// no emptiness call of its own.
+    pub fn is_empty(&self) -> bool {
+        self.cores.is_empty() && self.proxies.is_empty() && self.profiles.is_empty()
+    }
+
     /// How many proxies hold something an [`Credentials::Excluded`] export would
     /// leave out.
     ///

@@ -16,7 +16,7 @@ statements there are not current TODOs.
 | Fingerprints | Version/capability checks, warnings, live read-back; Linux 142/144/148 measured; the read-back also reports the address a running browser's own traffic leaves from |
 | Desktop UI | Profile forms, core/proxy management, link import, proxy tests, settings, runtime details, logs and a profile-list filter |
 | Windows lifecycle | Atomic job assignment, kill-on-close containment, native identity, recovery with retained failure records |
-| Backup | Configuration export and import are in, from the Settings page; restore and the browser-data copy are designed, not implemented - see below |
+| Backup | Configuration export, import and restore are in, from the Settings page, along with the browser-data copy for stopped profiles - see below |
 | Validation | Linux/Windows CI configuration, native process tests, opt-in real Windows Chromium/Xray acceptance |
 
 The desktop workflow is implemented. “Phase 5 has started” is outdated, and
@@ -130,15 +130,15 @@ A text filter over the profiles list, and nothing more than a filter.
 
 ## Backup and restore
 
-**The rules are settled and the first four slices are in.** Steps 1 to 4 of the
-design in [backup-and-restore.md](backup-and-restore.md) are implemented - the
-credential rule in `domain`, the exchange document and the writing of it in
-`application`, the export card on the Settings page, and the import that reads a
-backup back under the never-overwrite rules. Restore and the browser-data copy
-are not. The rules came first because three of them decide the shape of the code
-rather than the other way round: what counts as a credential, what happens to an
-identifier that is already taken, and what happens to a path that does not exist
-on this machine.
+**Implemented in full.** All six slices of the design in
+[backup-and-restore.md](backup-and-restore.md) are in: the credential rule in
+`domain`, the exchange document and the writing of it in `application`, the
+export card on the Settings page, the import that reads a backup back under the
+never-overwrite rules, the restore that makes the installation be the file, and
+the browser-data copy for stopped profiles. The rules came first because three of
+them decide the shape of the code rather than the other way round: what counts as
+a credential, what happens to an identifier that is already taken, and what
+happens to a path that does not exist on this machine.
 
 What the design fixes, and why it is worth fixing before writing the code:
 
@@ -213,11 +213,38 @@ Implemented so far, and where it lives:
   proxy - goes to the banner and stays until dismissed; a clean import is a
   toast. A moved directory is reported in the sentence but raises no alarm,
   because moving every directory is what importing onto another machine *does*.
+- **Restore is the import read against an empty snapshot** - `plan_restore` hands
+  `plan_import` a `ConfigSnapshot::default()`, so the file's copy of an identifier
+  wins instead of being kept and reported as taken. The precondition lives in that
+  function rather than at the call site, so a mistaken restore cannot reach a
+  writer: `OnlyWhenEmpty` refuses a populated installation and carries the counts
+  the window turns into a sentence. The **Restore configuration** card sits under
+  the import one, and the confirmation is behind its button, only when there is
+  something to replace.
+- Restore **removes before it writes, in the reverse of the write order** -
+  profiles, then proxies, then cores - because that is what keeps the services'
+  own referential rules from refusing the removal. Browser data is not touched:
+  deleting a profile keeps its directory, so a restart of the same identifier
+  finds its sessions where they were, which is what makes a restored
+  configuration line up with a browser-data copy.
+- `crates/application/src/browser_data.rs` is the second artifact: each
+  `profiles/<id>` directory copied to or from a directory the user names, whole
+  and replacing rather than merging. Only stopped profiles are copied, and the
+  refusal names the running ones before anything is written. A profile that has
+  never run has no directory to copy, which is a skip and not a failure. Pointing
+  the backup at the profile's own directory is refused by name, because clearing
+  the destination first would delete the source.
+- The **Browser data** card has one directory field and two buttons, and the copy
+  runs on a worker with an injected `BrowserDataCopier` port - it can block for
+  seconds, so the window must not freeze, and a test must be able to press the
+  button without hundreds of megabytes being written. Restore and the copy both
+  refuse while a profile is running, checked against a freshly reconciled runtime
+  snapshot rather than a cached row.
 
 Encryption is deliberately **not** decided, and the current recommendation is no:
 without a key-management answer an encrypted file is plain text with extra steps.
-Until this is implemented, copying the data directory with the program closed is a
-lossless backup and needs no code - the page says so, and says what it does not buy.
+Copying the data directory with the program closed remains a lossless backup that
+needs no code - the page says so, and says what it does not buy.
 
 ## Windows lifecycle acceptance
 
@@ -236,17 +263,17 @@ Commands and limits: [windows-acceptance.md](windows-acceptance.md).
 ## Next bounded tasks
 
 1. Profile search: a filter over the list, matching name, seed, core and proxy.
-   Deliberately not selection or batch operations - see below.
-2. Backup/restore: export and import are in. What is left is restore - import
-   plus the precondition and the confirmation - following the rules in
-   [backup-and-restore.md](backup-and-restore.md), and the browser-data copy for
-   stopped profiles.
+   Deliberately not selection or batch operations - see below. **Done.**
+2. Backup/restore: export, import, restore and the browser-data copy are all in,
+   following the rules in [backup-and-restore.md](backup-and-restore.md).
+   **Done.**
 3. Distribution: repeatable Windows release build, first-run executable setup,
-   diagnostics and packaging. Do not silently download binaries.
+   diagnostics and packaging. Do not silently download binaries. This is the
+   remaining item that does not need another machine.
 
 ### Why profile search stays a single-profile feature
 
-An earlier version of item 1 read "search, selection and bounded batch
+An earlier version of task 1 read "search, selection and bounded batch
 start/stop/proxy assignment, with per-profile results and cancellation". It was
 dropped after reading the command path, not for lack of room to build it:
 

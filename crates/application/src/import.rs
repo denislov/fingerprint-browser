@@ -13,9 +13,10 @@
 //! be read and tested as a table. [`apply_import`] then writes what the plan
 //! asks for and reports what landed.
 //!
-//! What is deliberately absent: restore. Restore is import plus a precondition -
-//! an empty configuration, or a confirmation to replace one - and that
-//! precondition is a question about the installation rather than about the file.
+//! Restore is the sibling in [`crate::restore`]: import plus a precondition - an
+//! empty configuration, or a confirmation to replace one - and that precondition
+//! is a question about the installation rather than about the file, which is why
+//! it lives there and not here.
 
 use crate::config_backup::{BackupError, ConfigBackup, ConfigSnapshot};
 use crate::core_service::CoreService;

@@ -1,12 +1,12 @@
 # Backup and restore
 
-**Status: a configuration backup can be written and read back - export and
-import are both in, from the Settings page. Restore and the browser-data copy
-are designed, not implemented.** This page defines the rules before the rest of
-the code exists, because three of them - what counts as a credential, what
-happens to an identifier that is already taken, and what happens to a path that
-does not exist on this machine - decide the shape of the code rather than the
-other way round.
+**Status: implemented.** A configuration backup can be written and read back,
+and either made to be this installation's configuration or added to it; browser
+data can be copied out to a directory of the user's own and back in. All of it is
+on the Settings page. The rules came first because three of them - what counts as
+a credential, what happens to an identifier that is already taken, and what
+happens to a path that does not exist on this machine - decide the shape of the
+code rather than the other way round.
 
 What is in the program today:
 
@@ -19,13 +19,24 @@ What is in the program today:
 - `crates/application/src/import.rs` - the planner that decides what a document
   would do to an installation, and the applier that writes it in dependency
   order and reports what landed.
+- `crates/application/src/restore.rs` - the same plan read against an empty
+  snapshot, plus the precondition that refuses a populated installation without a
+  confirmation, and the removal of what is here before the file's records land.
+- `crates/application/src/browser_data.rs` - the separate artifact: copying each
+  `profiles/<id>` directory into a backup directory and back out, refused while a
+  profile is running.
 - The Settings page's **Export configuration** card - a path field, the
   credential choice, and a sentence saying what happened.
 - The Settings page's **Import configuration** card - a path field and a
   sentence that reports arrivals, keeps, skips and re-pointed directories in
   one line.
+- The Settings page's **Restore configuration** card - the same file read the
+  other way, behind a confirmation when there is something to replace.
+- The Settings page's **Browser data** card - one directory field and two
+  buttons, one for each direction.
 
-See [The first slice](#the-first-slice) for what is left. Until then, see
+See [The first slice](#the-first-slice) for how it was built and what each step
+decided. To back up everything without the program, see
 [What you can already do](#what-you-can-already-do).
 
 ## What is on disk
@@ -295,11 +306,21 @@ which is the file's own context, not its content.
 - **The directory is copied whole.** Excluding caches would mean tracking
   Chromium's internal layout across versions, which changes; the cost of copying
   whole is size, and the cost of a filter is a backup that is silently incomplete
-  after a Chromium update. Size is the cheaper of the two, and it is visible
-  before the copy starts.
+  after a Chromium update. Size is the cheaper of the two, and the copy reports
+  how many bytes it wrote when it finishes - the copy runs on a worker and blocks
+  nothing, so a pre-scan would walk every directory twice to say in advance what
+  one walk already says on the way past.
 - Restore places the directory at the path the restored profile has. Because
   identifiers are kept, that is the same relative place, so a same-machine
   restore lines up and a cross-machine restore still lands somewhere correct.
+- A profile that has never been started has no directory to copy. That is a
+  **skip**, named in the report, not a failure of the whole copy: the other
+  profiles still travel.
+- The copy **replaces** a directory rather than merging into it. A backup with a
+  stale file left in it from an older copy is not a copy of the directory it
+  claims to be. Clearing first is safe because the source is known to exist;
+  pointing the backup at the profile's own directory - which would have the copy
+  clear its own source - is refused by name before the first byte is written.
 
 ## What is not in a backup
 
@@ -322,9 +343,17 @@ cp -a "$HOME/.local/share/FpBrowser" "$HOME/FpBrowser-backup-$(date +%F)"
 
 This is lossless and needs no code. What it does not do, and what the design above
 adds, is: move a configuration to a machine with a different home directory;
-import without risking what is already there; leave credentials out; and restore
-one profile rather than all of them. It also carries the plain-text credentials in
-`app.db`, which is worth knowing before that directory goes anywhere else.
+import without risking what is already there; leave credentials out; replace an
+installation with the file's configuration under a confirmation; and copy browser
+data to a directory that is read back by the same rules. It also carries the
+plain-text credentials in `app.db`, which is worth knowing before that directory
+goes anywhere else.
+
+Neither verb is per profile: a configuration backup always carries all three
+lists, and a browser-data copy always gathers every profile. The profile list has
+no selection model by a deliberate decision recorded in
+[implementation-plan.md](implementation-plan.md#why-profile-search-stays-a-single-profile-feature),
+and a per-profile copy would need one.
 
 ## Open questions
 
@@ -356,10 +385,10 @@ next:
 3. [x] Export to a chosen path, and the statement that the file carries
    plain-text credentials when it does.
 4. [x] Import, with the identifier, path and core rules above, reporting per item.
-5. [ ] Restore, which is import plus the precondition and the confirmation.
-6. [ ] Browser-data copy for stopped profiles.
+5. [x] Restore, which is import plus the precondition and the confirmation.
+6. [x] Browser-data copy for stopped profiles.
 
-Steps 1 to 4 are in. Things about them worth knowing before step 5:
+All six are in. Things about them worth knowing:
 
 - The document is built from a `ConfigSnapshot` and an `ExportOrigin`, both plain
   values, so `application` has no clock and no filesystem of its own. The caller
@@ -394,6 +423,36 @@ Steps 1 to 4 are in. Things about them worth knowing before step 5:
 - Import never re-probes and never re-derives. `create` mints an identifier and
   `update` re-reads a core's version, so the services gained insert-as-given
   methods for exactly this caller, and a record arrives as the file says it was.
+- **Restore is import read against an empty snapshot.** `plan_restore` calls
+  `plan_import` with `ConfigSnapshot::default()`, so the file's copy of an
+  identifier always wins instead of being kept and reported as taken - which is
+  the whole difference between "be this file" and "add these". The precondition
+  lives in that function rather than at the call site, so a mistaken restore
+  cannot reach a writer: `OnlyWhenEmpty` refuses a populated installation and
+  carries the counts the window needs to say what is in the way.
+- **Restore removes before it writes, in the reverse of the write order** -
+  profiles, then proxies, then cores - because a profile is what references a
+  core and a proxy. That order is also what keeps the services' own rules from
+  refusing the removal: by the time a proxy is reached, no profile names it. A
+  removal the database refuses is recorded and does not stop the write phase,
+  exactly as an item refused during an import does not stop the rest.
+- **Browser data is not touched by a restore.** Deleting a profile keeps its
+  directory on disk, so a restart of the same identifier finds its sessions where
+  they were - which is what makes a restored configuration line up with a
+  browser-data copy.
+- **Both restore and the browser-data copy refuse while a profile is running**,
+  and name the profiles that must be stopped. Restore would otherwise delete the
+  rows of live processes, leaving browsers the window can no longer stop; the copy
+  would read a directory Chromium is still writing. The check is made against a
+  freshly reconciled runtime snapshot, not a cached row.
+- **The browser-data copy runs on a worker**, like a proxy test and a fingerprint
+  reading and unlike an export: hundreds of megabytes can block for seconds, and
+  the window must not freeze. The view drains a channel; everything that can be
+  refused before a thread is spawned - an empty path, an empty installation, a
+  running profile - is refused in the state layer, so a worker is never started
+  for a copy that could not run. Test seams follow the neighbouring workers: the
+  copy goes through an injected `BrowserDataCopier` port, so the UI tests press
+  the button without writing to the machine they run on.
 
 The gate is unchanged and applies to all of it - see
 [implementation-plan.md](implementation-plan.md#required-gate).

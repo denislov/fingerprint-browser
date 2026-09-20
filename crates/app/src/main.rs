@@ -4,6 +4,7 @@
 //! services over them, and the single window. No child process is ever owned by
 //! the UI; commands go through [`RuntimeService`] into the supervisor channel.
 
+mod browser_data;
 mod core_detect;
 mod core_editor;
 mod editor;
@@ -223,6 +224,7 @@ fn main() {
                             Arc::new(CdpFingerprintVerifier::default()),
                             proxy_tester,
                             Arc::new(open_dir::SystemDirectoryOpener),
+                            Arc::new(browser_data::DiskBrowserDataCopier),
                         );
                         view.boot(cx);
                         view

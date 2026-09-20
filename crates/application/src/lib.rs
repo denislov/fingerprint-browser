@@ -1,3 +1,4 @@
+pub mod browser_data;
 pub mod config_backup;
 pub mod core_service;
 pub mod error;
@@ -5,8 +6,12 @@ pub mod export;
 pub mod import;
 pub mod profile_service;
 pub mod proxy_service;
+pub mod restore;
 pub mod runtime_service;
 
+pub use browser_data::{
+    BrowserDataError, BrowserDataReport, Direction, copy_browser_data, restore_browser_data,
+};
 pub use config_backup::{BackupError, ConfigBackup, ConfigSnapshot, Credentials, ExportOrigin};
 pub use core_service::{CoreService, DefaultCoreService, VersionProbe};
 pub use error::AppError;
@@ -19,6 +24,7 @@ pub use profile_service::{
     DefaultProfileService, DeleteMode, NewProfile, ProfileService, default_user_data_dir,
 };
 pub use proxy_service::{DefaultProxyService, NewProxy, ProxyService};
+pub use restore::{RestoreError, RestoreMode, RestoreReport, apply_restore, plan_restore};
 pub use runtime_service::RuntimeService;
 
 #[cfg(test)]

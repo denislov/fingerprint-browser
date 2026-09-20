@@ -381,6 +381,15 @@ Read      路径上读不到文件 —— 是要改的路径
 Document  文件不是备份（或版本不对/内容坏了）—— 是换一个文件
 ```
 
+RestoreError 只有一类，而且它不是关于文件的：
+
+```text
+NotEmpty  这次安装里已经有配置 —— 是"要不要替换"的问题，由调用点显式确认
+```
+
+前置条件做成变体而不是布尔量，是因为它携带的计数就是窗口要说的那句话（"已有
+N 个内核、N 个代理、N 个档案"），而这个判断必须发生在任何写入器之前。
+
 UI 边界再统一转换为用户可读文本。
 
 ---
@@ -414,6 +423,7 @@ worker 线程执行、通过 channel 回传，View 只负责发起和呈现：
 AppView -> Arc<dyn DirectoryOpener>       (交给桌面环境打开数据目录)
 AppView -> Arc<dyn FingerprintVerifier>   (CDP：读回浏览器指纹与其出口地址)
 AppView -> Arc<dyn ProxyTester>           (SOCKS：一条真实请求穿过代理)
+AppView -> Arc<dyn BrowserDataCopier>     (文件系统：整目录拷出/拷回浏览器数据)
 ```
 
 `FingerprintVerifier::verify` 接收整个 `VerificationJob`，而不是若干位置参数：
@@ -421,6 +431,12 @@ AppView -> Arc<dyn ProxyTester>           (SOCKS：一条真实请求穿过代�
 调用点与替身每次一起改。它返回 `VerificationReport`——两个问题的答案在一起：
 读回不支持的断言，以及流量从哪里出去。只有 `egress` 为 `Some`（即 Profile 有
 代理）时才会去问地址；没有代理的 Profile 不对地址做任何声明。
+
+`BrowserDataCopier::run` 同样收一个 `BrowserDataJob`（方向、档案、运行中的 id、
+目录），返回 `BrowserDataReport`。它是端口而不是 `ProfileService` 上的方法，因为
+"拷贝几百 MB" 与档案列表的业务规则无关：一个需要 worker、可能阻塞数秒，另一个
+只是校验与删除保护。所有能在起线程之前做出的拒绝（空路径、无档案、有档案在运行）
+都在 state 层做完，因此 worker 不会被为一次注定失败的拷贝而启动。
 
 这些适配器与 View 同处 `crates/app`，但不经过 `application`：它们不是业务
 规则，而是运行时能力的阻塞包装；测试注入假实现，因此不需要网络、浏览器或

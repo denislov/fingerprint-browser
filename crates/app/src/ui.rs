@@ -4,6 +4,7 @@
 //! dirty; the snapshot itself stays the single source of truth, exactly as the
 //! runtime façade contract requires.
 
+use crate::browser_data::BrowserDataCopier;
 use crate::core_editor::CoreEditor;
 use crate::editor::{ProfileEdit, ProfileEditor};
 use crate::open_dir::DirectoryOpener;
@@ -16,6 +17,7 @@ use crate::state::{
     ProxyTest, Toast, ToastKind, Verification,
 };
 use crate::verifier::{FingerprintVerifier, VerificationReport};
+use application::{BrowserDataReport, Direction, RestoreMode};
 use crossbeam_channel::{Receiver, Sender};
 use domain::{CoreId, ProfileId, ProxyId, RuntimeState};
 use gpui_kit::component::Disableable as _;
@@ -75,11 +77,20 @@ pub struct AppView {
     /// export one is: the text exists for one button, which reads it when it is
     /// pressed.
     import_input: Option<Entity<InputState>>,
+    /// The Settings page's restore path field. Its own field rather than the
+    /// import's, because the two verbs have different consequences.
+    restore_input: Option<Entity<InputState>>,
+    /// The Settings page's browser-data directory field, shared by the copy out
+    /// and the copy back in: it is one place.
+    browser_data_input: Option<Entity<InputState>>,
     verifier: Arc<dyn FingerprintVerifier>,
     /// Sends one request through a proxy. Injected so a test never dials one.
     tester: Arc<dyn ProxyTester>,
     /// Opens a profile's data directory. Injected so a test does not open one.
     opener: Arc<dyn DirectoryOpener>,
+    /// Copies browser data. Injected so a test never writes hundreds of
+    /// megabytes, and never touches a disk.
+    copier: Arc<dyn BrowserDataCopier>,
     verifications: Receiver<(ProfileId, Result<VerificationReport, String>)>,
     verification_tx: Sender<(ProfileId, Result<VerificationReport, String>)>,
     /// Finished proxy tests, with whether the engine probed was already up.
@@ -88,6 +99,9 @@ pub struct AppView {
     /// What the opener reported, once it was done handing the request off.
     open_results: Receiver<(PathBuf, Result<(), String>)>,
     open_tx: Sender<(PathBuf, Result<(), String>)>,
+    /// Finished browser-data copies, with the direction each was taken in.
+    browser_data: Receiver<(Direction, Result<BrowserDataReport, String>)>,
+    browser_data_tx: Sender<(Direction, Result<BrowserDataReport, String>)>,
     state: AppState,
     events: Receiver<RuntimeEvent>,
     /// Kept alive: dropping a GPUI subscription unregisters the observer.
@@ -103,15 +117,18 @@ impl AppView {
         verifier: Arc<dyn FingerprintVerifier>,
         tester: Arc<dyn ProxyTester>,
         opener: Arc<dyn DirectoryOpener>,
+        copier: Arc<dyn BrowserDataCopier>,
     ) -> Self {
         // A reading takes seconds and blocks on the browser, so it runs on a
         // worker thread and reports back through this channel. Testing a proxy
         // starts an engine and waits for one request, which blocks the same way
         // and for the same reason. Opening a directory waits for the desktop's
-        // opener too: none of the three may block the window.
+        // opener, and copying browser data moves hundreds of megabytes: none of
+        // the four may block the window.
         let (verification_tx, verifications) = crossbeam_channel::unbounded();
         let (proxy_test_tx, proxy_tests) = crossbeam_channel::unbounded();
         let (open_tx, open_results) = crossbeam_channel::unbounded();
+        let (browser_data_tx, browser_data) = crossbeam_channel::unbounded();
         Self {
             editor: None,
             proxy_editor: None,
@@ -122,15 +139,20 @@ impl AppView {
             filter_input: None,
             export_input: None,
             import_input: None,
+            restore_input: None,
+            browser_data_input: None,
             verifier,
             tester,
             opener,
+            copier,
             verifications,
             verification_tx,
             proxy_tests,
             proxy_test_tx,
             open_results,
             open_tx,
+            browser_data,
+            browser_data_tx,
             state,
             events,
             window_closed: None,
@@ -201,6 +223,19 @@ impl AppView {
         self.import_input.clone()
     }
 
+    /// The Settings page's restore path field, once a render has built it.
+    #[cfg(test)]
+    pub fn restore_input(&self) -> Option<Entity<InputState>> {
+        self.restore_input.clone()
+    }
+
+    /// The Settings page's browser-data directory field, once a render has built
+    /// it.
+    #[cfg(test)]
+    pub fn browser_data_input(&self) -> Option<Entity<InputState>> {
+        self.browser_data_input.clone()
+    }
+
     fn on_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.state.set_page(page);
         cx.notify();
@@ -241,7 +276,8 @@ impl AppView {
                     let verified = view.drain_verifications();
                     let tested = view.drain_proxy_tests();
                     let opened = view.drain_open_results();
-                    if notified || reconcile || verified || tested || opened {
+                    let copied = view.drain_browser_data();
+                    if notified || reconcile || verified || tested || opened || copied {
                         view.state.refresh_runtime();
                         cx.notify();
                     }
@@ -325,6 +361,20 @@ impl AppView {
                     .push_notice(format!("Opened {}", path.display()), false),
                 Err(reason) => self.state.push_notice(reason, true),
             }
+            received = true;
+        }
+        received
+    }
+
+    /// Collect finished browser-data copies from the worker thread.
+    ///
+    /// Nothing is dropped for having gone stale the way a verification is: a
+    /// copy is not about a runtime state that can change under it, and the
+    /// report is the only record of what it did.
+    fn drain_browser_data(&mut self) -> bool {
+        let mut received = false;
+        while let Ok((direction, outcome)) = self.browser_data.try_recv() {
+            self.state.finish_browser_data(direction, outcome);
             received = true;
         }
         received
@@ -1168,6 +1218,127 @@ impl AppView {
         cx.notify();
     }
 
+    /// Builds the Settings page's restore path field on first use.
+    fn ensure_restore_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(input) = &self.restore_input {
+            return input.clone();
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Path of a configuration backup to restore")
+        });
+        self.restore_input = Some(input.clone());
+        input
+    }
+
+    /// Restores the configuration, asking first when there is something to
+    /// replace.
+    ///
+    /// The precondition is the difference from an import: an empty installation
+    /// is restored at once, because there is nothing to lose, and a populated
+    /// one opens a confirmation that says what will be replaced. The mode is the
+    /// confirmation, so a mistaken click cannot replace a live configuration.
+    fn on_restore_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = self.restore_input.clone() {
+            let typed = input.read(cx).value().to_string();
+            self.state.set_restore_path(typed);
+        }
+        // The path is checked first, so an empty field is refused where it is
+        // rather than opening a confirmation for a restore that could not run.
+        if self.state.restore_source().is_none() {
+            self.state
+                .push_notice("Type the path of a configuration backup to restore.", true);
+            cx.notify();
+            return;
+        }
+        match self.state.is_configuration_empty() {
+            Ok(true) => {
+                let _ = self.state.restore_configuration(RestoreMode::OnlyWhenEmpty);
+            }
+            Ok(false) => self.confirm_restore(window, cx),
+            Err(error) => self.state.push_notice(error.to_string(), true),
+        }
+        cx.notify();
+    }
+
+    /// Asks before a restore replaces a populated installation.
+    fn confirm_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            alert
+                .title("Restore configuration")
+                .description(
+                    "Every core, proxy and profile here is replaced by the file's configuration. \
+                     Profiles keep their browser data on disk.",
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Replace")
+                        .cancel_text("Cancel")
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            if let Some(view) = view.upgrade() {
+                                view.update(cx, |view, cx| {
+                                    let _ = view.state.restore_configuration(RestoreMode::Replace);
+                                    cx.notify();
+                                });
+                            }
+                            true
+                        })
+                        .on_cancel(|_, _, _| true),
+                )
+        });
+        cx.notify();
+    }
+
+    /// Builds the Settings page's browser-data directory field on first use.
+    fn ensure_browser_data_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(input) = &self.browser_data_input {
+            return input.clone();
+        }
+        let input = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Directory to keep browser data in"));
+        self.browser_data_input = Some(input.clone());
+        input
+    }
+
+    /// Starts a browser-data copy in the direction asked for.
+    ///
+    /// The job is gathered before anything is spawned, so an empty path, an
+    /// empty installation or a running profile is refused where the field is
+    /// rather than on a worker that could not have copied anything. A copy is
+    /// hundreds of megabytes, so the run itself is on a worker and the answer
+    /// arrives on a later tick.
+    fn on_browser_data(&mut self, direction: Direction, cx: &mut Context<Self>) {
+        if let Some(input) = self.browser_data_input.clone() {
+            let typed = input.read(cx).value().to_string();
+            self.state.set_browser_data_path(typed);
+        }
+        let job = match self.state.browser_data_job(direction) {
+            Ok(job) => job,
+            Err(message) => {
+                self.state.push_notice(message, true);
+                cx.notify();
+                return;
+            }
+        };
+        let copier = Arc::clone(&self.copier);
+        let sender = self.browser_data_tx.clone();
+        std::thread::spawn(move || {
+            let outcome = copier.run(&job);
+            let _ = sender.send((direction, outcome));
+        });
+        cx.notify();
+    }
+
     fn on_dismiss_notice(&mut self, cx: &mut Context<Self>) {
         self.state.dismiss_notice();
         cx.notify();
@@ -1201,6 +1372,8 @@ impl Render for AppView {
         let filter_input = self.ensure_filter_input(window, cx);
         let export_input = self.ensure_export_input(window, cx);
         let import_input = self.ensure_import_input(window, cx);
+        let restore_input = self.ensure_restore_input(window, cx);
+        let browser_data_input = self.ensure_browser_data_input(window, cx);
         let export_destination = self.state.export_destination();
         let export_includes_credentials = self.state.export_includes_credentials();
         let filter = self.state.profile_filter().to_string();
@@ -1295,12 +1468,16 @@ impl Render for AppView {
                             .when(page == Page::Settings, |this| {
                                 this.child(settings_body(
                                     &setting_rows,
-                                    SettingsExport {
-                                        path: export_input.clone(),
-                                        destination: export_destination.clone(),
-                                        include_credentials: export_includes_credentials,
+                                    SettingsCards {
+                                        export: SettingsExport {
+                                            path: export_input.clone(),
+                                            destination: export_destination.clone(),
+                                            include_credentials: export_includes_credentials,
+                                        },
+                                        import: import_input.clone(),
+                                        restore: restore_input.clone(),
+                                        browser_data: browser_data_input.clone(),
                                     },
-                                    import_input.clone(),
                                     cx,
                                 ))
                             })
@@ -1897,18 +2074,33 @@ struct SettingsExport {
     include_credentials: bool,
 }
 
+/// The four backup cards at the foot of the Settings page, and the fields they
+/// read.
+///
+/// A value rather than four positional parameters, for the reason
+/// [`SettingsExport`] is one: the set grows, and every call site should not have
+/// to change when it does.
+struct SettingsCards {
+    export: SettingsExport,
+    import: Entity<InputState>,
+    restore: Entity<InputState>,
+    browser_data: Entity<InputState>,
+}
+
 fn settings_body(
     rows: &[crate::settings::SettingRow],
-    export: SettingsExport,
-    import_input: Entity<InputState>,
+    cards: SettingsCards,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     // Built first, with their lifetimes erased: each card borrows the context
     // and the chain below borrows it again for its own listeners, and an
     // opaque return type would keep the first borrow alive to the end of the
     // chain.
-    let export_card: AnyElement = export_card(&export, cx).into_any_element();
-    let import_card: AnyElement = import_card(&import_input, cx).into_any_element();
+    let export_card: AnyElement = export_card(&cards.export, cx).into_any_element();
+    let import_card: AnyElement = import_card(&cards.import, cx).into_any_element();
+    let restore_card: AnyElement = restore_card(&cards.restore, cx).into_any_element();
+    let browser_data_card: AnyElement =
+        browser_data_card(&cards.browser_data, cx).into_any_element();
     div()
         .id("settings-scroll")
         .flex()
@@ -2006,6 +2198,8 @@ fn settings_body(
         }))
         .child(export_card)
         .child(import_card)
+        .child(restore_card)
+        .child(browser_data_card)
 }
 
 /// The export card at the foot of the Settings page.
@@ -2152,6 +2346,135 @@ fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl In
         .child(
             div().text_xs().text_color(rgb(DIM)).child(
                 "Nothing is confirmed first: import only adds, so undoing one is deleting the rows it named.",
+            ),
+        )
+}
+
+/// The restore card, under the import one.
+///
+/// Restore and import sit together because they are the two ways to read the
+/// same file, and the card says what separates them in one line: import adds,
+/// restore replaces. The confirmation is not on the card but behind the button,
+/// and only when there is something to replace, so the card states the rule
+/// rather than describing a dialog.
+fn restore_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl IntoElement {
+    div()
+        .id("restore-configuration")
+        .test_support()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .px_4()
+        .py_4()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Restore configuration"),
+                )
+                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                    "Makes this installation be the file's configuration, replacing what is here. An empty installation is restored at once; a populated one asks before replacing anything.",
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(input)
+                            .id("restore-path")
+                            .aria_label("Restore file path"),
+                    ),
+                )
+                .child(
+                    Button::new("restore-run")
+                        .label("Restore")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.on_restore_configuration(window, cx)
+                        })),
+                ),
+        )
+        .child(
+            div().text_xs().text_color(rgb(DIM)).child(
+                "This replaces the configuration, not the sessions: a profile keeps its browser data on disk.",
+            ),
+        )
+}
+
+/// The browser-data card, below the configuration ones.
+///
+/// Browser data is the other artifact: too large to travel in a configuration
+/// backup, and the half that carries the logins. One directory field with two
+/// buttons, because a copy out writes to a place and a copy back in reads from
+/// the same one.
+fn browser_data_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl IntoElement {
+    div()
+        .id("browser-data")
+        .test_support()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .px_4()
+        .py_4()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Browser data"),
+                )
+                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                    "Copies each profile's cookies, storage and sessions to a directory of your own, or back from one. Only stopped profiles are copied: a running browser is still writing.",
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(input)
+                            .id("browser-data-path")
+                            .aria_label("Browser data directory"),
+                    ),
+                )
+                .child(
+                    Button::new("browser-data-out")
+                        .label("Copy out")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.on_browser_data(Direction::ToBackup, cx)
+                        })),
+                )
+                .child(
+                    Button::new("browser-data-in")
+                        .label("Copy in")
+                        .outline()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.on_browser_data(Direction::FromBackup, cx)
+                        })),
+                ),
+        )
+        .child(
+            div().text_xs().text_color(rgb(DIM)).child(
+                "The directory holds one subdirectory per profile, named after its identifier, so it lines up with the configuration.",
             ),
         )
 }
@@ -3058,12 +3381,14 @@ fn elapsed(row: &ProfileRow) -> String {
 #[cfg(test)]
 mod tests {
     use super::AppView;
+    use crate::browser_data::testing::FakeBrowserDataCopier;
     use crate::open_dir::testing::FakeOpener;
     use crate::proxy_tester::testing::FakeProxyTester;
     use crate::state::AppState;
     use crate::state::Verification;
     use crate::state::testing::{FakeRuntime, core};
     use crate::verifier::testing::FakeVerifier;
+    use application::Direction;
     use application::{DefaultProfileService, DefaultProxyService, ProxyService, RuntimeService};
     use domain::{CoreId, ProfileId, ProxyId};
     use gpui_kit::component::Root;
@@ -3126,10 +3451,11 @@ mod tests {
         opener: Arc<FakeOpener>,
         log_file: Option<crate::log_file::LogFile>,
     ) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>, Arc<FakeOpener>) {
-        let (view, runtime, opener, _tester) = view_with_tester(
+        let (view, runtime, opener, _tester, _copier) = view_with_tester(
             cx,
             verifier,
             Arc::new(FakeProxyTester::passing()),
+            Arc::new(FakeBrowserDataCopier::passing()),
             config,
             opener,
             log_file,
@@ -3137,20 +3463,29 @@ mod tests {
         (view, runtime, opener)
     }
 
+    /// Everything the harness builds: the view, and the fakes a test drives.
+    ///
+    /// A named type rather than a five-part tuple so a test can destructure it
+    /// without repeating the shape, and so adding a fake does not change every
+    /// signature that returns one.
+    type Harness = (
+        gpui_kit::Entity<AppView>,
+        Arc<FakeRuntime>,
+        Arc<FakeOpener>,
+        Arc<FakeProxyTester>,
+        Arc<FakeBrowserDataCopier>,
+    );
+
     /// The same view, with the proxy tester the test drives.
     fn view_with_tester(
         cx: &mut TestAppContext,
         verifier: Arc<FakeVerifier>,
         tester: Arc<FakeProxyTester>,
+        copier: Arc<FakeBrowserDataCopier>,
         config: Option<&std::path::Path>,
         opener: Arc<FakeOpener>,
         log_file: Option<crate::log_file::LogFile>,
-    ) -> (
-        gpui_kit::Entity<AppView>,
-        Arc<FakeRuntime>,
-        Arc<FakeOpener>,
-        Arc<FakeProxyTester>,
-    ) {
+    ) -> Harness {
         let profile_repo: Arc<MemProfileRepository> = Arc::new(MemProfileRepository::new());
         let core_repo: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
         let proxy_repo: Arc<MemProxyRepository> = Arc::new(MemProxyRepository::new());
@@ -3188,11 +3523,18 @@ mod tests {
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
 
         let view = cx.new(|cx| {
-            let mut view = AppView::new(state, event_rx, verifier, tester.clone(), opener.clone());
+            let mut view = AppView::new(
+                state,
+                event_rx,
+                verifier,
+                tester.clone(),
+                opener.clone(),
+                copier.clone(),
+            );
             view.boot(cx);
             view
         });
-        (view, runtime, opener, tester)
+        (view, runtime, opener, tester, copier)
     }
 
     fn view(cx: &mut TestAppContext) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>) {
@@ -3469,10 +3811,11 @@ mod tests {
     #[gpui_kit::test]
     fn testing_a_proxy_from_the_window_reports_where_the_traffic_left(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let (view, _runtime, _opener, tester) = view_with_tester(
+        let (view, _runtime, _opener, tester, _copier) = view_with_tester(
             cx,
             Arc::new(FakeVerifier::passing()),
             Arc::new(FakeProxyTester::passing_from("198.51.100.9")),
+            Arc::new(FakeBrowserDataCopier::passing()),
             None,
             Arc::new(FakeOpener::working()),
             None,
@@ -3517,13 +3860,14 @@ mod tests {
     #[gpui_kit::test]
     fn a_proxy_that_carries_nothing_says_so_on_the_row(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let (view, _runtime, _opener, tester) = view_with_tester(
+        let (view, _runtime, _opener, tester, _copier) = view_with_tester(
             cx,
             Arc::new(FakeVerifier::passing()),
             Arc::new(FakeProxyTester::with_outcome(Err(Fault::new(
                 FaultClass::Unreachable,
                 "no route to the upstream",
             )))),
+            Arc::new(FakeBrowserDataCopier::passing()),
             None,
             Arc::new(FakeOpener::working()),
             None,
@@ -3568,10 +3912,11 @@ mod tests {
     #[gpui_kit::test]
     fn a_proxy_already_being_tested_is_not_tested_twice(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let (view, _runtime, _opener, tester) = view_with_tester(
+        let (view, _runtime, _opener, tester, _copier) = view_with_tester(
             cx,
             Arc::new(FakeVerifier::passing()),
             Arc::new(FakeProxyTester::passing()),
+            Arc::new(FakeBrowserDataCopier::passing()),
             None,
             Arc::new(FakeOpener::working()),
             None,
@@ -3630,6 +3975,7 @@ mod tests {
                 view.drain_verifications();
                 view.drain_proxy_tests();
                 view.drain_open_results();
+                view.drain_browser_data();
                 cx.notify();
             });
             std::thread::sleep(Duration::from_millis(10));
@@ -5104,6 +5450,7 @@ mod tests {
                 Arc::new(FakeVerifier::passing()),
                 Arc::new(FakeProxyTester::passing()),
                 Arc::new(FakeOpener::working()),
+                Arc::new(FakeBrowserDataCopier::passing()),
             );
             view.boot(cx);
             view
@@ -5298,6 +5645,203 @@ mod tests {
             notice.message.contains("Type the path"),
             "{:?}",
             notice.message
+        );
+    }
+
+    /// Types into the Settings page's restore path field.
+    fn type_restore_path(
+        cx: &mut gpui_kit::VisualTestContext,
+        view: &gpui_kit::Entity<AppView>,
+        text: &str,
+    ) {
+        let field = view
+            .read_with(cx, |view, _| view.restore_input())
+            .expect("rendering the Settings page builds the restore field");
+        cx.update(|window, cx| {
+            field.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
+        settle(cx);
+    }
+
+    #[gpui_kit::test]
+    fn restoring_without_a_path_is_refused_in_the_banner(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        // The restore card sits below the import one; the same downward scroll
+        // brings it into view.
+        scroll_settings_to_the_import_card(cx);
+        cx.update(|window, cx| window.click("restore-run", cx));
+        settle(cx);
+
+        // An empty field is refused where it is, the same way an import is.
+        let notice = view.read_with(cx, |view, _| view.state().notice().cloned());
+        let notice = notice.expect("the refusal is shown");
+        assert!(notice.error, "{:?}", notice.message);
+        assert!(
+            notice.message.contains("Type the path"),
+            "{:?}",
+            notice.message
+        );
+    }
+
+    /// A populated installation is not replaced without being asked: the button
+    /// opens a confirmation, and only the confirmation runs the replacement.
+    #[gpui_kit::test]
+    fn restoring_over_a_populated_installation_asks_before_replacing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+        // The fixture seeds a core, so there is already something to replace.
+        seed_profile(cx, &view);
+
+        // A file to restore, written through the document the export writes.
+        let dir = std::env::temp_dir().join(format!("fp-ui-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("config.json");
+        let document = application::ConfigBackup::build(
+            application::ConfigSnapshot::default(),
+            application::Credentials::Excluded,
+            application::ExportOrigin {
+                exported_at: "2026-09-21T00:00:00Z".to_string(),
+                source_data_dir: dir.display().to_string(),
+            },
+        );
+        std::fs::write(&path, document.to_json().expect("serialise")).expect("write");
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        type_restore_path(cx, &view, path.to_string_lossy().as_ref());
+        scroll_settings_to_the_import_card(cx);
+        cx.update(|window, cx| window.click("restore-run", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("ok").is_some()),
+            "restoring a populated installation asks first"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().rows().len()),
+            1,
+            "nothing is replaced before the confirmation"
+        );
+
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        // The file held nothing, so the replacement took what was here away.
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().rows().len()),
+            0,
+            "the confirmed restore replaced the configuration"
+        );
+        let message = last_message(cx, &view);
+        assert!(message.contains("nothing was added"), "{message}");
+        assert!(message.contains("were replaced"), "{message}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same view, with the browser-data copier the test drives.
+    fn view_with_browser_data(
+        cx: &mut TestAppContext,
+        copier: Arc<FakeBrowserDataCopier>,
+    ) -> (
+        gpui_kit::Entity<AppView>,
+        Arc<FakeRuntime>,
+        Arc<FakeBrowserDataCopier>,
+    ) {
+        let (view, runtime, _opener, _tester, copier) = view_with_tester(
+            cx,
+            Arc::new(FakeVerifier::passing()),
+            Arc::new(FakeProxyTester::passing()),
+            copier,
+            None,
+            Arc::new(FakeOpener::working()),
+            None,
+        );
+        (view, runtime, copier)
+    }
+
+    /// A browser-data copy is hundreds of megabytes, so it is handed to a
+    /// worker; what the card has to get right is the job it is handed - the
+    /// direction, the directory and the profiles - and the sentence it reports.
+    #[gpui_kit::test]
+    fn a_browser_data_copy_from_the_window_asks_the_worker_and_says_what_it_did(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let copier = Arc::new(FakeBrowserDataCopier::passing());
+        let (view, _runtime, copier) = view_with_browser_data(cx, copier);
+        let cx = window(cx, &view);
+        seed_profile(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        let field = view
+            .read_with(cx, |view, _| view.browser_data_input())
+            .expect("the Settings page builds the browser-data field");
+        cx.update(|window, cx| {
+            field.update(cx, |state, cx| {
+                state.set_value("/backups/browser-data", window, cx)
+            });
+        });
+        settle(cx);
+
+        scroll_settings_to_the_import_card(cx);
+        cx.update(|window, cx| window.click("browser-data-out", cx));
+        wait_for_state(cx, &view, |state| {
+            state
+                .toasts()
+                .iter()
+                .any(|toast| toast.message.contains("Copied"))
+        });
+
+        // The worker was handed the direction and the directory the field held,
+        // and every profile on the list.
+        let jobs = copier.jobs();
+        assert_eq!(copier.calls(), 1);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].direction, Direction::ToBackup);
+        assert_eq!(jobs[0].directory, PathBuf::from("/backups/browser-data"));
+        assert_eq!(jobs[0].profiles.len(), 1);
+        assert!(jobs[0].running.is_empty());
+
+        let message = last_message(cx, &view);
+        assert!(message.contains("Copied the browser data"), "{message}");
+        assert!(message.contains("/backups/browser-data"), "{message}");
+    }
+
+    #[gpui_kit::test]
+    fn a_browser_data_copy_without_a_directory_is_refused_in_the_banner(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let copier = Arc::new(FakeBrowserDataCopier::passing());
+        let (view, _runtime, copier) = view_with_browser_data(cx, copier);
+        let cx = window(cx, &view);
+        seed_profile(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        scroll_settings_to_the_import_card(cx);
+        cx.update(|window, cx| window.click("browser-data-out", cx));
+        settle(cx);
+
+        let notice = view.read_with(cx, |view, _| view.state().notice().cloned());
+        let notice = notice.expect("the refusal is shown");
+        assert!(notice.error, "{:?}", notice.message);
+        assert!(
+            notice.message.contains("Type the directory"),
+            "{:?}",
+            notice.message
+        );
+        assert_eq!(
+            copier.calls(),
+            0,
+            "no worker is started without a directory"
         );
     }
 }

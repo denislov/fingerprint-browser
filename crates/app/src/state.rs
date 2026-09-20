@@ -5,13 +5,15 @@
 //! into it. Runtime state is never owned here: every read goes through
 //! [`RuntimeService::snapshot`], which is the documented reconciliation path.
 
+use crate::browser_data::BrowserDataJob;
 use crate::log_file::LogFile;
 use crate::proxy_tester::ProxyTestJob;
 use crate::settings::{SettingKey, SettingRow, Settings};
 use crate::verifier::{EgressJob, VerificationJob, VerificationReport};
 use application::{
-    AppError, CoreService, Credentials, DeleteMode, ExportOrigin, ExportReport, ImportReport,
-    NewProfile, NewProxy, ProfileService, ProxyService, RuntimeService,
+    AppError, BrowserDataReport, CoreService, Counts, Credentials, DeleteMode, Direction,
+    ExportOrigin, ExportReport, ImportNotes, ImportReport, NewProfile, NewProxy, ProfileService,
+    ProxyService, RestoreError, RestoreMode, RestoreReport, RuntimeService,
 };
 use domain::{
     BrowserCore, BrowserProfile, CoreId, ProfileId, ProxyId, ProxyOutbound, ProxyProfile,
@@ -649,6 +651,16 @@ pub struct AppState {
     /// chooses where its own output goes; an import does not, because a default
     /// file to read from would be a file the user never named.
     import_path: String,
+    /// Where the next configuration restore reads from, as the user typed it.
+    ///
+    /// Its own field rather than sharing the import's: the two are different
+    /// verbs with different consequences, and a path left over from an import
+    /// must not become a path a restore acts on by itself.
+    restore_path: String,
+    /// The backup directory for browser data, as the user typed it. Shared by
+    /// both directions, because it is one place: a copy out writes there and a
+    /// copy back in reads from it.
+    browser_data_path: String,
 }
 
 impl AppState {
@@ -746,6 +758,8 @@ impl AppState {
             // looking at a checkbox.
             export_includes_credentials: false,
             import_path: String::new(),
+            restore_path: String::new(),
+            browser_data_path: String::new(),
         }
     }
 
@@ -1398,6 +1412,186 @@ impl AppState {
             Err(message) => self.set_notice(Notice::error(message.clone())),
         }
         result
+    }
+
+    pub fn set_restore_path(&mut self, path: impl Into<String>) {
+        self.restore_path = path.into();
+    }
+
+    /// Where a restore would read from, or `None` when nothing was typed.
+    pub fn restore_source(&self) -> Option<PathBuf> {
+        let typed = self.restore_path.trim();
+        (!typed.is_empty()).then(|| PathBuf::from(typed))
+    }
+
+    /// Whether this installation holds no cores, proxies or profiles.
+    ///
+    /// The question a restore's precondition is made of, asked before the
+    /// window decides whether to confirm. A read failure is reported rather than
+    /// treated as "empty", because guessing here would be the difference between
+    /// asking and silently replacing.
+    pub fn is_configuration_empty(&self) -> Result<bool, AppError> {
+        Ok(
+            application::read_configuration(&*self.profiles, &*self.cores, &*self.proxies)?
+                .is_empty(),
+        )
+    }
+
+    /// The names of the profiles whose browsers are active right now.
+    ///
+    /// Read from freshly reconciled snapshots rather than from a cached row, so
+    /// the guard is against what is running at this moment. Restore and the
+    /// browser-data copy both refuse while this is non-empty: the first would
+    /// delete a row out from under a live process, the second would copy a
+    /// directory Chromium is writing.
+    fn active_profile_names(&mut self) -> Vec<String> {
+        self.refresh_runtime();
+        self.rows
+            .iter()
+            .filter(|row| row.state().is_active())
+            .map(|row| row.profile.name.clone())
+            .collect()
+    }
+
+    /// Makes this installation be the configuration backup at the typed path.
+    ///
+    /// The mode is the confirmation: [`RestoreMode::OnlyWhenEmpty`] refuses a
+    /// populated installation, and [`RestoreMode::Replace`] carries out the
+    /// replacement the window has already asked about. Running profiles block it
+    /// either way, because deleting the rows of live processes would leave
+    /// browsers this window can no longer stop.
+    ///
+    /// Runs on the calling thread for the same reason an import does - one small
+    /// file and a handful of rows - and reloads the rows afterwards, because a
+    /// list still showing what was replaced would contradict the sentence above
+    /// it.
+    pub fn restore_configuration(&mut self, mode: RestoreMode) -> Result<RestoreReport, String> {
+        let Some(source) = self.restore_source() else {
+            let message = "Type the path of a configuration backup to restore.".to_string();
+            self.set_notice(Notice::error(message.clone()));
+            return Err(message);
+        };
+
+        let running = self.active_profile_names();
+        if !running.is_empty() {
+            let message = format!(
+                "Stop these profiles before restoring, so their browsers are not deleted from under them: {}.",
+                running.join(", ")
+            );
+            self.set_notice(Notice::error(message.clone()));
+            return Err(message);
+        }
+
+        let data_dir = self.settings.data_dir().to_path_buf();
+        let result = application::read_config_backup(&source)
+            .map_err(|error| format!("The file could not be read. {error}"))
+            .and_then(|document| {
+                application::read_configuration(&*self.profiles, &*self.cores, &*self.proxies)
+                    .map_err(|error| format!("The configuration could not be read. {error}"))
+                    .and_then(|present| {
+                        let plan =
+                            application::plan_restore(&document, &present, &data_dir, mode)
+                                .map_err(|error| match error {
+                                    RestoreError::NotEmpty { present } => format!(
+                                        "This installation already holds {}. Restoring replaces it, so it has to be confirmed.",
+                                        counts_phrase(&present)
+                                    ),
+                                })?;
+                        application::apply_restore(
+                            plan,
+                            &present,
+                            &*self.cores,
+                            &*self.proxies,
+                            &*self.profiles,
+                        )
+                        .map_err(|error| format!("The configuration could not be written. {error}"))
+                    })
+            });
+
+        match &result {
+            Ok(report) => {
+                let summary = restore_summary(report, &source);
+                self.set_notice(if report.needs_attention() {
+                    Notice::error(summary)
+                } else {
+                    Notice::info(summary)
+                });
+                let _ = self.load();
+            }
+            Err(message) => self.set_notice(Notice::error(message.clone())),
+        }
+        result
+    }
+
+    pub fn set_browser_data_path(&mut self, path: impl Into<String>) {
+        self.browser_data_path = path.into();
+    }
+
+    /// The browser-data backup directory, or `None` when nothing was typed.
+    pub fn browser_data_directory(&self) -> Option<PathBuf> {
+        let typed = self.browser_data_path.trim();
+        (!typed.is_empty()).then(|| PathBuf::from(typed))
+    }
+
+    /// Builds one browser-data copy job, or says why it cannot be started.
+    ///
+    /// The run happens on a worker, so this only gathers: the profiles as
+    /// storage holds them, the identifiers that are active, and the directory.
+    /// Every refusal that can be made before a thread is spawned is made here -
+    /// an empty path, an empty installation, a running profile - so the worker is
+    /// never started for a copy that could not run.
+    pub fn browser_data_job(&mut self, direction: Direction) -> Result<BrowserDataJob, String> {
+        let directory = self
+            .browser_data_directory()
+            .ok_or_else(|| "Type the directory to keep browser data in.".to_string())?;
+
+        if self
+            .profiles
+            .list()
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        {
+            return Err("There are no profiles whose browser data could be copied.".to_string());
+        }
+
+        let running = self.active_profile_names();
+        if !running.is_empty() {
+            return Err(format!(
+                "Stop these profiles first, so their browser data is not copied while it is being written: {}.",
+                running.join(", ")
+            ));
+        }
+
+        let profiles = self.profiles.list().map_err(|error| error.to_string())?;
+        let active: Vec<ProfileId> = self
+            .rows
+            .iter()
+            .filter(|row| row.state().is_active())
+            .map(|row| row.profile.id)
+            .collect();
+
+        Ok(BrowserDataJob {
+            direction,
+            profiles,
+            running: active,
+            directory,
+        })
+    }
+
+    /// Reports the outcome of a browser-data copy the worker finished.
+    ///
+    /// A copy changes no stored row, so nothing is reloaded: the notice is the
+    /// whole of what the window has to do.
+    pub fn finish_browser_data(
+        &mut self,
+        direction: Direction,
+        outcome: Result<BrowserDataReport, String>,
+    ) {
+        let notice = match outcome {
+            Ok(report) => Notice::info(browser_data_summary(direction, &report)),
+            Err(reason) => Notice::error(reason),
+        };
+        self.set_notice(notice);
     }
 
     /// Every core with the profiles that use it, for the Browser Cores page.
@@ -2113,15 +2307,11 @@ pub(crate) mod testing {
 /// file and how many of each is the difference between a backup someone trusts
 /// and a backup someone assumes.
 fn export_summary(report: &ExportReport) -> String {
-    let counts = format!(
-        "{} core{}, {} prox{} and {} profile{}",
-        report.cores,
-        plural(report.cores, "", "s"),
-        report.proxies,
-        plural(report.proxies, "y", "ies"),
-        report.profiles,
-        plural(report.profiles, "", "s"),
-    );
+    let counts = counts_phrase(&Counts {
+        cores: report.cores,
+        proxies: report.proxies,
+        profiles: report.profiles,
+    });
     let where_it_went = format!("Wrote {counts} to {}.", report.path.display());
 
     match (report.credentials, report.credentials_removed) {
@@ -2143,38 +2333,27 @@ fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {
     if count == 1 { one } else { many }
 }
 
-/// What an import did, in one sentence.
-///
-/// Five things can be true at once and every one of them is something the reader
-/// has to hear: what arrived, what was left alone because the identifier was
-/// taken, what was skipped, what came in without its proxy, and whose browser
-/// data is about to start from this machine's directory instead of the recorded
-/// one. They are clauses of one sentence rather than separate sentences because
-/// they all describe the same event, and any one of them alone would be a
-/// misleading account of the rest.
-///
-/// Names are capped by [`listed`]: this is a line in a toast and a line in the
-/// activity log, not the place for a list of twenty profiles. Naming every one
-/// of them is the presentation question the design leaves open.
-fn import_summary(report: &ImportReport, source: &std::path::Path) -> String {
-    let base = if report.added.total() == 0 {
-        format!("Read {}: nothing was added.", source.display())
-    } else {
-        format!(
-            "Read {}: {} core{}, {} prox{} and {} profile{} were added.",
-            source.display(),
-            report.added.cores,
-            plural(report.added.cores, "", "s"),
-            report.added.proxies,
-            plural(report.added.proxies, "y", "ies"),
-            report.added.profiles,
-            plural(report.added.profiles, "", "s"),
-        )
-    };
+/// `1 core, 2 proxies and 3 profiles`, the phrase every report sentence opens
+/// with. One place, so an export, an import and a restore cannot count the same
+/// three lists three different ways.
+fn counts_phrase(counts: &Counts) -> String {
+    format!(
+        "{} core{}, {} prox{} and {} profile{}",
+        counts.cores,
+        plural(counts.cores, "", "s"),
+        counts.proxies,
+        plural(counts.proxies, "y", "ies"),
+        counts.profiles,
+        plural(counts.profiles, "", "s"),
+    )
+}
 
-    let notes = &report.notes;
+/// The clauses an import and a restore share, in the order they are read.
+///
+/// The two verbs report the same shortfalls because they write through the same
+/// rules; what differs is the sentence they are clauses of.
+fn note_clauses(notes: &ImportNotes) -> Vec<String> {
     let mut clauses: Vec<String> = Vec::new();
-
     if !notes.differing.is_empty() {
         clauses.push(format!(
             "These were already here and differ from the file, so nothing was overwritten: {}.",
@@ -2204,17 +2383,54 @@ fn import_summary(report: &ImportReport, source: &std::path::Path) -> String {
             listed(&moved)
         ));
     }
-    if !report.failed.is_empty() {
-        clauses.push(format!(
-            "Refused, and not stored: {}.",
-            listed(&report.failed)
-        ));
+    clauses
+}
+
+/// The clause for records the database refused, or nothing when none were.
+fn failed_clause(failed: &[String]) -> Option<String> {
+    (!failed.is_empty()).then(|| format!("Refused, and not stored: {}.", listed(failed)))
+}
+
+/// The clause that explains a file written without credentials, when one of its
+/// proxies landed.
+fn credential_clause(notes: &ImportNotes, proxies_landed: usize) -> Option<String> {
+    (notes.credentials_excluded && proxies_landed > 0).then(|| {
+        "The file was written without proxy credentials, so a proxy it restored may need them typed in again."
+            .to_string()
+    })
+}
+
+/// What an import did, in one sentence.
+///
+/// Five things can be true at once and every one of them is something the reader
+/// has to hear: what arrived, what was left alone because the identifier was
+/// taken, what was skipped, what came in without its proxy, and whose browser
+/// data is about to start from this machine's directory instead of the recorded
+/// one. They are clauses of one sentence rather than separate sentences because
+/// they all describe the same event, and any one of them alone would be a
+/// misleading account of the rest.
+///
+/// Names are capped by [`listed`]: this is a line in a toast and a line in the
+/// activity log, not the place for a list of twenty profiles. Naming every one
+/// of them is the presentation question the design leaves open.
+fn import_summary(report: &ImportReport, source: &std::path::Path) -> String {
+    let base = if report.added.total() == 0 {
+        format!("Read {}: nothing was added.", source.display())
+    } else {
+        format!(
+            "Read {}: {} were added.",
+            source.display(),
+            counts_phrase(&report.added)
+        )
+    };
+
+    let notes = &report.notes;
+    let mut clauses = note_clauses(notes);
+    if let Some(clause) = failed_clause(&report.failed) {
+        clauses.push(clause);
     }
-    if notes.credentials_excluded && report.added.proxies + notes.kept.proxies > 0 {
-        clauses.push(
-            "The file was written without proxy credentials, so a proxy it restored may need them typed in again."
-                .to_string(),
-        );
+    if let Some(clause) = credential_clause(notes, report.added.proxies + notes.kept.proxies) {
+        clauses.push(clause);
     }
 
     if clauses.is_empty() {
@@ -2222,6 +2438,118 @@ fn import_summary(report: &ImportReport, source: &std::path::Path) -> String {
     } else {
         format!("{base} {}", clauses.join(" "))
     }
+}
+
+/// What a restore did, in one sentence.
+///
+/// The import's sentence plus what was replaced: a restore that removed three
+/// and added three is a different event from one that added three to nothing,
+/// and the reader has to be able to tell which happened.
+fn restore_summary(report: &RestoreReport, source: &std::path::Path) -> String {
+    let mut sentence = if report.added.total() == 0 {
+        format!("Read {}: nothing was added.", source.display())
+    } else {
+        format!(
+            "Read {}: {} were added.",
+            source.display(),
+            counts_phrase(&report.added)
+        )
+    };
+    if report.removed.total() > 0 {
+        sentence = format!(
+            "{sentence} {} were replaced.",
+            counts_phrase(&report.removed)
+        );
+    }
+
+    let mut clauses = note_clauses(&report.notes);
+    if let Some(clause) = failed_clause(&report.failed) {
+        clauses.push(clause);
+    }
+    // The same clause an import adds, for the same event: a file written without
+    // credentials restores proxies that no longer carry them. A restore plans
+    // against an empty snapshot, so `kept` is normally zero - it is added in
+    // because a removal the database refused can leave a record for the import
+    // half to keep, and the sentence must not depend on that having worked.
+    if let Some(clause) = credential_clause(
+        &report.notes,
+        report.added.proxies + report.notes.kept.proxies,
+    ) {
+        clauses.push(clause);
+    }
+
+    if clauses.is_empty() {
+        sentence
+    } else {
+        format!("{sentence} {}", clauses.join(" "))
+    }
+}
+
+/// What a browser-data copy did, in one sentence.
+///
+/// The direction changes the preposition and nothing else, which is the point:
+/// the two are the same copy read from opposite ends. A profile that has no
+/// directory yet is named rather than counted, because "why is my profile not in
+/// the backup" is the question the sentence has to answer.
+///
+/// The empty sentence also turns on the direction, because the two directions
+/// are empty for opposite reasons: copying out finds nothing because no profile
+/// has run yet, and copying in finds nothing because the backup directory does
+/// not hold these profiles. Saying "no browser data in <backup>" for a copy out
+/// would blame the destination for what the source never had.
+fn browser_data_summary(direction: Direction, report: &BrowserDataReport) -> String {
+    let sentence = if report.copied.is_empty() {
+        match direction {
+            Direction::ToBackup => {
+                "Nothing was copied: no profile has browser data yet.".to_string()
+            }
+            Direction::FromBackup => format!(
+                "Nothing was copied: {} holds no browser data for these profiles.",
+                report.directory.display()
+            ),
+        }
+    } else {
+        let (verb, preposition) = match direction {
+            Direction::ToBackup => ("Copied", "to"),
+            Direction::FromBackup => ("Restored", "from"),
+        };
+        format!(
+            "{verb} the browser data of {} {} {preposition} {} ({}).",
+            report.copied.len(),
+            plural(report.copied.len(), "profile", "profiles"),
+            report.directory.display(),
+            human_bytes(report.bytes),
+        )
+    };
+
+    if report.skipped.is_empty() {
+        sentence
+    } else {
+        format!(
+            "{sentence} No browser data yet for: {}.",
+            listed(&report.skipped)
+        )
+    }
+}
+
+/// A byte count a person can read at a glance.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [(&str, u64); 4] = [
+        ("GiB", 1 << 30),
+        ("MiB", 1 << 20),
+        ("KiB", 1 << 10),
+        ("B", 1),
+    ];
+    for (unit, size) in UNITS {
+        if bytes >= size {
+            return if size == 1 {
+                format!("{bytes} B")
+            } else {
+                format!("{:.1} {unit}", bytes as f64 / size as f64)
+            };
+        }
+    }
+    "0 B".to_string()
 }
 
 /// Up to three names, then how many were left off.
@@ -4680,5 +5008,309 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("could not be read"));
         assert_eq!(arriving.state.rows().len(), 0);
+    }
+
+    #[test]
+    fn is_configuration_empty_says_what_is_here() {
+        let mut fixture = fixture();
+        assert!(fixture.state.is_configuration_empty().expect("read"));
+
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        fixture.state.create_profile("Work laptop").expect("create");
+
+        assert!(!fixture.state.is_configuration_empty().expect("read"));
+    }
+
+    /// A file to restore, produced the honest way: by exporting from a populated
+    /// installation. Nothing hand-builds what the export is the authority on.
+    fn backup_with_one_profile(scratch: &Scratch) -> PathBuf {
+        let mut source = fixture();
+        seed_core(&source);
+        source.state.load().expect("load");
+        source.state.create_profile("Work laptop").expect("create");
+        let backup = scratch.join("config.json");
+        write_backup_from(&mut source, &backup);
+        backup
+    }
+
+    #[test]
+    fn a_restore_onto_an_empty_installation_reads_the_file() {
+        let scratch = Scratch::new("restore-empty");
+        let backup = backup_with_one_profile(&scratch);
+
+        let data_dir = scratch.join("data");
+        let mut arriving = fixture_with_data_dir(&data_dir);
+        arriving
+            .state
+            .set_restore_path(backup.to_string_lossy().to_string());
+        let report = arriving
+            .state
+            .restore_configuration(RestoreMode::OnlyWhenEmpty)
+            .expect("restore");
+
+        assert_eq!(report.added.cores, 1);
+        assert_eq!(report.added.profiles, 1);
+        assert_eq!(report.removed.total(), 0, "there was nothing to replace");
+        assert!(
+            arriving.state.notice().is_none(),
+            "a clean restore is a toast, not a banner"
+        );
+        let message = last_message(&arriving);
+        assert!(message.contains("were added"), "{message}");
+        assert_eq!(arriving.state.rows().len(), 1);
+    }
+
+    /// The precondition, and the whole difference from an import: a populated
+    /// installation is never replaced without being asked.
+    #[test]
+    fn a_restore_without_confirmation_refuses_a_populated_installation() {
+        let scratch = Scratch::new("restore-refuses");
+        let backup = backup_with_one_profile(&scratch);
+
+        let mut arriving = fixture();
+        seed_core(&arriving);
+        arriving.state.load().expect("load");
+        let kept = arriving.state.create_profile("Keep me").expect("create");
+        arriving
+            .state
+            .set_restore_path(backup.to_string_lossy().to_string());
+
+        let error = arriving
+            .state
+            .restore_configuration(RestoreMode::OnlyWhenEmpty)
+            .expect_err("a populated installation cannot be quietly replaced");
+
+        assert!(error.contains("already holds"), "{error}");
+        assert!(
+            arriving.state.notice().is_some_and(|notice| notice.error),
+            "the refusal owns the banner"
+        );
+        assert_eq!(arriving.state.rows().len(), 1);
+        assert_eq!(arriving.state.rows()[0].profile.name, "Keep me");
+        assert!(
+            arriving.state.profile(kept).is_some(),
+            "nothing was removed"
+        );
+    }
+
+    #[test]
+    fn a_confirmed_restore_replaces_what_is_here() {
+        let scratch = Scratch::new("restore-replaces");
+        let backup = backup_with_one_profile(&scratch);
+
+        let mut arriving = fixture();
+        seed_core(&arriving);
+        arriving.state.load().expect("load");
+        arriving.state.create_profile("Replace me").expect("create");
+        arriving
+            .state
+            .set_restore_path(backup.to_string_lossy().to_string());
+
+        let report = arriving
+            .state
+            .restore_configuration(RestoreMode::Replace)
+            .expect("restore");
+
+        assert_eq!(
+            report.removed.total(),
+            2,
+            "the core and profile that were here"
+        );
+        assert_eq!(report.added.total(), 2);
+        assert_eq!(arriving.state.rows().len(), 1);
+        assert_eq!(arriving.state.rows()[0].profile.name, "Work laptop");
+    }
+
+    #[test]
+    fn a_restore_without_a_path_is_refused_where_the_field_is() {
+        let mut arriving = fixture();
+        let result = arriving
+            .state
+            .restore_configuration(RestoreMode::OnlyWhenEmpty);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Type the path"));
+        assert!(arriving.state.notice().is_some_and(|notice| notice.error));
+    }
+
+    /// Restoring would delete the row of a live browser, leaving a process the
+    /// window can no longer stop; the refusal names what to stop.
+    #[test]
+    fn a_restore_is_blocked_while_a_profile_is_running() {
+        let scratch = Scratch::new("restore-running");
+        let backup = backup_with_one_profile(&scratch);
+
+        let mut arriving = fixture();
+        running_profile(&mut arriving);
+        arriving
+            .state
+            .set_restore_path(backup.to_string_lossy().to_string());
+
+        let error = arriving
+            .state
+            .restore_configuration(RestoreMode::Replace)
+            .expect_err("a running profile blocks the restore");
+
+        assert!(error.contains("Stop these profiles"), "{error}");
+        assert!(error.contains("verify me"), "{error}");
+        assert_eq!(arriving.state.rows().len(), 1, "nothing was replaced");
+    }
+
+    /// The restore and import fields are separate: a path left over from one verb
+    /// must not become a path the other acts on.
+    #[test]
+    fn the_restore_and_import_paths_are_separate_fields() {
+        let mut fixture = fixture();
+        fixture.state.set_import_path("/tmp/import.json");
+        fixture.state.set_restore_path("/tmp/restore.json");
+
+        assert_eq!(
+            fixture.state.import_source(),
+            Some(PathBuf::from("/tmp/import.json"))
+        );
+        assert_eq!(
+            fixture.state.restore_source(),
+            Some(PathBuf::from("/tmp/restore.json"))
+        );
+    }
+
+    #[test]
+    fn a_browser_data_job_needs_a_directory_and_gathers_every_profile() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        fixture.state.create_profile("Work laptop").expect("create");
+
+        assert!(
+            fixture.state.browser_data_job(Direction::ToBackup).is_err(),
+            "a copy needs somewhere to go"
+        );
+
+        fixture.state.set_browser_data_path("  /backups/fp  ");
+        let job = fixture
+            .state
+            .browser_data_job(Direction::ToBackup)
+            .expect("a job");
+        assert_eq!(job.directory, PathBuf::from("/backups/fp"), "trimmed");
+        assert_eq!(job.profiles.len(), 1);
+        assert!(job.running.is_empty());
+        assert_eq!(job.direction, Direction::ToBackup);
+    }
+
+    #[test]
+    fn a_browser_data_job_is_refused_while_a_profile_is_running() {
+        let mut fixture = fixture();
+        running_profile(&mut fixture);
+        fixture.state.set_browser_data_path("/backups/fp");
+
+        let error = fixture
+            .state
+            .browser_data_job(Direction::ToBackup)
+            .expect_err("a running profile blocks the copy");
+
+        assert!(error.contains("Stop these profiles"), "{error}");
+        assert!(error.contains("verify me"), "{error}");
+    }
+
+    #[test]
+    fn a_browser_data_job_with_no_profiles_is_refused() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        fixture.state.set_browser_data_path("/backups/fp");
+
+        let error = fixture
+            .state
+            .browser_data_job(Direction::FromBackup)
+            .expect_err("nothing to copy");
+
+        assert!(error.contains("no profiles"), "{error}");
+    }
+
+    #[test]
+    fn finishing_a_browser_data_copy_says_what_happened() {
+        let mut fixture = fixture();
+        fixture.state.finish_browser_data(
+            Direction::ToBackup,
+            Ok(BrowserDataReport {
+                directory: PathBuf::from("/backups/fp"),
+                copied: vec!["Work laptop".to_string()],
+                skipped: vec!["Fresh".to_string()],
+                bytes: 2 * 1024 * 1024,
+            }),
+        );
+
+        let message = last_message(&fixture);
+        assert!(
+            message.contains("Copied the browser data of 1 profile"),
+            "{message}"
+        );
+        assert!(message.contains("/backups/fp"), "{message}");
+        assert!(message.contains("2.0 MiB"), "{message}");
+        assert!(
+            message.contains("Fresh"),
+            "a skipped profile is named: {message}"
+        );
+    }
+
+    #[test]
+    fn a_failed_browser_data_copy_is_a_banner() {
+        let mut fixture = fixture();
+        fixture.state.finish_browser_data(
+            Direction::FromBackup,
+            Err("Stop these profiles first.".to_string()),
+        );
+
+        let notice = fixture.state.notice().expect("a banner");
+        assert!(notice.error, "{}", notice.message);
+        assert!(
+            notice.message.contains("Stop these profiles"),
+            "{}",
+            notice.message
+        );
+    }
+
+    /// The two directions are empty for opposite reasons, and the sentence has to
+    /// say which one happened: blaming the backup directory for profiles that
+    /// have never been started would send the reader to the wrong place.
+    #[test]
+    fn an_empty_browser_data_copy_blames_the_end_that_was_empty() {
+        let empty = BrowserDataReport {
+            directory: PathBuf::from("/backups/fp"),
+            copied: Vec::new(),
+            skipped: vec!["Fresh".to_string()],
+            bytes: 0,
+        };
+
+        let out = browser_data_summary(Direction::ToBackup, &empty);
+        assert!(out.contains("no profile has browser data yet"), "{out}");
+        assert!(
+            !out.contains("/backups/fp"),
+            "the source is at fault: {out}"
+        );
+
+        let back = browser_data_summary(Direction::FromBackup, &empty);
+        assert!(back.contains("/backups/fp"), "{back}");
+        assert!(back.contains("holds no browser data"), "{back}");
+    }
+
+    /// A file written without credentials restores proxies that no longer carry
+    /// them. An import already says so; a restore that stayed silent would leave
+    /// the reader with a proxy that fails authentication and no explanation.
+    #[test]
+    fn a_restore_from_a_credential_free_file_says_a_proxy_may_need_them_again() {
+        let mut report = RestoreReport::default();
+        report.added.proxies = 1;
+        report.notes.credentials_excluded = true;
+
+        let sentence = restore_summary(&report, std::path::Path::new("/tmp/config.json"));
+
+        assert!(sentence.contains("were added"), "{sentence}");
+        assert!(sentence.contains("without proxy credentials"), "{sentence}");
+        assert!(
+            sentence.contains("may need them typed in again"),
+            "{sentence}"
+        );
     }
 }
