@@ -10,6 +10,7 @@
 //! [`ProxyProfile`] through [`ProxyEditor::build_outbound`], hands it to
 //! [`crate::state::AppState`], and shows the refusal without closing.
 
+use crate::text::Text;
 use crate::theme::{Palette, palette};
 use domain::{HttpOutbound, ProxyOutbound, ProxyProfile, Socks5Outbound, validate_proxy};
 use gpui_kit::component::form::*;
@@ -42,6 +43,8 @@ impl ProxyKind {
 
 /// An editable copy of one proxy.
 pub struct ProxyEditor {
+    /// The table the form's labels come from; see `ProfileEditor::text`.
+    text: &'static Text,
     /// The proxy this form started from, for the id and as the save target.
     base: Option<ProxyProfile>,
     name: Entity<InputState>,
@@ -56,11 +59,12 @@ pub struct ProxyEditor {
 
 impl ProxyEditor {
     /// A form for a new proxy: SOCKS5 on the conventional port, nothing else.
-    pub fn new(window: &mut Window, cx: &mut App) -> Self {
+    pub fn new(text: &'static Text, window: &mut Window, cx: &mut App) -> Self {
         let field = |value: &str, window: &mut Window, cx: &mut App| {
             cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()))
         };
         Self {
+            text,
             base: None,
             name: field("", window, cx),
             host: field("", window, cx),
@@ -73,7 +77,12 @@ impl ProxyEditor {
     }
 
     /// A form opened on a proxy that is already stored.
-    pub fn for_proxy(proxy: &ProxyProfile, window: &mut Window, cx: &mut App) -> Self {
+    pub fn for_proxy(
+        proxy: &ProxyProfile,
+        text: &'static Text,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
         let field = |value: &str, window: &mut Window, cx: &mut App| {
             cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()))
         };
@@ -83,6 +92,7 @@ impl ProxyEditor {
             _ => (None, None),
         };
         Self {
+            text,
             base: Some(proxy.clone()),
             name: field(&proxy.name, window, cx),
             host: field(proxy.outbound.host(), window, cx),
@@ -95,10 +105,11 @@ impl ProxyEditor {
     }
 
     pub fn title(&self) -> &'static str {
+        let t = self.text;
         if self.base.is_some() {
-            "Edit proxy"
+            t.edit_proxy_title
         } else {
-            "New proxy"
+            t.new_proxy_title
         }
     }
 
@@ -118,11 +129,12 @@ impl ProxyEditor {
 
     /// Only the part the protocol decides, which is all a new proxy draft needs.
     pub fn build_outbound(&self, cx: &App) -> Result<ProxyOutbound, String> {
+        let t = self.text;
         let host = self.text(&self.host, cx);
         let port: u16 = self
             .text(&self.port, cx)
             .parse()
-            .map_err(|_| "port must be a whole number between 1 and 65535".to_string())?;
+            .map_err(|_| t.port_whole_number.to_string())?;
         let username = self.optional(&self.username, cx);
         let password = self.optional(&self.password, cx);
 
@@ -254,23 +266,21 @@ fn kind_row(editor: Entity<ProxyEditor>, selected: ProxyKind, p: Palette) -> Div
 ///
 /// Split into short lines on purpose: the dialog is 640px wide, and a longer
 /// sentence is clipped at the edge instead of wrapping.
-fn unbuildable_note(p: Palette) -> Div {
+fn unbuildable_note(p: Palette, t: &Text) -> Div {
     div()
         .flex()
         .flex_col()
         .gap_1()
         .text_xs()
         .text_color(rgb(p.muted))
-        .child(format!(
-            "{} are not filled in here:",
-            ProxyKind::BY_LINK.join(", ")
-        ))
-        .child("a link carries the fields they need.")
-        .child("Use \"Import from link\" on the Proxies page.")
+        .child(t.link_only_protocols(&ProxyKind::BY_LINK.join(", ")))
+        .child(t.link_only_note)
+        .child(t.link_only_hint)
 }
 
 impl Render for ProxyEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.text;
         let p = palette(cx);
         let editor = cx.entity();
 
@@ -278,54 +288,54 @@ impl Render for ProxyEditor {
             .label_layout(Axis::Horizontal)
             .label_width(px(LABEL_WIDTH))
             .child(
-                Field::new().label("Name").child(
+                Field::new().label(t.name_field).child(
                     Input::new(&self.name)
                         .id("proxy-name")
-                        .aria_label("Proxy name"),
+                        .aria_label(t.proxy_name),
                 ),
             )
             .child(
-                Field::new().label("Protocol").child(
+                Field::new().label(t.protocol_field).child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_2()
                         .child(kind_row(editor.clone(), self.kind, p))
-                        .child(unbuildable_note(p)),
+                        .child(unbuildable_note(p, t)),
                 ),
             )
             .child(
                 Field::new()
-                    .label("Host")
-                    .description("A host name or address, without a scheme.")
+                    .label(t.host_field)
+                    .description(t.host_help)
                     .child(
                         Input::new(&self.host)
                             .id("proxy-host")
-                            .aria_label("Proxy host"),
+                            .aria_label(t.proxy_host),
                     ),
             )
             .child(
-                Field::new().label("Port").child(
+                Field::new().label(t.port_field).child(
                     Input::new(&self.port)
                         .id("proxy-port")
-                        .aria_label("Proxy port"),
+                        .aria_label(t.proxy_port),
                 ),
             )
             .child(
                 Field::new()
-                    .label("Username")
-                    .description("Both fields, or neither.")
+                    .label(t.username_field)
+                    .description(t.username_help)
                     .child(
                         Input::new(&self.username)
                             .id("proxy-username")
-                            .aria_label("Proxy username"),
+                            .aria_label(t.proxy_username),
                     ),
             )
             .child(
-                Field::new().label("Password").child(
+                Field::new().label(t.password_field).child(
                     Input::new(&self.password)
                         .id("proxy-password")
-                        .aria_label("Proxy password"),
+                        .aria_label(t.proxy_password),
                 ),
             );
 
@@ -355,6 +365,8 @@ impl Render for ProxyEditor {
 
 #[cfg(test)]
 mod tests {
+    use crate::text::en;
+
     // Explicit imports: a glob here pulls the whole gpui surface into the test
     // macro's expansion and makes it recurse.
     use super::{ProxyEditor, ProxyKind};
@@ -394,8 +406,8 @@ mod tests {
     ) -> (Entity<ProxyEditor>, &'a mut VisualTestContext) {
         let proxy = proxy.cloned();
         cx.add_window_view(move |window, cx| match &proxy {
-            Some(proxy) => ProxyEditor::for_proxy(proxy, window, cx),
-            None => ProxyEditor::new(window, cx),
+            Some(proxy) => ProxyEditor::for_proxy(proxy, en(), window, cx),
+            None => ProxyEditor::new(en(), window, cx),
         })
     }
 

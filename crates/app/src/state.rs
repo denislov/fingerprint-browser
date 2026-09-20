@@ -9,6 +9,7 @@ use crate::browser_data::BrowserDataJob;
 use crate::log_file::LogFile;
 use crate::proxy_tester::ProxyTestJob;
 use crate::settings::{SettingKey, SettingRow, Settings};
+use crate::text::{Lang, Text, text};
 use crate::theme::ThemeChoice;
 use crate::verifier::{EgressJob, VerificationJob, VerificationReport};
 use application::{
@@ -77,11 +78,11 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    pub fn label(self) -> &'static str {
+    pub fn label(self, t: &Text) -> &'static str {
         match self {
-            Self::Info => "info",
-            Self::Warning => "warning",
-            Self::Error => "error",
+            Self::Info => t.log_level_info,
+            Self::Warning => t.log_level_warning,
+            Self::Error => t.log_level_error,
         }
     }
 }
@@ -123,11 +124,11 @@ pub enum LogFilter {
 impl LogFilter {
     pub const ALL: [LogFilter; 3] = [Self::All, Self::Warnings, Self::Errors];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self, t: &Text) -> &'static str {
         match self {
-            Self::All => "All",
-            Self::Warnings => "Warnings",
-            Self::Errors => "Errors",
+            Self::All => t.log_filter_all,
+            Self::Warnings => t.log_filter_warnings,
+            Self::Errors => t.log_filter_errors,
         }
     }
 
@@ -140,11 +141,11 @@ impl LogFilter {
     }
 
     /// What the filter keeps, for the empty line that says what is hidden.
-    pub fn noun(self) -> &'static str {
+    pub fn noun(self, t: &Text) -> &'static str {
         match self {
-            Self::All => "anything",
-            Self::Warnings => "warning or error",
-            Self::Errors => "error",
+            Self::All => t.log_filter_noun_all,
+            Self::Warnings => t.log_filter_noun_warnings,
+            Self::Errors => t.log_filter_noun_errors,
         }
     }
 
@@ -174,11 +175,11 @@ pub enum DetailsTab {
 impl DetailsTab {
     pub const ALL: [DetailsTab; 3] = [Self::Details, Self::Args, Self::Log];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self, t: &Text) -> &'static str {
         match self {
-            Self::Details => "Details",
-            Self::Args => "Args",
-            Self::Log => "Log",
+            Self::Details => t.details_tab_details,
+            Self::Args => t.details_tab_args,
+            Self::Log => t.details_tab_log,
         }
     }
 
@@ -212,14 +213,14 @@ impl ProfileRow {
             .unwrap_or(RuntimeState::Stopped)
     }
 
-    pub fn state_label(&self) -> &'static str {
+    pub fn state_label(&self, t: &Text) -> &'static str {
         match self.state() {
-            RuntimeState::Stopped => "Stopped",
-            RuntimeState::Starting => "Starting",
-            RuntimeState::Running => "Running",
-            RuntimeState::Stopping => "Stopping",
-            RuntimeState::Failed { .. } => "Failed",
-            RuntimeState::Crashed { .. } => "Crashed",
+            RuntimeState::Stopped => t.state_stopped,
+            RuntimeState::Starting => t.state_starting,
+            RuntimeState::Running => t.state_running,
+            RuntimeState::Stopping => t.state_stopping,
+            RuntimeState::Failed { .. } => t.state_failed,
+            RuntimeState::Crashed { .. } => t.state_crashed,
         }
     }
 
@@ -354,15 +355,12 @@ impl Verification {
     }
 
     /// Short label for the profile row and the details panel.
-    pub fn label(&self) -> String {
+    pub fn label(&self, t: &Text) -> String {
         match self {
-            Self::Running => "verifying...".to_string(),
-            Self::Confirmed(_) => "fingerprint confirmed".to_string(),
-            Self::Disagreements(report) => match report.discrepancies.len() {
-                1 => "1 claim not confirmed".to_string(),
-                count => format!("{count} claims not confirmed"),
-            },
-            Self::Unreadable(_) => "fingerprint unreadable".to_string(),
+            Self::Running => t.verification_running.to_string(),
+            Self::Confirmed(_) => t.verification_short(None),
+            Self::Disagreements(report) => t.verification_short(Some(report.discrepancies.len())),
+            Self::Unreadable(_) => t.fingerprint_unreadable_short.to_string(),
         }
     }
 
@@ -422,29 +420,28 @@ impl ProxyTest {
     }
 
     /// Short label for the proxy row.
-    pub fn label(&self) -> String {
+    pub fn label(&self, t: &Text) -> String {
         match self {
-            Self::Running => "testing...".to_string(),
-            Self::Passed(reading) => format!("exit {}", reading.exit_ip),
-            Self::Failed(fault) => format!("no traffic ({})", fault.class.label()),
+            Self::Running => t.proxy_testing(),
+            Self::Passed(reading) => t.proxy_exit(&reading.exit_ip),
+            Self::Failed(fault) => t.proxy_no_traffic(&t.fault_class(fault.class)),
         }
     }
 
     /// How to read the result: which engine was probed, and how it went.
-    pub fn detail(&self) -> Option<String> {
+    pub fn detail(&self, t: &Text) -> Option<String> {
         match self {
             Self::Running => None,
-            Self::Passed(reading) => Some(format!(
-                "left from {} in {} ms, {}",
-                reading.exit_ip,
+            Self::Passed(reading) => Some(t.proxy_left_from(
+                &reading.exit_ip,
                 reading.elapsed.as_millis(),
                 if reading.live {
-                    "through the engine a running profile is using"
+                    t.engine_running_profile
                 } else {
-                    "through a temporary engine"
-                }
+                    t.engine_temporary
+                },
             )),
-            Self::Failed(fault) => Some(format!("no traffic reached the endpoint: {fault}")),
+            Self::Failed(fault) => Some(t.proxy_no_traffic_detail(&fault.to_string())),
         }
     }
 
@@ -485,11 +482,27 @@ pub enum Page {
 }
 
 impl Page {
-    pub fn label(self) -> &'static str {
+    pub fn label(self, t: &Text) -> &'static str {
+        match self {
+            Self::Profiles => t.nav_profiles,
+            Self::Proxies => t.nav_proxies,
+            Self::Cores => t.nav_cores,
+            Self::Log => t.nav_log,
+            Self::Settings => t.nav_settings,
+        }
+    }
+
+    /// The stable id the window and the tests use.
+    ///
+    /// Deliberately *not* the label: an element id that changes with the
+    /// language would break every test that names it, and every user's muscle
+    /// memory along with the automation built on top. These are the English
+    /// names, frozen.
+    pub fn id(self) -> &'static str {
         match self {
             Self::Profiles => "Profiles",
             Self::Proxies => "Proxies",
-            Self::Cores => "Browser Cores",
+            Self::Cores => "Cores",
             Self::Log => "Log",
             Self::Settings => "Settings",
         }
@@ -518,11 +531,10 @@ impl ProxyRow {
         !self.used_by.is_empty()
     }
 
-    pub fn usage_label(&self) -> String {
+    pub fn usage_label(&self, t: &Text) -> String {
         match self.used_by.len() {
-            0 => "not assigned".to_string(),
-            1 => format!("used by {}", self.used_by[0]),
-            count => format!("used by {count} profiles"),
+            0 => t.proxy_not_assigned.to_string(),
+            count => t.used_by(count, &self.used_by[0]),
         }
     }
 }
@@ -541,11 +553,10 @@ impl CoreRow {
         !self.used_by.is_empty()
     }
 
-    pub fn usage_label(&self) -> String {
+    pub fn usage_label(&self, t: &Text) -> String {
         match self.used_by.len() {
-            0 => "not used".to_string(),
-            1 => format!("used by {}", self.used_by[0]),
-            count => format!("used by {count} profiles"),
+            0 => t.proxy_not_used.to_string(),
+            count => t.used_by(count, &self.used_by[0]),
         }
     }
 
@@ -598,14 +609,14 @@ impl CoreChoice {
     /// A core still called what the binary and its major suggest (the name the
     /// Cores page generates) already carries the number, and repeating it would
     /// put "chrome 148 (Chrome 148)" in the window.
-    pub fn label(&self) -> String {
+    pub fn label(&self, t: &Text) -> String {
         let major = self.major.to_string();
         if self.major == 0 {
-            format!("{} (version unknown)", self.name)
+            t.core_choice_unknown_version(&self.name)
         } else if self.name.contains(&major) {
             self.name.clone()
         } else {
-            format!("{} (Chrome {})", self.name, major)
+            t.core_choice_major(&self.name, &major)
         }
     }
 }
@@ -639,7 +650,7 @@ pub struct AppState {
     log_file_error: Option<String>,
     /// Where the next configuration export writes, as the user typed it.
     ///
-    /// Empty means "wherever the default is", so the field can start empty and
+    /// Empty means `wherever the default is`, so the field can start empty and
     /// the path is resolved when it is used. That is also what keeps the
     /// default's timestamp current instead of frozen at the moment the window
     /// opened.
@@ -777,6 +788,7 @@ impl AppState {
     }
 
     fn load_rows(&mut self) -> Result<(), AppError> {
+        let t = self.text();
         let runtime = Arc::clone(&self.runtime);
         let cores: HashMap<CoreId, String> = self
             .cores
@@ -795,7 +807,7 @@ impl AppState {
                 let core_name = cores
                     .get(&profile.core_id)
                     .cloned()
-                    .unwrap_or_else(|| "(missing core)".to_string());
+                    .unwrap_or_else(|| t.core_missing_marker.to_string());
                 let proxy_name = profile.proxy_id.and_then(|id| proxies.get(&id).cloned());
                 let snapshot = runtime.snapshot(profile.id);
                 ProfileRow {
@@ -996,17 +1008,19 @@ impl AppState {
     /// A write that failed outranks the path: the file is there, but it is no
     /// longer being appended to.
     pub fn log_file_status(&self) -> Result<&std::path::Path, &str> {
+        let t = self.text();
         if let Some(error) = &self.log_file_error {
             return Err(error.as_str());
         }
         match &self.log_file {
             Some(file) => Ok(file.path()),
-            None => Err("no activity log is being kept"),
+            None => Err(t.no_activity_log),
         }
     }
 
     /// The name a line's profile is shown under.
     fn who(&self, profile_id: Option<ProfileId>) -> String {
+        let t = self.text();
         let Some(id) = profile_id else {
             return "app".to_string();
         };
@@ -1014,7 +1028,7 @@ impl AppState {
             .iter()
             .find(|row| row.profile.id == id)
             .map(|row| row.profile.name.clone())
-            .unwrap_or_else(|| "a removed profile".to_string())
+            .unwrap_or_else(|| t.a_removed_profile.to_string())
     }
 
     pub fn clear_log(&mut self) {
@@ -1027,6 +1041,7 @@ impl AppState {
     /// only place a crash, a warning or the pids a run got are ever written
     /// down; the snapshot keeps only the latest of each.
     pub fn record_event(&mut self, event: &RuntimeEvent) {
+        let t = self.text();
         let entry = match event {
             // Starting, stopping and a refused start are only visible as a
             // state change; running and stopped have their own event, and are
@@ -1035,38 +1050,31 @@ impl AppState {
                 RuntimeState::Starting => (LogLevel::Info, *profile_id, "starting".to_string()),
                 RuntimeState::Stopping => (LogLevel::Info, *profile_id, "stopping".to_string()),
                 RuntimeState::Failed { message } => {
-                    (LogLevel::Error, *profile_id, format!("failed: {message}"))
+                    (LogLevel::Error, *profile_id, t.log_failed(message))
                 }
                 RuntimeState::Running | RuntimeState::Stopped | RuntimeState::Crashed { .. } => {
                     return;
                 }
             },
-            RuntimeEvent::EffectiveLaunchArgs { profile_id, args } => (
-                LogLevel::Info,
-                *profile_id,
-                format!("launching with {} arguments", args.len()),
-            ),
+            RuntimeEvent::EffectiveLaunchArgs { profile_id, args } => {
+                (LogLevel::Info, *profile_id, t.log_launching(args.len()))
+            }
             RuntimeEvent::Started {
                 profile_id,
                 browser_pid,
                 xray_pid,
                 cdp_port,
                 socks_port,
-            } => {
-                let mut message =
-                    format!("browser started (pid {browser_pid}, cdp port {cdp_port}");
-                if let Some(port) = socks_port {
-                    message.push_str(&format!(", socks port {port}"));
-                }
-                if let Some(pid) = xray_pid {
-                    message.push_str(&format!(", xray pid {pid}"));
-                }
-                message.push(')');
-                (LogLevel::Info, *profile_id, message)
-            }
-            RuntimeEvent::Stopped { profile_id } => {
-                (LogLevel::Info, *profile_id, "browser stopped".to_string())
-            }
+            } => (
+                LogLevel::Info,
+                *profile_id,
+                t.log_browser_started(*browser_pid, *cdp_port, *socks_port, *xray_pid),
+            ),
+            RuntimeEvent::Stopped { profile_id } => (
+                LogLevel::Info,
+                *profile_id,
+                t.log_browser_stopped.to_string(),
+            ),
             RuntimeEvent::Crashed {
                 profile_id,
                 component,
@@ -1074,7 +1082,7 @@ impl AppState {
             } => (
                 LogLevel::Error,
                 *profile_id,
-                format!("{} crashed: {message}", component_label(*component)),
+                t.log_crashed(component_label(*component), message),
             ),
             RuntimeEvent::Warning {
                 profile_id,
@@ -1111,10 +1119,11 @@ impl AppState {
         let Some(entry) = self.log.last() else {
             return;
         };
+        let t = self.text();
         let line = format!(
             "{} {:<7} {}: {}\n",
             crate::log_file::timestamp(entry.at),
-            entry.level.label(),
+            entry.level.label(t),
             self.who(entry.profile_id),
             entry.message
         );
@@ -1129,18 +1138,17 @@ impl AppState {
     /// Says so once when the log cannot be written, and never recurses: the
     /// report is a toast, and a toast does not go through the log.
     fn report_log_failure(&mut self, error: String) {
+        let t = self.text();
         if self.log_file_error.is_none() {
             self.log_file_error = Some(error.clone());
-            self.toast(
-                ToastKind::Error,
-                format!("the activity log could not be written: {error}"),
-            );
+            self.toast(ToastKind::Error, t.log_write_failed(&error));
         }
     }
 
     /// Placeholder naming until the Profile Editor page exists.
     pub fn next_profile_name(&self) -> String {
-        format!("Profile {}", self.rows.len() + 1)
+        let t = self.text();
+        t.next_profile_name(self.rows.len() + 1)
     }
 
     /// The page the sidebar is showing.
@@ -1199,45 +1207,72 @@ impl AppState {
         name: &str,
         outbound: ProxyOutbound,
     ) -> Result<ProxyId, AppError> {
+        let t = self.text();
         let created = self.record(self.proxies.create(NewProxy {
             name: name.trim().to_string(),
             outbound,
         }))?;
         let id = created.id;
-        self.set_notice(Notice::info(format!("Created proxy {}", created.name)));
+        self.set_notice(Notice::info(t.proxy_created(&created.name)));
         Ok(id)
     }
 
     pub fn update_proxy(&mut self, proxy: ProxyProfile) -> Result<(), AppError> {
+        let t = self.text();
         self.record(self.proxies.update(proxy.clone()))?;
         // The old result was about the old upstream, and would read as a claim
         // about the new one.
         self.forget_proxy_test(proxy.id);
-        self.set_notice(Notice::info(format!(
-            "Saved {}. Running profiles keep the proxy they started with.",
-            proxy.name
-        )));
+        self.set_notice(Notice::info(t.proxy_saved(&proxy.name)));
         Ok(())
     }
 
     /// Removes a proxy. Refused while a profile still points at it, because the
     /// alternative is that profile quietly going direct.
     pub fn delete_proxy(&mut self, id: ProxyId) -> Result<(), AppError> {
+        let t = self.text();
         let name = self
             .proxy(id)
             .map(|proxy| proxy.name)
-            .unwrap_or_else(|| id.to_string());
+            .unwrap_or_else(|| t.a_removed_profile.to_string());
         self.record(self.proxies.delete(id))?;
         // Nothing points at this id any more, so a result kept for it could
         // only ever be shown against a different proxy.
         self.forget_proxy_test(id);
-        self.set_notice(Notice::info(format!("Deleted proxy {name}")));
+        self.set_notice(Notice::info(t.proxy_deleted(&name)));
         Ok(())
+    }
+
+    /// The table for the language in force.
+    pub fn text(&self) -> &'static Text {
+        text(self.settings.language())
     }
 
     /// Every setting with the value in force and where it came from.
     pub fn setting_rows(&self) -> Vec<SettingRow> {
-        self.settings.rows()
+        self.settings.rows(self.text())
+    }
+
+    /// The language the window is shown in.
+    pub fn language(&self) -> Lang {
+        self.settings.language()
+    }
+
+    /// Stores the chosen language. The caller repaints afterwards, because the
+    /// whole window's text changes; nothing else here is reloaded, since the
+    /// language is presentation and no row's value depends on it.
+    pub fn set_language(&mut self, lang: Lang) -> Result<(), AppError> {
+        let result = self.settings.set_language(lang).map_err(AppError::Conflict);
+        match &result {
+            Ok(()) => {
+                // The sentence is written in the language being switched *to*,
+                // which is the one the reader is about to be reading.
+                let t = text(lang);
+                self.set_notice(Notice::info(t.language_chosen(lang.label())));
+            }
+            Err(error) => self.set_notice(Notice::error(error.to_string())),
+        }
+        result
     }
 
     /// Stores an editable setting for the next start.
@@ -1248,17 +1283,9 @@ impl AppState {
     /// applies and does not is the trap this page exists to avoid.
     pub fn update_setting(&mut self, key: SettingKey, value: &str) -> Result<(), AppError> {
         let result = self.settings.set(key, value).map_err(AppError::Conflict);
+        let t = self.text();
         match &result {
-            Ok(()) => {
-                let when = match key.effect() {
-                    "now" => "now".to_string(),
-                    other => format!("at the {other}"),
-                };
-                self.set_notice(Notice::info(format!(
-                    "Saved {}. It takes effect {when}.",
-                    key.label()
-                )));
-            }
+            Ok(()) => self.set_notice(Notice::info(t.setting_saved(key.label(t), key.effect()))),
             Err(error) => {
                 self.set_notice(Notice::error(error.to_string()));
             }
@@ -1290,10 +1317,10 @@ impl AppState {
     pub fn set_theme(&mut self, choice: ThemeChoice) -> Result<(), AppError> {
         let result = self.settings.set_theme(choice).map_err(AppError::Conflict);
         match &result {
-            Ok(()) => self.set_notice(Notice::info(format!(
-                "Now showing the {} theme.",
-                choice.label().to_lowercase()
-            ))),
+            Ok(()) => self.set_notice(Notice::info(
+                self.text()
+                    .theme_chosen(&choice.label(self.text()).to_lowercase()),
+            )),
             Err(error) => self.set_notice(Notice::error(error.to_string())),
         }
         result
@@ -1346,6 +1373,7 @@ impl AppState {
     /// accident; a path typed on purpose is meant, and refusing it would break
     /// updating a backup kept at one path.
     pub fn export_configuration(&mut self) -> Result<ExportReport, String> {
+        let t = self.text();
         let credentials = if self.export_includes_credentials {
             Credentials::Included
         } else {
@@ -1358,14 +1386,14 @@ impl AppState {
         let destination = self.export_destination();
 
         let result = application::read_configuration(&*self.profiles, &*self.cores, &*self.proxies)
-            .map_err(|error| format!("The configuration could not be read. {error}"))
+            .map_err(|error| t.export_read_failed(&error.to_string()))
             .and_then(|snapshot| {
                 application::write_config_backup(snapshot, credentials, origin, &destination)
-                    .map_err(|error| format!("The backup could not be written. {error}"))
+                    .map_err(|error| t.export_write_failed(&error.to_string()))
             });
 
         match &result {
-            Ok(report) => self.set_notice(Notice::info(export_summary(report))),
+            Ok(report) => self.set_notice(Notice::info(export_summary(report, t))),
             Err(message) => self.set_notice(Notice::error(message.clone())),
         }
         result
@@ -1396,6 +1424,7 @@ impl AppState {
     /// The rows are reloaded afterwards, because a Profiles page still showing
     /// the list from before the import would contradict the sentence above it.
     pub fn import_configuration(&mut self) -> Result<ImportReport, String> {
+        let t = self.text();
         let Some(source) = self.import_source() else {
             let message = "Type the path of a configuration backup to import.".to_string();
             self.set_notice(Notice::error(message.clone()));
@@ -1404,10 +1433,10 @@ impl AppState {
         let data_dir = self.settings.data_dir().to_path_buf();
 
         let result = application::read_config_backup(&source)
-            .map_err(|error| format!("The file could not be read. {error}"))
+            .map_err(|error| t.file_read_failed(&error.to_string()))
             .and_then(|document| {
                 application::read_configuration(&*self.profiles, &*self.cores, &*self.proxies)
-                    .map_err(|error| format!("The configuration could not be read. {error}"))
+                    .map_err(|error| t.export_read_failed(&error.to_string()))
                     .and_then(|present| {
                         let plan = application::plan_import(&document, &present, &data_dir);
                         application::apply_import(
@@ -1416,13 +1445,13 @@ impl AppState {
                             &*self.proxies,
                             &*self.profiles,
                         )
-                        .map_err(|error| format!("The configuration could not be written. {error}"))
+                        .map_err(|error| t.config_write_failed(&error.to_string()))
                     })
             });
 
         match &result {
             Ok(report) => {
-                let summary = import_summary(report, &source);
+                let summary = import_summary(report, &source, t);
                 // An import that did less than the file asked for gets the
                 // banner, which stays until it is dismissed; one that did
                 // exactly what it asked gets a toast. That is what makes the
@@ -1491,37 +1520,37 @@ impl AppState {
     /// list still showing what was replaced would contradict the sentence above
     /// it.
     pub fn restore_configuration(&mut self, mode: RestoreMode) -> Result<RestoreReport, String> {
+        let t = self.text();
         let Some(source) = self.restore_source() else {
-            let message = "Type the path of a configuration backup to restore.".to_string();
+            let message = t.restore_needs_path.to_string();
             self.set_notice(Notice::error(message.clone()));
             return Err(message);
         };
 
         let running = self.active_profile_names();
         if !running.is_empty() {
-            let message = format!(
-                "Stop these profiles before restoring, so their browsers are not deleted from under them: {}.",
-                running.join(", ")
-            );
+            let message = t.restore_running(&running.join(", "));
             self.set_notice(Notice::error(message.clone()));
             return Err(message);
         }
 
         let data_dir = self.settings.data_dir().to_path_buf();
         let result = application::read_config_backup(&source)
-            .map_err(|error| format!("The file could not be read. {error}"))
+            .map_err(|error| t.file_read_failed(&error.to_string()))
             .and_then(|document| {
                 application::read_configuration(&*self.profiles, &*self.cores, &*self.proxies)
-                    .map_err(|error| format!("The configuration could not be read. {error}"))
+                    .map_err(|error| t.export_read_failed(&error.to_string()))
                     .and_then(|present| {
-                        let plan =
-                            application::plan_restore(&document, &present, &data_dir, mode)
-                                .map_err(|error| match error {
-                                    RestoreError::NotEmpty { present } => format!(
-                                        "This installation already holds {}. Restoring replaces it, so it has to be confirmed.",
-                                        counts_phrase(&present)
-                                    ),
-                                })?;
+                        let plan = application::plan_restore(&document, &present, &data_dir, mode)
+                            .map_err(|error| match error {
+                                RestoreError::NotEmpty { present } => {
+                                    t.restore_not_empty(&t.counts_phrase(
+                                        present.cores,
+                                        present.proxies,
+                                        present.profiles,
+                                    ))
+                                }
+                            })?;
                         application::apply_restore(
                             plan,
                             &present,
@@ -1529,13 +1558,13 @@ impl AppState {
                             &*self.proxies,
                             &*self.profiles,
                         )
-                        .map_err(|error| format!("The configuration could not be written. {error}"))
+                        .map_err(|error| t.config_write_failed(&error.to_string()))
                     })
             });
 
         match &result {
             Ok(report) => {
-                let summary = restore_summary(report, &source);
+                let summary = restore_summary(report, &source, t);
                 self.set_notice(if report.needs_attention() {
                     Notice::error(summary)
                 } else {
@@ -1566,6 +1595,7 @@ impl AppState {
     /// an empty path, an empty installation, a running profile - so the worker is
     /// never started for a copy that could not run.
     pub fn browser_data_job(&mut self, direction: Direction) -> Result<BrowserDataJob, String> {
+        let t = self.text();
         let directory = self
             .browser_data_directory()
             .ok_or_else(|| "Type the directory to keep browser data in.".to_string())?;
@@ -1581,10 +1611,7 @@ impl AppState {
 
         let running = self.active_profile_names();
         if !running.is_empty() {
-            return Err(format!(
-                "Stop these profiles first, so their browser data is not copied while it is being written: {}.",
-                running.join(", ")
-            ));
+            return Err(t.copy_running(&running.join(", ")));
         }
 
         let profiles = self.profiles.list().map_err(|error| error.to_string())?;
@@ -1612,8 +1639,9 @@ impl AppState {
         direction: Direction,
         outcome: Result<BrowserDataReport, String>,
     ) {
+        let t = self.text();
         let notice = match outcome {
-            Ok(report) => Notice::info(browser_data_summary(direction, &report)),
+            Ok(report) => Notice::info(browser_data_summary(direction, &report, t)),
             Err(reason) => Notice::error(reason),
         };
         self.set_notice(notice);
@@ -1640,21 +1668,25 @@ impl AppState {
 
     /// Registers a browser binary, reading its version rather than trusting one.
     pub fn add_core(&mut self, name: Option<String>, path: PathBuf) -> Result<CoreId, AppError> {
+        let t = self.text();
         let core = self.record(self.cores.add(name, path))?;
         let id = core.id;
-        self.set_notice(Notice::info(format!(
-            "Added {} ({}, major {})",
-            core.name, core.version, core.major
+        self.set_notice(Notice::info(t.core_added(
+            &core.name,
+            &core.version,
+            core.major,
         )));
         Ok(id)
     }
 
     /// Saves a core, re-reading the version when its executable changed.
     pub fn update_core(&mut self, core: BrowserCore) -> Result<(), AppError> {
+        let t = self.text();
         let saved = self.record(self.cores.update(core))?;
-        self.set_notice(Notice::info(format!(
-            "Saved {} ({}, major {})",
-            saved.name, saved.version, saved.major
+        self.set_notice(Notice::info(t.core_saved(
+            &saved.name,
+            &saved.version,
+            saved.major,
         )));
         // The rows carry display names that came from this core.
         self.load_rows()?;
@@ -1663,10 +1695,12 @@ impl AppState {
 
     /// Re-reads a core's version, for a binary that was replaced in place.
     pub fn redetect_core(&mut self, id: CoreId) -> Result<(), AppError> {
+        let t = self.text();
         let refreshed = self.record(self.cores.redetect(id))?;
-        self.set_notice(Notice::info(format!(
-            "{} is {} (major {})",
-            refreshed.name, refreshed.version, refreshed.major
+        self.set_notice(Notice::info(t.core_refreshed(
+            &refreshed.name,
+            &refreshed.version,
+            refreshed.major,
         )));
         self.load_rows()?;
         Ok(())
@@ -1674,12 +1708,13 @@ impl AppState {
 
     /// Removes a core. Refused while a profile still launches with it.
     pub fn delete_core(&mut self, id: CoreId) -> Result<(), AppError> {
+        let t = self.text();
         let name = self
             .core(id)
             .map(|core| core.name)
             .unwrap_or_else(|| id.to_string());
         self.record(self.cores.delete(id))?;
-        self.set_notice(Notice::info(format!("Deleted core {name}")));
+        self.set_notice(Notice::info(t.core_deleted(&name)));
         Ok(())
     }
 
@@ -1692,16 +1727,12 @@ impl AppState {
 
     #[cfg(test)]
     fn default_core_id(&self) -> Result<CoreId, AppError> {
+        let t = self.text();
         self.cores
             .list()?
             .first()
             .map(|core| core.id)
-            .ok_or_else(|| {
-                AppError::Conflict(
-                    "no browser core configured; set FP_BROWSER_CHROMIUM_BIN and restart"
-                        .to_string(),
-                )
-            })
+            .ok_or_else(|| AppError::Conflict(t.no_core_registered.to_string()))
     }
 
     /// The cores a profile can be put on, for the profile form.
@@ -1755,11 +1786,12 @@ impl AppState {
     /// the ones on the form. Only what the form does not ask about (id, data
     /// directory, start target) is left to the service.
     pub fn create_profile_from(&mut self, draft: NewProfile) -> Result<ProfileId, AppError> {
+        let t = self.text();
         let profile = self.record(self.profiles.create(draft))?;
         let id = profile.id;
         self.load()?;
         self.selected = Some(id);
-        self.set_notice(Notice::info(format!("Created {}", profile.name)));
+        self.set_notice(Notice::info(t.profile_created(&profile.name)));
         Ok(id)
     }
 
@@ -1795,7 +1827,8 @@ impl AppState {
 
     /// Copies a profile under a new name, id, seed and data directory.
     pub fn duplicate_profile(&mut self, id: ProfileId) -> Result<ProfileId, AppError> {
-        let name = format!("{} copy", self.next_profile_name());
+        let t = self.text();
+        let name = t.profile_copy_name(&self.next_profile_name());
         let duplicated = self.record(self.profiles.duplicate(id, name))?;
         self.load_rows()?;
         self.refresh_runtime();
@@ -1830,11 +1863,10 @@ impl AppState {
     /// be read out of a live browser, and while another verification is in
     /// flight for the same profile.
     pub fn begin_verification(&mut self, id: ProfileId) -> Result<VerificationJob, AppError> {
+        let t = self.text();
         let existing = self.verifications.get(&id);
         if existing.is_some_and(Verification::is_running) {
-            return Err(AppError::Other(format!(
-                "profile {id} is already being verified"
-            )));
+            return Err(AppError::Other(t.verification_busy(&id.to_string())));
         }
         let job = self.verification_job(id)?;
         self.verifications.insert(id, Verification::Running);
@@ -1847,6 +1879,7 @@ impl AppState {
         id: ProfileId,
         outcome: Result<VerificationReport, String>,
     ) {
+        let t = self.text();
         let verification = match outcome {
             Ok(report) if report.discrepancies.is_empty() => Verification::Confirmed(report),
             Ok(report) => Verification::Disagreements(report),
@@ -1856,33 +1889,20 @@ impl AppState {
         // in the history as well as on the row.
         match &verification {
             Verification::Confirmed(report) => {
-                self.append_log(LogLevel::Info, Some(id), confirmed_line(report));
-                self.toast(ToastKind::Success, "Fingerprint confirmed.");
+                self.append_log(LogLevel::Info, Some(id), confirmed_line(report, t));
+                self.toast(ToastKind::Success, t.fingerprint_confirmed_toast);
             }
             Verification::Disagreements(report) => {
-                let message = format!(
-                    "fingerprint read back with {} claim(s) not confirmed",
-                    report.discrepancies.len()
-                );
+                let message = t.verification_claims_toast(report.discrepancies.len());
                 self.toast(
                     ToastKind::Warning,
-                    format!(
-                        "{} claim(s) the browser did not reproduce; see Runtime Details",
-                        report.discrepancies.len()
-                    ),
+                    t.verification_claims_details(report.discrepancies.len()),
                 );
                 self.append_log(LogLevel::Warning, Some(id), message);
             }
             Verification::Unreadable(reason) => {
-                self.toast(
-                    ToastKind::Error,
-                    format!("Fingerprint could not be read: {reason}"),
-                );
-                self.append_log(
-                    LogLevel::Error,
-                    Some(id),
-                    format!("fingerprint could not be read: {reason}"),
-                );
+                self.toast(ToastKind::Error, t.fingerprint_read_failed(reason));
+                self.append_log(LogLevel::Error, Some(id), t.fingerprint_read_failed(reason));
             }
             Verification::Running => {}
         }
@@ -1900,28 +1920,25 @@ impl AppState {
     }
 
     fn verification_job(&mut self, id: ProfileId) -> Result<VerificationJob, AppError> {
+        let t = self.text();
         let row = self
             .rows
             .iter()
             .find(|row| row.profile.id == id)
-            .ok_or_else(|| AppError::Other(format!("profile {id} not found")))?;
-        let port = row.cdp_port().ok_or_else(|| {
-            AppError::Other("the browser must be running before it can be verified".to_string())
-        })?;
+            .ok_or_else(|| AppError::Other(t.profile_not_found(&id.to_string())))?;
+        let port = row
+            .cdp_port()
+            .ok_or_else(|| AppError::Other(t.verify_needs_browser()))?;
         let core = self
             .cores
             .get(row.profile.core_id)?
-            .ok_or_else(|| AppError::Other(format!("core {} not found", row.profile.core_id)))?;
+            .ok_or_else(|| AppError::Other(t.core_not_found(&row.profile.core_id.to_string())))?;
         // A core whose version was never read has no capability table, and
         // asking for one would be asking what the engine may claim. This is the
         // same refusal the launch path makes.
-        let capabilities = core.capabilities().ok_or_else(|| {
-            AppError::Conflict(format!(
-                "{} has no detected version, so there are no switches to check against; \
-                 give it a version before verifying",
-                core.name
-            ))
-        })?;
+        let capabilities = core
+            .capabilities()
+            .ok_or_else(|| AppError::Conflict(t.core_has_no_version(&core.name)))?;
         Ok(VerificationJob {
             profile_id: id,
             port,
@@ -1961,15 +1978,14 @@ impl AppState {
     /// Refused only while another test of the same proxy is in flight, which
     /// would start a second engine for an answer already on its way.
     pub fn begin_proxy_test(&mut self, id: ProxyId) -> Result<ProxyTestJob, AppError> {
+        let t = self.text();
         if self.proxy_tests.get(&id).is_some_and(ProxyTest::is_running) {
-            return Err(AppError::Other(format!(
-                "proxy {id} is already being tested"
-            )));
+            return Err(AppError::Other(t.proxy_test_busy(&id.to_string())));
         }
         let proxy = self
             .proxies
             .get(id)?
-            .ok_or_else(|| AppError::NotFound(format!("proxy {id}")))?;
+            .ok_or_else(|| AppError::NotFound(t.proxy_not_found(&id.to_string())))?;
         let job = ProxyTestJob {
             proxy_id: id,
             proxy,
@@ -1991,6 +2007,7 @@ impl AppState {
         live: bool,
         outcome: Result<Diagnosis, Fault>,
     ) {
+        let t = self.text();
         let test = match outcome {
             Ok(diagnosis) => ProxyTest::Passed(ProxyReading {
                 exit_ip: diagnosis.exit_ip,
@@ -2002,13 +2019,13 @@ impl AppState {
         let name = self
             .proxy(id)
             .map(|proxy| proxy.name)
-            .unwrap_or_else(|| id.to_string());
+            .unwrap_or_else(|| t.a_removed_profile.to_string());
 
         match &test {
             ProxyTest::Passed(reading) => {
                 self.toast(
                     ToastKind::Success,
-                    format!("{name}: traffic leaves from {}", reading.exit_ip),
+                    t.proxy_traffic_from(&name, &reading.exit_ip),
                 );
             }
             ProxyTest::Failed(fault) => {
@@ -2017,20 +2034,20 @@ impl AppState {
                 // this is the one moment the user is thinking about this proxy.
                 self.toast(
                     ToastKind::Error,
-                    format!("{name}: no traffic reached the endpoint. {fault}"),
+                    t.proxy_no_traffic_reached(&name, &fault.to_string()),
                 );
             }
             ProxyTest::Running => {}
         }
         // The path is the half of the answer the row cannot show, and the class
         // is what to act on. Both go in the record, which outlives the row.
-        if let Some(detail) = test.detail() {
+        if let Some(detail) = test.detail(self.text()) {
             let level = if test.fault().is_some() {
                 LogLevel::Error
             } else {
                 LogLevel::Info
             };
-            self.append_log(level, None, format!("proxy test: {name} - {detail}"));
+            self.append_log(level, None, t.proxy_test_log(&name, &detail));
         }
         self.proxy_tests.insert(id, test);
     }
@@ -2088,13 +2105,13 @@ impl AppState {
 /// it, and this is the half of the answer that says the traffic took the path
 /// the user intended. A reading that was not taken says so, because "confirmed"
 /// on its own would read as though the address had been checked too.
-fn confirmed_line(report: &VerificationReport) -> String {
-    let mut line = "fingerprint confirmed by reading the running browser".to_string();
+fn confirmed_line(report: &VerificationReport, t: &Text) -> String {
+    let mut line = t.egress_confirmed();
     if let Some(exit_ip) = &report.exit_ip {
-        line.push_str(&format!("; traffic left from {exit_ip}"));
+        line.push_str(&t.egress_left_from(exit_ip));
     }
     if let Some(reason) = &report.exit_unreadable {
-        line.push_str(&format!("; the exit address was not read: {reason}"));
+        line.push_str(&t.egress_unreadable(reason));
     }
     line
 }
@@ -2331,71 +2348,46 @@ pub(crate) mod testing {
 /// tells the reader that the file is not the whole configuration. Saying which
 /// file and how many of each is the difference between a backup someone trusts
 /// and a backup someone assumes.
-fn export_summary(report: &ExportReport) -> String {
-    let counts = counts_phrase(&Counts {
-        cores: report.cores,
-        proxies: report.proxies,
-        profiles: report.profiles,
-    });
-    let where_it_went = format!("Wrote {counts} to {}.", report.path.display());
+fn export_summary(report: &ExportReport, t: &Text) -> String {
+    let counts = counts_phrase(
+        &Counts {
+            cores: report.cores,
+            proxies: report.proxies,
+            profiles: report.profiles,
+        },
+        t,
+    );
+    let where_it_went = t.export_wrote(&counts, &report.path.display().to_string());
 
-    match (report.credentials, report.credentials_removed) {
-        (Credentials::Included, _) => {
-            format!("{where_it_went} The file carries the proxy credentials in plain text.")
-        }
-        (Credentials::Excluded, 0) => {
-            format!("{where_it_went} It had no proxy credentials to leave out.")
-        }
-        (Credentials::Excluded, removed) => format!(
-            "{where_it_went} {} prox{} had credentials, which were left out.",
-            removed,
-            plural(removed, "y", "ies"),
-        ),
-    }
-}
-
-fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {
-    if count == 1 { one } else { many }
+    let clause = match (report.credentials, report.credentials_removed) {
+        (Credentials::Included, _) => t.export_carries_credentials(),
+        (Credentials::Excluded, 0) => t.export_had_no_credentials(),
+        (Credentials::Excluded, removed) => t.export_left_out(removed),
+    };
+    t.join_sentences(&[where_it_went, clause])
 }
 
 /// `1 core, 2 proxies and 3 profiles`, the phrase every report sentence opens
 /// with. One place, so an export, an import and a restore cannot count the same
 /// three lists three different ways.
-fn counts_phrase(counts: &Counts) -> String {
-    format!(
-        "{} core{}, {} prox{} and {} profile{}",
-        counts.cores,
-        plural(counts.cores, "", "s"),
-        counts.proxies,
-        plural(counts.proxies, "y", "ies"),
-        counts.profiles,
-        plural(counts.profiles, "", "s"),
-    )
+fn counts_phrase(counts: &Counts, t: &Text) -> String {
+    t.counts_phrase(counts.cores, counts.proxies, counts.profiles)
 }
 
 /// The clauses an import and a restore share, in the order they are read.
 ///
 /// The two verbs report the same shortfalls because they write through the same
 /// rules; what differs is the sentence they are clauses of.
-fn note_clauses(notes: &ImportNotes) -> Vec<String> {
+fn note_clauses(notes: &ImportNotes, t: &Text) -> Vec<String> {
     let mut clauses: Vec<String> = Vec::new();
     if !notes.differing.is_empty() {
-        clauses.push(format!(
-            "These were already here and differ from the file, so nothing was overwritten: {}.",
-            listed(&notes.differing)
-        ));
+        clauses.push(t.notes_differing(&listed(&notes.differing, t)));
     }
     if !notes.missing_core.is_empty() {
-        clauses.push(format!(
-            "Skipped, because the core they name is not here: {}.",
-            listed(&notes.missing_core)
-        ));
+        clauses.push(t.notes_missing_core(&listed(&notes.missing_core, t)));
     }
     if !notes.missing_proxy.is_empty() {
-        clauses.push(format!(
-            "Imported with no proxy, because the proxy they name is not here: {}.",
-            listed(&notes.missing_proxy)
-        ));
+        clauses.push(t.notes_missing_proxy(&listed(&notes.missing_proxy, t)));
     }
     if !notes.repointed.is_empty() {
         let moved: Vec<String> = notes
@@ -2403,26 +2395,20 @@ fn note_clauses(notes: &ImportNotes) -> Vec<String> {
             .iter()
             .map(|moved| moved.profile.clone())
             .collect();
-        clauses.push(format!(
-            "Their browser data will use this machine's data directory, because the recorded one is not here: {}.",
-            listed(&moved)
-        ));
+        clauses.push(t.notes_repointed(&listed(&moved, t)));
     }
     clauses
 }
 
 /// The clause for records the database refused, or nothing when none were.
-fn failed_clause(failed: &[String]) -> Option<String> {
-    (!failed.is_empty()).then(|| format!("Refused, and not stored: {}.", listed(failed)))
+fn failed_clause(failed: &[String], t: &Text) -> Option<String> {
+    (!failed.is_empty()).then(|| t.refused_not_stored(&listed(failed, t)))
 }
 
 /// The clause that explains a file written without credentials, when one of its
 /// proxies landed.
-fn credential_clause(notes: &ImportNotes, proxies_landed: usize) -> Option<String> {
-    (notes.credentials_excluded && proxies_landed > 0).then(|| {
-        "The file was written without proxy credentials, so a proxy it restored may need them typed in again."
-            .to_string()
-    })
+fn credential_clause(notes: &ImportNotes, proxies_landed: usize, t: &Text) -> Option<String> {
+    (notes.credentials_excluded && proxies_landed > 0).then(|| t.credentials_left_out_clause())
 }
 
 /// What an import did, in one sentence.
@@ -2438,30 +2424,28 @@ fn credential_clause(notes: &ImportNotes, proxies_landed: usize) -> Option<Strin
 /// Names are capped by [`listed`]: this is a line in a toast and a line in the
 /// activity log, not the place for a list of twenty profiles. Naming every one
 /// of them is the presentation question the design leaves open.
-fn import_summary(report: &ImportReport, source: &std::path::Path) -> String {
+fn import_summary(report: &ImportReport, source: &std::path::Path, t: &Text) -> String {
+    let source = source.display().to_string();
     let base = if report.added.total() == 0 {
-        format!("Read {}: nothing was added.", source.display())
+        t.read_nothing_added(&source)
     } else {
-        format!(
-            "Read {}: {} were added.",
-            source.display(),
-            counts_phrase(&report.added)
-        )
+        t.read_added(&source, &counts_phrase(&report.added, t))
     };
 
     let notes = &report.notes;
-    let mut clauses = note_clauses(notes);
-    if let Some(clause) = failed_clause(&report.failed) {
+    let mut clauses = note_clauses(notes, t);
+    if let Some(clause) = failed_clause(&report.failed, t) {
         clauses.push(clause);
     }
-    if let Some(clause) = credential_clause(notes, report.added.proxies + notes.kept.proxies) {
+    if let Some(clause) = credential_clause(notes, report.added.proxies + notes.kept.proxies, t) {
         clauses.push(clause);
     }
 
     if clauses.is_empty() {
         base
     } else {
-        format!("{base} {}", clauses.join(" "))
+        clauses.insert(0, base);
+        t.join_sentences(&clauses)
     }
 }
 
@@ -2470,25 +2454,19 @@ fn import_summary(report: &ImportReport, source: &std::path::Path) -> String {
 /// The import's sentence plus what was replaced: a restore that removed three
 /// and added three is a different event from one that added three to nothing,
 /// and the reader has to be able to tell which happened.
-fn restore_summary(report: &RestoreReport, source: &std::path::Path) -> String {
-    let mut sentence = if report.added.total() == 0 {
-        format!("Read {}: nothing was added.", source.display())
+fn restore_summary(report: &RestoreReport, source: &std::path::Path, t: &Text) -> String {
+    let source = source.display().to_string();
+    let mut parts = vec![if report.added.total() == 0 {
+        t.read_nothing_added(&source)
     } else {
-        format!(
-            "Read {}: {} were added.",
-            source.display(),
-            counts_phrase(&report.added)
-        )
-    };
+        t.read_added(&source, &counts_phrase(&report.added, t))
+    }];
     if report.removed.total() > 0 {
-        sentence = format!(
-            "{sentence} {} were replaced.",
-            counts_phrase(&report.removed)
-        );
+        parts.push(t.replaced(&counts_phrase(&report.removed, t)));
     }
 
-    let mut clauses = note_clauses(&report.notes);
-    if let Some(clause) = failed_clause(&report.failed) {
+    let mut clauses = note_clauses(&report.notes, t);
+    if let Some(clause) = failed_clause(&report.failed, t) {
         clauses.push(clause);
     }
     // The same clause an import adds, for the same event: a file written without
@@ -2499,15 +2477,14 @@ fn restore_summary(report: &RestoreReport, source: &std::path::Path) -> String {
     if let Some(clause) = credential_clause(
         &report.notes,
         report.added.proxies + report.notes.kept.proxies,
+        t,
     ) {
         clauses.push(clause);
     }
 
-    if clauses.is_empty() {
-        sentence
-    } else {
-        format!("{sentence} {}", clauses.join(" "))
-    }
+    let mut all = parts;
+    all.extend(clauses);
+    t.join_sentences(&all)
 }
 
 /// What a browser-data copy did, in one sentence.
@@ -2522,38 +2499,26 @@ fn restore_summary(report: &RestoreReport, source: &std::path::Path) -> String {
 /// has run yet, and copying in finds nothing because the backup directory does
 /// not hold these profiles. Saying "no browser data in <backup>" for a copy out
 /// would blame the destination for what the source never had.
-fn browser_data_summary(direction: Direction, report: &BrowserDataReport) -> String {
+fn browser_data_summary(direction: Direction, report: &BrowserDataReport, t: &Text) -> String {
+    let directory = report.directory.display().to_string();
     let sentence = if report.copied.is_empty() {
         match direction {
-            Direction::ToBackup => {
-                "Nothing was copied: no profile has browser data yet.".to_string()
-            }
-            Direction::FromBackup => format!(
-                "Nothing was copied: {} holds no browser data for these profiles.",
-                report.directory.display()
-            ),
+            Direction::ToBackup => t.copy_nothing_out(),
+            Direction::FromBackup => t.copy_nothing_in(&directory),
         }
     } else {
-        let (verb, preposition) = match direction {
-            Direction::ToBackup => ("Copied", "to"),
-            Direction::FromBackup => ("Restored", "from"),
-        };
-        format!(
-            "{verb} the browser data of {} {} {preposition} {} ({}).",
+        t.copy_copied(
+            direction == Direction::ToBackup,
             report.copied.len(),
-            plural(report.copied.len(), "profile", "profiles"),
-            report.directory.display(),
-            human_bytes(report.bytes),
+            &directory,
+            &human_bytes(report.bytes),
         )
     };
 
     if report.skipped.is_empty() {
         sentence
     } else {
-        format!(
-            "{sentence} No browser data yet for: {}.",
-            listed(&report.skipped)
-        )
+        t.join_sentences(&[sentence, t.copy_skipped(&listed(&report.skipped, t))])
     }
 }
 
@@ -2581,21 +2546,19 @@ fn human_bytes(bytes: u64) -> String {
 ///
 /// A count rather than silence, so a reader knows the sentence is a summary
 /// rather than the whole of it.
-fn listed(names: &[String]) -> String {
+fn listed(names: &[String], t: &Text) -> String {
     const SHOWN: usize = 3;
     if names.len() <= SHOWN {
         names.join(", ")
     } else {
-        format!(
-            "{}, and {} more",
-            names[..SHOWN].join(", "),
-            names.len() - SHOWN
-        )
+        t.listed_more(&names[..SHOWN].join(", "), names.len() - SHOWN)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::text::en;
+
     use super::*;
     use crate::state::testing::{CoreBinary, FakeRuntime, core, core_service};
     use application::{DefaultProfileService, DefaultProxyService};
@@ -2966,6 +2929,50 @@ mod tests {
         })
     }
 
+    /// A switch reaches the words the window *writes* afterwards, not only the
+    /// ones it looks up while rendering: a notice and a log line are built the
+    /// moment the event happens, so they have to be built in the language in
+    /// force then - and the file has to agree with the window, because the log
+    /// outlives it.
+    #[test]
+    fn switching_the_language_reaches_what_the_window_writes_next() {
+        let dir = std::env::temp_dir().join(format!("fp-app-language-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        // The log file is handed in rather than opened by the fixture, so the
+        // test can read the bytes the window wrote.
+        let log = crate::log_file::LogFile::open(&dir.join("logs")).expect("log file");
+        let mut fixture = fixture_full(&dir.join("config.json"), None, Some(log), None);
+
+        fixture
+            .state
+            .set_language(Lang::Zh)
+            .expect("the choice is stored");
+        assert_eq!(fixture.state.language(), Lang::Zh);
+
+        fixture
+            .state
+            .set_theme(ThemeChoice::Light)
+            .expect("the window repaints");
+        let toast = fixture
+            .state
+            .toasts()
+            .last()
+            .expect("a toast")
+            .message
+            .clone();
+        assert!(toast.contains("主题"), "{toast}");
+
+        fixture
+            .state
+            .append_log(LogLevel::Warning, None, "a warning".to_string());
+        let line = std::fs::read_to_string(dir.join("logs").join("activity.log"))
+            .expect("the line reached the file");
+        assert!(line.contains("警告"), "{line}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_created_proxy_is_listed_and_stored() {
         let mut fixture = fixture();
@@ -2978,7 +2985,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].proxy.name, "Office");
         assert_eq!(rows[0].endpoint(), "socks5://10.0.0.1:1080");
-        assert_eq!(rows[0].usage_label(), "not assigned");
+        assert_eq!(rows[0].usage_label(en()), "not assigned");
         assert!(fixture.proxies.get(id).expect("stored").is_some());
     }
 
@@ -3033,7 +3040,7 @@ mod tests {
         );
         let rows = fixture.state.proxy_rows().expect("rows");
         assert_eq!(rows[0].used_by, vec!["Proxied".to_string()]);
-        assert_eq!(rows[0].usage_label(), "used by Proxied");
+        assert_eq!(rows[0].usage_label(en()), "used by Proxied");
         assert!(rows[0].is_used());
         assert_eq!(
             fixture
@@ -3155,7 +3162,7 @@ mod tests {
         assert_eq!(rows[0].core.version, "Chromium 148.0.7778.215");
         assert_eq!(rows[0].core.major, 148);
         assert!(rows[0].present, "the binary is on disk");
-        assert_eq!(rows[0].usage_label(), "not used");
+        assert_eq!(rows[0].usage_label(en()), "not used");
         assert_eq!(
             rows[0].generation_label().as_deref(),
             Some("Chrome 144+ · spoofing exclusions honoured")
@@ -3311,9 +3318,9 @@ mod tests {
             .find(|row| row.key == SettingKey::DataDir)
             .expect("the data directory row");
         assert_eq!(data_dir.source, crate::settings::Source::Default);
-        assert_eq!(data_dir.source_label(), "from the default");
+        assert_eq!(data_dir.source_label(en()), "from the default");
         assert!(data_dir.key.editable());
-        assert_eq!(data_dir.key.effect(), "next start");
+        assert_eq!(data_dir.key.effect().label(en()), "next start");
 
         let chromium = rows
             .iter()
@@ -3333,7 +3340,7 @@ mod tests {
             "the endpoint a proxy test asks is the user's to choose"
         );
         assert_eq!(
-            endpoint.key.effect(),
+            endpoint.key.effect().label(en()),
             "now",
             "a test asks whatever the endpoint is at the time, not what it was at startup"
         );
@@ -3613,7 +3620,7 @@ mod tests {
 
         let verification = fixture.state.verification(id).expect("recorded");
 
-        assert_eq!(verification.label(), "1 claim not confirmed");
+        assert_eq!(verification.label(en()), "1 claim not confirmed");
         assert_eq!(
             verification.report().and_then(|report| report.exit_label()),
             Some("traffic left from 198.51.100.9".to_string()),
@@ -3698,7 +3705,7 @@ mod tests {
             recorded.disagreements(),
             std::slice::from_ref(&disagreement)
         );
-        assert_eq!(recorded.label(), "1 claim not confirmed");
+        assert_eq!(recorded.label(en()), "1 claim not confirmed");
 
         fixture
             .state
@@ -3894,7 +3901,7 @@ mod tests {
         assert_eq!(reading.exit_ip, "198.51.100.9");
         assert_eq!(reading.elapsed, Duration::from_millis(431));
         assert!(reading.live, "the request went through the running engine");
-        assert_eq!(test.label(), "exit 198.51.100.9");
+        assert_eq!(test.label(en()), "exit 198.51.100.9");
         assert!(test.fault().is_none());
     }
 
@@ -3928,9 +3935,9 @@ mod tests {
         let fault = test.fault().expect("the fault");
         assert_eq!(fault.class, FaultClass::Auth);
         assert!(fault.detail.contains("credentials"), "{fault}");
-        assert_eq!(test.label(), "no traffic (authentication)");
+        assert_eq!(test.label(en()), "no traffic (authentication)");
         assert!(
-            test.detail()
+            test.detail(en())
                 .expect("a detail line")
                 .contains("no traffic reached the endpoint"),
             "the row and the log both have to say nothing arrived"
@@ -4108,7 +4115,7 @@ mod tests {
         assert_eq!(row.profile.name, "Primary");
         assert_eq!(row.profile.id, id);
         assert_eq!(row.state(), RuntimeState::Stopped);
-        assert_eq!(row.state_label(), "Stopped");
+        assert_eq!(row.state_label(en()), "Stopped");
         assert_eq!(row.core_name, "Test Core 144");
         assert_eq!(fixture.state.selected_id(), Some(id));
         assert!(row.can_start());
@@ -4188,7 +4195,7 @@ mod tests {
         fixture.state.refresh_runtime();
 
         let row = fixture.state.selected().expect("selected row");
-        assert_eq!(row.state_label(), "Crashed");
+        assert_eq!(row.state_label(en()), "Crashed");
         assert_eq!(row.state_message(), Some("browser exited"));
         assert!(row.can_start());
     }
@@ -4352,7 +4359,7 @@ mod tests {
             .state
             .log_entries()
             .iter()
-            .map(|entry| (entry.level.label(), entry.message.clone()))
+            .map(|entry| (entry.level.label(en()), entry.message.clone()))
             .collect();
         assert_eq!(
             messages,
@@ -4524,7 +4531,7 @@ mod tests {
             .state
             .log_rows()
             .iter()
-            .map(|row| row.level.label())
+            .map(|row| row.level.label(en()))
             .collect();
         assert!(!warnings.contains(&"info"), "{warnings:?}");
         assert!(
@@ -5333,14 +5340,14 @@ mod tests {
             bytes: 0,
         };
 
-        let out = browser_data_summary(Direction::ToBackup, &empty);
+        let out = browser_data_summary(Direction::ToBackup, &empty, en());
         assert!(out.contains("no profile has browser data yet"), "{out}");
         assert!(
             !out.contains("/backups/fp"),
             "the source is at fault: {out}"
         );
 
-        let back = browser_data_summary(Direction::FromBackup, &empty);
+        let back = browser_data_summary(Direction::FromBackup, &empty, en());
         assert!(back.contains("/backups/fp"), "{back}");
         assert!(back.contains("holds no browser data"), "{back}");
     }
@@ -5354,7 +5361,7 @@ mod tests {
         report.added.proxies = 1;
         report.notes.credentials_excluded = true;
 
-        let sentence = restore_summary(&report, std::path::Path::new("/tmp/config.json"));
+        let sentence = restore_summary(&report, std::path::Path::new("/tmp/config.json"), en());
 
         assert!(sentence.contains("were added"), "{sentence}");
         assert!(sentence.contains("without proxy credentials"), "{sentence}");

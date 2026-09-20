@@ -13,6 +13,7 @@
 //! is `Copy`, so a helper that has no context of its own can take one by value
 //! rather than reaching for a global.
 
+use crate::text::Text;
 use gpui_kit::App;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::theme::ThemeMode;
@@ -50,11 +51,11 @@ impl ThemeChoice {
         }
     }
 
-    /// What the switch calls it.
-    pub fn label(self) -> &'static str {
+    /// What the switch calls it, in the language the window is speaking.
+    pub fn label(self, t: &Text) -> &'static str {
         match self {
-            Self::Dark => "Dark",
-            Self::Light => "Light",
+            Self::Dark => t.theme_dark,
+            Self::Light => t.theme_light,
         }
     }
 

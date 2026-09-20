@@ -19,6 +19,7 @@
 //! a typo cannot cost the user the settings it still holds.
 
 use crate::paths;
+use crate::text::{Lang, Text, text};
 use crate::theme::ThemeChoice;
 use std::path::{Path, PathBuf};
 
@@ -90,15 +91,15 @@ impl SettingKey {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self, t: &Text) -> &'static str {
         match self {
-            Self::DataDir => "Data directory",
-            Self::XrayExecutable => "Xray executable",
-            Self::EchoUrl => "Proxy test endpoint",
-            Self::ChromiumBin => "Chromium binary",
-            Self::ChromiumMajor => "Chromium major override",
-            Self::ConfigFile => "Config file",
-            Self::RuntimeDir => "Runtime directory",
+            Self::DataDir => t.setting_data_dir,
+            Self::XrayExecutable => t.setting_xray_executable,
+            Self::EchoUrl => t.setting_echo_url,
+            Self::ChromiumBin => t.setting_chromium_bin,
+            Self::ChromiumMajor => t.setting_chromium_major,
+            Self::ConfigFile => t.setting_config_file,
+            Self::RuntimeDir => t.setting_runtime_dir,
         }
     }
 
@@ -108,12 +109,39 @@ impl SettingKey {
     }
 
     /// When a change takes effect.
-    pub fn effect(self) -> &'static str {
+    ///
+    /// An [`Effect`] rather than a phrase: the window compares this value (to
+    /// decide what a row says, and what saving reports) and only then turns it
+    /// into words. Comparing translated text would make the behaviour of the
+    /// program depend on the language it is being read in.
+    pub fn effect(self) -> Effect {
         match self {
-            Self::DataDir => "next start",
-            Self::XrayExecutable => "next start",
-            Self::RuntimeDir => "derived from the data directory",
-            _ => "now",
+            Self::DataDir => Effect::NextStart,
+            Self::XrayExecutable => Effect::NextStart,
+            Self::RuntimeDir => Effect::Derived,
+            _ => Effect::Now,
+        }
+    }
+}
+
+/// When a setting's change takes effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    /// The row and the dialog still describe a future start.
+    NextStart,
+    /// Read when the action happens, so the change is live.
+    Now,
+    /// Not chosen anywhere: computed from another setting.
+    Derived,
+}
+
+impl Effect {
+    /// The short form beside the row.
+    pub fn label(self, t: &Text) -> &'static str {
+        match self {
+            Self::Now => t.effect_now,
+            Self::NextStart => t.effect_next_start,
+            Self::Derived => t.effect_derived,
         }
     }
 }
@@ -129,12 +157,12 @@ pub enum Source {
 }
 
 impl Source {
-    pub fn label(self) -> &'static str {
+    pub fn label(self, t: &Text) -> &'static str {
         match self {
-            Self::Environment => "environment",
-            Self::ConfigFile => "config file",
-            Self::Default => "default",
-            Self::Derived => "derived from the data directory",
+            Self::Environment => t.source_environment,
+            Self::ConfigFile => t.source_config_file,
+            Self::Default => t.source_default,
+            Self::Derived => t.source_derived,
         }
     }
 }
@@ -155,19 +183,17 @@ pub struct SettingRow {
 
 impl SettingRow {
     /// `set by FP_BROWSER_DATA_DIR`, `from the config file`, `default`.
-    pub fn source_label(&self) -> String {
+    pub fn source_label(&self, t: &Text) -> String {
         match (self.source, self.env) {
-            (Source::Environment, Some(env)) => format!("set by {env}"),
-            (Source::Derived, _) => self.source.label().to_string(),
-            _ => format!("from the {}", self.source.label()),
+            (Source::Environment, Some(env)) => t.source_set_by_env(env),
+            (Source::Derived, _) => self.source.label(t).to_string(),
+            _ => t.source_from(self.source.label(t)),
         }
     }
 
     /// What the window says about a stored value the environment is winning.
-    pub fn shadowed_label(&self) -> Option<String> {
-        self.shadowed
-            .as_ref()
-            .map(|value| format!("the config file holds {value}, which this overrides"))
+    pub fn shadowed_label(&self, t: &Text) -> Option<String> {
+        self.shadowed.as_ref().map(|value| t.source_shadowed(value))
     }
 }
 
@@ -181,6 +207,8 @@ struct Stored {
     /// The chosen appearance, as a name. Absent means the default, which is why
     /// a config file written before the switch existed still reads.
     theme: Option<String>,
+    /// The chosen language, the same way.
+    lang: Option<String>,
 }
 
 /// The environment, read once so a test can supply its own.
@@ -246,6 +274,7 @@ pub struct Settings {
     xray_executable: PathBuf,
     echo_url: String,
     theme: ThemeChoice,
+    lang: Lang,
 }
 
 impl Settings {
@@ -282,13 +311,13 @@ impl Settings {
         // No environment override: the appearance is a standing choice about
         // what the user is looking at, not about what this process does.
         let theme = ThemeChoice::from_code(stored.theme.as_deref().unwrap_or(""));
+        // Resolved before the notice below, which is written in it: a config
+        // file that failed to parse still says which language to complain in.
+        let lang = Lang::from_code(stored.lang.as_deref().unwrap_or(""));
 
-        let notice = config_error.as_ref().map(|error| {
-            (
-                format!("{error}; using defaults, and settings cannot be saved until it is fixed"),
-                true,
-            )
-        });
+        let notice = config_error
+            .as_ref()
+            .map(|error| (text(lang).settings_unreadable(error), true));
 
         let settings = Self {
             config_path,
@@ -299,6 +328,7 @@ impl Settings {
             xray_executable,
             echo_url,
             theme,
+            lang,
         };
         (settings, notice)
     }
@@ -329,10 +359,9 @@ impl Settings {
     /// would lose the values it still holds in exchange for a colour.
     pub fn set_theme(&mut self, choice: ThemeChoice) -> Result<(), String> {
         if let Some(error) = &self.config_error {
-            return Err(format!(
-                "{} cannot be written while the config file is unreadable: {error}",
-                self.config_path.display()
-            ));
+            return Err(self
+                .text()
+                .settings_cannot_write(&self.config_path.display().to_string(), error));
         }
         let mut stored = self.stored.clone();
         stored.theme = Some(choice.code().to_string());
@@ -342,18 +371,46 @@ impl Settings {
         Ok(())
     }
 
+    /// The language the window is shown in.
+    pub fn language(&self) -> Lang {
+        self.lang
+    }
+
+    /// The table for the language in force.
+    pub fn text(&self) -> &'static Text {
+        text(self.lang)
+    }
+
+    /// Stores the chosen language.
+    ///
+    /// Refused while the config file is unreadable, exactly like the appearance
+    /// and for the same reason: saving rewrites the whole file.
+    pub fn set_language(&mut self, lang: Lang) -> Result<(), String> {
+        if let Some(error) = &self.config_error {
+            return Err(self
+                .text()
+                .settings_cannot_write(&self.config_path.display().to_string(), error));
+        }
+        let mut stored = self.stored.clone();
+        stored.lang = Some(lang.code().to_string());
+        write_config(&self.config_path, &stored)?;
+        self.stored = stored;
+        self.lang = lang;
+        Ok(())
+    }
+
     pub fn runtime_dir(&self) -> PathBuf {
         self.data_dir.join("runtime")
     }
 
     /// Every line of the settings page, in the order it is shown.
-    pub fn rows(&self) -> Vec<SettingRow> {
+    pub fn rows(&self, t: &Text) -> Vec<SettingRow> {
         let path = |value: &Path| value.to_string_lossy().to_string();
 
         vec![
             SettingRow {
                 key: SettingKey::DataDir,
-                value: self.rendered(&self.data_dir),
+                value: self.rendered(&self.data_dir, t),
                 source: self.source_of(self.env.data_dir.is_some(), self.stored.data_dir.is_some()),
                 env: self.env.data_dir.as_ref().map(|_| DATA_DIR_ENV),
                 shadowed: shadowed(&self.stored.data_dir, self.env.data_dir.is_some()),
@@ -367,7 +424,10 @@ impl Settings {
                     self.stored.xray_executable.is_some(),
                 ),
                 env: self.env.xray_executable.as_ref().map(|_| XRAY_BIN_ENV),
-                shadowed: shadowed(&self.stored.xray_executable, self.env.xray_executable.is_some()),
+                shadowed: shadowed(
+                    &self.stored.xray_executable,
+                    self.env.xray_executable.is_some(),
+                ),
                 note: None,
             },
             SettingRow {
@@ -376,11 +436,7 @@ impl Settings {
                 source: self.source_of(self.env.echo_url.is_some(), self.stored.echo_url.is_some()),
                 env: self.env.echo_url.as_ref().map(|_| ECHO_URL_ENV),
                 shadowed: shadowed(&self.stored.echo_url, self.env.echo_url.is_some()),
-                note: Some(
-                    "asked to report the address a connection left from, so it sees that address; \
-                     asked only when you run a proxy test"
-                        .to_string(),
-                ),
+                note: Some(t.help_echo_url.to_string()),
             },
             SettingRow {
                 key: SettingKey::ChromiumBin,
@@ -388,7 +444,7 @@ impl Settings {
                     .env
                     .chromium_bin
                     .clone()
-                    .unwrap_or_else(|| "not set; discovered on PATH".to_string()),
+                    .unwrap_or_else(|| t.value_not_set_path.to_string()),
                 source: if self.env.chromium_bin.is_some() {
                     Source::Environment
                 } else {
@@ -396,9 +452,7 @@ impl Settings {
                 },
                 env: self.env.chromium_bin.as_ref().map(|_| CHROMIUM_BIN_ENV),
                 shadowed: None,
-                note: Some(
-                    "cores discovered from it are listed on the Browser Cores page".to_string(),
-                ),
+                note: Some(t.help_chromium_bin.to_string()),
             },
             SettingRow {
                 key: SettingKey::ChromiumMajor,
@@ -406,7 +460,7 @@ impl Settings {
                     .env
                     .chromium_major
                     .clone()
-                    .unwrap_or_else(|| "not set; read from each binary".to_string()),
+                    .unwrap_or_else(|| t.value_not_set_versions.to_string()),
                 source: if self.env.chromium_major.is_some() {
                     Source::Environment
                 } else {
@@ -414,7 +468,7 @@ impl Settings {
                 },
                 env: self.env.chromium_major.as_ref().map(|_| CHROMIUM_MAJOR_ENV),
                 shadowed: None,
-                note: Some("used only for binaries that answer nothing to --version".to_string()),
+                note: Some(t.help_chromium_major.to_string()),
             },
             SettingRow {
                 key: SettingKey::ConfigFile,
@@ -426,10 +480,7 @@ impl Settings {
                 },
                 env: self.env.config.as_ref().map(|_| CONFIG_ENV),
                 shadowed: None,
-                note: Some(
-                    "the data directory and Xray executable are stored here, outside the data directory, so changing the data directory cannot lose them"
-                        .to_string(),
-                ),
+                note: Some(t.help_config_file.to_string()),
             },
             SettingRow {
                 key: SettingKey::RuntimeDir,
@@ -437,19 +488,21 @@ impl Settings {
                 source: Source::Derived,
                 env: None,
                 shadowed: None,
-                note: Some("temporary launch files; Xray configs are removed on shutdown".to_string()),
+                note: Some(t.help_runtime_dir.to_string()),
             },
         ]
     }
 
     /// A relative path is shown with the directory it resolves against, so the
     /// window never shows a path the user cannot find.
-    fn rendered(&self, path: &Path) -> String {
+    fn rendered(&self, path: &Path, t: &Text) -> String {
         if path.is_absolute() || path.has_root() {
             return path.to_string_lossy().to_string();
         }
         match std::env::current_dir() {
-            Ok(cwd) => format!("{} (relative to {})", path.display(), cwd.display()),
+            Ok(cwd) => {
+                t.setting_relative_to(&path.display().to_string(), &cwd.display().to_string())
+            }
             Err(_) => path.to_string_lossy().to_string(),
         }
     }
@@ -470,14 +523,12 @@ impl Settings {
     /// replace whatever it still holds.
     pub fn set(&mut self, key: SettingKey, value: &str) -> Result<(), String> {
         let value = value.trim();
+        let t = self.text();
         if value.is_empty() {
-            return Err(format!("{} cannot be empty", key.label().to_lowercase()));
+            return Err(t.setting_cannot_be_empty(&key.label(t).to_lowercase()));
         }
         if let Some(error) = &self.config_error {
-            return Err(format!(
-                "{} cannot be written while the config file is unreadable: {error}",
-                self.config_path.display()
-            ));
+            return Err(t.settings_cannot_write(&self.config_path.display().to_string(), error));
         }
 
         let mut stored = self.stored.clone();
@@ -485,7 +536,7 @@ impl Settings {
             SettingKey::DataDir => stored.data_dir = Some(value.to_string()),
             SettingKey::XrayExecutable => stored.xray_executable = Some(value.to_string()),
             SettingKey::EchoUrl => stored.echo_url = Some(value.to_string()),
-            _ => return Err(format!("{} is not editable", key.label())),
+            _ => return Err(t.setting_not_editable(key.label(t))),
         }
 
         write_config(&self.config_path, &stored)?;
@@ -516,7 +567,7 @@ impl Settings {
     ///
     /// `None` means nothing is pending: either the setting is not stored, or the
     /// environment is winning and what was saved will not be used. A setting
-    /// whose `effect` is "now" is never pending either - it is already in use, so
+    /// whose `effect` is `Effect::Now` is never pending either - it is already in use, so
     /// there is no restart for it to wait on.
     #[cfg(test)]
     pub fn pending(&self, key: SettingKey) -> Option<String> {
@@ -559,6 +610,8 @@ fn write_config(path: &Path, stored: &Stored) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::text::en;
+
     use super::*;
     use crate::paths::FALLBACK_DATA_DIR;
 
@@ -658,7 +711,7 @@ mod tests {
         assert!(notice.is_none(), "a missing config file is not an error");
         assert_eq!(settings.data_dir(), Path::new(FALLBACK_DATA_DIR));
         assert_eq!(settings.xray_executable(), default_xray());
-        let rows = settings.rows();
+        let rows = settings.rows(en());
         assert_eq!(rows.len(), SettingKey::ALL.len());
         for key in [
             SettingKey::DataDir,
@@ -682,7 +735,7 @@ mod tests {
             Source::Environment,
             "the test points the config path at a temp file through the environment"
         );
-        assert_eq!(rows[0].source_label(), "from the default");
+        assert_eq!(rows[0].source_label(en()), "from the default");
     }
 
     #[test]
@@ -694,9 +747,9 @@ mod tests {
         assert!(notice.is_none());
         assert_eq!(settings.data_dir(), Path::new("/srv/fp"));
         assert_eq!(settings.xray_executable(), Path::new("/opt/xray"));
-        let rows = settings.rows();
+        let rows = settings.rows(en());
         assert_eq!(rows[0].source, Source::ConfigFile);
-        assert_eq!(rows[0].source_label(), "from the config file");
+        assert_eq!(rows[0].source_label(en()), "from the config file");
         assert_eq!(rows[0].value, "/srv/fp");
         assert_eq!(rows[1].value, "/opt/xray");
     }
@@ -712,12 +765,12 @@ mod tests {
         let (settings, _) = Settings::load(environment);
 
         assert_eq!(settings.data_dir(), Path::new("/tmp/other"));
-        let row = &settings.rows()[0];
+        let row = &settings.rows(en())[0];
         assert_eq!(row.source, Source::Environment);
-        assert_eq!(row.source_label(), "set by FP_BROWSER_DATA_DIR");
+        assert_eq!(row.source_label(en()), "set by FP_BROWSER_DATA_DIR");
         assert_eq!(row.value, "/tmp/other");
         assert_eq!(
-            row.shadowed_label().as_deref(),
+            row.shadowed_label(en()).as_deref(),
             Some("the config file holds /srv/fp, which this overrides")
         );
     }
@@ -749,13 +802,13 @@ mod tests {
         );
 
         let row = settings
-            .rows()
+            .rows(en())
             .into_iter()
             .find(|row| row.key == SettingKey::EchoUrl)
             .expect("a row for the endpoint");
         assert_eq!(row.source, Source::ConfigFile);
         assert_eq!(
-            row.key.effect(),
+            row.key.effect().label(en()),
             "now",
             "the next test asks this endpoint, not the next start"
         );
@@ -774,7 +827,7 @@ mod tests {
         let config = TempConfig::new("echo-note");
         let (settings, _) = Settings::load(env(&config));
         let row = settings
-            .rows()
+            .rows(en())
             .into_iter()
             .find(|row| row.key == SettingKey::EchoUrl)
             .expect("a row for the endpoint");
@@ -797,18 +850,18 @@ mod tests {
 
         assert_eq!(settings.echo_url(), "http://env.example/ip");
         let row = settings
-            .rows()
+            .rows(en())
             .into_iter()
             .find(|row| row.key == SettingKey::EchoUrl)
             .expect("a row for the endpoint");
         assert_eq!(row.source, Source::Environment);
-        assert_eq!(row.source_label(), "set by FP_BROWSER_ECHO_URL");
+        assert_eq!(row.source_label(en()), "set by FP_BROWSER_ECHO_URL");
         assert_eq!(
             row.value, "http://env.example/ip",
             "the page shows the endpoint a test would really ask"
         );
         assert_eq!(
-            row.shadowed_label().as_deref(),
+            row.shadowed_label(en()).as_deref(),
             Some("the config file holds http://stored.example/ip, which this overrides"),
             "a stored endpoint the environment wins must be shown, not hidden"
         );
@@ -893,6 +946,44 @@ mod tests {
         assert_eq!(reloaded.theme(), ThemeChoice::Light);
     }
 
+    /// The language survives a restart, a region is not a different language,
+    /// and a name this build does not know starts in English rather than
+    /// refusing to start at all.
+    #[test]
+    fn the_language_is_stored_and_an_unknown_one_means_english() {
+        let config = TempConfig::new("language");
+        config.write(r#"{"data_dir": "/srv/fp"}"#);
+        let (mut settings, _) = Settings::load(env(&config));
+        assert_eq!(settings.language(), Lang::En, "absent means English");
+
+        settings.set_language(Lang::Zh).expect("save");
+        assert_eq!(settings.language(), Lang::Zh);
+        assert_eq!(
+            settings.data_dir(),
+            Path::new("/srv/fp"),
+            "kept across the rewrite"
+        );
+
+        let (reloaded, _) = Settings::load(env(&config));
+        assert_eq!(reloaded.language(), Lang::Zh, "the choice outlives the run");
+
+        config.write(r#"{"lang": "zh-Hans"}"#);
+        let (regional, _) = Settings::load(env(&config));
+        assert_eq!(
+            regional.language(),
+            Lang::Zh,
+            "a region is the same language"
+        );
+
+        config.write(r#"{"lang": "kl"}"#);
+        let (unknown, _) = Settings::load(env(&config));
+        assert_eq!(unknown.language(), Lang::En, "not knowing is not a refusal");
+        assert!(
+            !unknown.rows(en()).is_empty(),
+            "and the window still renders"
+        );
+    }
+
     /// A config file this build cannot write refuses the change rather than
     /// accepting one that would be gone by the next start.
     #[test]
@@ -918,7 +1009,7 @@ mod tests {
         settings.set(SettingKey::DataDir, "/srv/fp").expect("save");
 
         assert_eq!(
-            settings.rows()[0].value,
+            settings.rows(en())[0].value,
             "/srv/fp",
             "the page shows what the next start will use"
         );
@@ -972,14 +1063,17 @@ mod tests {
         let (settings, _) = Settings::load(env(&config));
         assert_eq!(settings.runtime_dir(), Path::new("data/runtime"));
         let row = settings
-            .rows()
+            .rows(en())
             .into_iter()
             .find(|row| row.key == SettingKey::RuntimeDir)
             .expect("a runtime row");
-        assert_eq!(row.key.effect(), "derived from the data directory");
+        assert_eq!(
+            row.key.effect().label(en()),
+            "derived from the data directory"
+        );
         assert_eq!(row.source, Source::Derived);
         assert_eq!(
-            row.source_label(),
+            row.source_label(en()),
             "derived from the data directory",
             "it is computed, not chosen anywhere"
         );
@@ -989,7 +1083,7 @@ mod tests {
     fn a_relative_data_directory_is_shown_against_the_working_directory() {
         let config = TempConfig::new("relative");
         let (settings, _) = Settings::load(env(&config));
-        let value = &settings.rows()[0].value;
+        let value = &settings.rows(en())[0].value;
         assert!(value.starts_with(FALLBACK_DATA_DIR), "{value}");
         assert!(
             value.contains("relative to"),
@@ -1005,7 +1099,7 @@ mod tests {
         environment.chromium_bin = Some("/opt/chrome".to_string());
         let (settings, _) = Settings::load(environment);
 
-        let rows = settings.rows();
+        let rows = settings.rows(en());
         let by_key = |key: SettingKey| {
             rows.iter()
                 .find(|row| row.key == key)

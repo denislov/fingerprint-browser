@@ -10,6 +10,7 @@
 //! model, and the view hands that to [`crate::state::AppState`], which refuses
 //! it through the same rules a typed proxy goes through.
 
+use crate::text::Text;
 use crate::theme::palette;
 use domain::{ProxyOutbound, parse_proxy_uri};
 use gpui_kit::component::form::*;
@@ -21,20 +22,24 @@ const LABEL_WIDTH: f32 = 150.0;
 
 /// A link, and the reason the last one was refused.
 pub struct ProxyImport {
+    /// The table the dialog's words come from; see `ProfileEditor::text`.
+    text: &'static Text,
     link: Entity<InputState>,
     error: Option<String>,
 }
 
 impl ProxyImport {
-    pub fn new(window: &mut Window, cx: &mut App) -> Self {
+    pub fn new(text: &'static Text, window: &mut Window, cx: &mut App) -> Self {
         Self {
+            text,
             link: cx.new(|cx| InputState::new(window, cx)),
             error: None,
         }
     }
 
     pub fn title(&self) -> &'static str {
-        "Import from a link"
+        let t = self.text;
+        t.import_link_title
     }
 
     /// The field itself, so a test can type a link into the dialog.
@@ -67,18 +72,19 @@ impl ProxyImport {
 
 impl Render for ProxyImport {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.text;
         let p = palette(cx);
         let mut form = Form::new()
             .label_layout(Axis::Horizontal)
             .label_width(px(LABEL_WIDTH))
             .child(
                 Field::new()
-                    .label("Share link")
+                    .label(t.share_link)
                     .description("ss://, vmess://, vless:// or trojan://")
                     .child(
                         Input::new(&self.link)
                             .id("proxy-link")
-                            .aria_label("Share link"),
+                            .aria_label(t.share_link),
                     ),
             );
 

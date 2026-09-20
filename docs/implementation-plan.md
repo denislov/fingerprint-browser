@@ -98,6 +98,59 @@ the one this project exists to prevent. So verification asks the browser too.
 Not established, and deliberately not claimed: that a page the user opened
 takes the same path; this reads one document, in one tab, once.
 
+## Language
+
+English and Chinese, and the switch between them, on the Settings page.
+
+- **Every fixed label lives in one place.** `crates/app/src/text.rs` holds
+  `Lang`, the `catalog!` macro (one line per message: English beside Chinese,
+  both tables generated from the same list so a field added to one is a compile
+  error in the other), `Text::EN` / `Text::ZH`, and `Text::PAIRS`. What a number
+  or a name has to be slotted into is a **method on `Text`** rather than a field,
+  because word order is part of the translation: "Showing 3 of 12 profiles" and
+  "共 12 个档案，显示 3 个" do not agree on where the numbers go, and English
+  needs plurals where Chinese does not. Sentence joining is per-language too
+  (`join_sentences`), because Chinese does not put a space after its full stop.
+- **The language is read from the state, never from a global.** This is the
+  opposite of the appearance, and deliberately: the component theme is a
+  process-wide fact because the library has exactly one, while the language is a
+  fact about one `AppState`. Tests run in parallel, each with its own language; a
+  global would make every English assertion a race against whichever test
+  switched to Chinese first.
+- Threading follows the palette's rule: a helper with a context does
+  `let t = text(cx);` or `self.state.text()`, a helper without one takes
+  `t: &Text`. The dialog forms are their own entities with no route to the state,
+  so they **carry the table** (`text: &'static Text`) from the moment they are
+  opened; the cost is that a switch does not repaint a dialog that is already
+  open, and the benefit is that no global had to be introduced.
+- **Element identifiers do not change with the language.** `Page::id()` returns
+  frozen English slugs and `nav-{id}` is built from it, while the sidebar's
+  visible name still comes from the table. Deriving an id from display text is
+  the classic localisation trap: switching the language would make the click
+  target of every test and every script disappear. `SettingKey::effect()` returns
+  an `Effect` enum rather than the sentence for the same reason - program
+  behaviour must not depend on the language in force.
+- **English is the default.** No `lang` in the config file, or a value this build
+  does not know, starts in English rather than refusing to start; `zh-Hans` and
+  `zh-CN` are the same language as far as this build is concerned. The choice is
+  written **before** the switch, like the appearance: a config file that cannot be
+  written refuses it rather than showing a language that would be gone by the next
+  start.
+- The chips are labelled **in their own language** (`English` / `简体中文`), and
+  those two words are deliberately *not* in the catalog: someone who cannot read
+  the language they are in can only find the way out through an endonym.
+- What stays English, at its call site: product and protocol names (`SOCKS5`,
+  `Chrome`, `Windows`, `FP_BROWSER_*`), the JavaScript property names on the
+  Runtime Details panel, and the **fault descriptions raised by `runtime`,
+  `domain` and `storage`**. The window frames those errors and the frame is
+  translated; it does not re-write the engine's account of what went wrong. The
+  one exception is `FaultClass`, a closed enum, which the window does translate.
+  See `docs/i18n.md`.
+- The catalog is held to its own tests: a message that is identical in both
+  languages fails unless it is on an explicit allowlist of names that are the
+  same on purpose (`Xray PID`, `CDP port`, `WebSocket`), and the catalog's size is
+  asserted so a shrunken table cannot pass vacuously.
+
 ## Appearance
 
 Two palettes and the switch between them, on the Settings page.

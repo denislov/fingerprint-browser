@@ -9,6 +9,7 @@
 //! Re-pointing an existing core at a different binary is the one edit that
 //! re-reads the version, for the same reason.
 
+use crate::text::Text;
 use crate::theme::palette;
 use domain::BrowserCore;
 use gpui_kit::component::form::*;
@@ -19,6 +20,8 @@ use gpui_kit::*;
 const LABEL_WIDTH: f32 = 150.0;
 
 pub struct CoreEditor {
+    /// The table the form's labels come from; see `ProfileEditor::text`.
+    text: &'static Text,
     /// The core being edited, or `None` when adding one.
     base: Option<BrowserCore>,
     name: Entity<InputState>,
@@ -29,11 +32,12 @@ pub struct CoreEditor {
 
 impl CoreEditor {
     /// A form for a new core: a path, and an optional name.
-    pub fn new(window: &mut Window, cx: &mut App) -> Self {
+    pub fn new(text: &'static Text, window: &mut Window, cx: &mut App) -> Self {
         let field = |value: &str, window: &mut Window, cx: &mut App| {
             cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()))
         };
         Self {
+            text,
             base: None,
             name: field("", window, cx),
             executable: field("", window, cx),
@@ -42,11 +46,17 @@ impl CoreEditor {
     }
 
     /// A form opened on a core that is already registered.
-    pub fn for_core(core: &BrowserCore, window: &mut Window, cx: &mut App) -> Self {
+    pub fn for_core(
+        core: &BrowserCore,
+        text: &'static Text,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
         let field = |value: &str, window: &mut Window, cx: &mut App| {
             cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()))
         };
         Self {
+            text,
             base: Some(core.clone()),
             name: field(&core.name, window, cx),
             executable: field(&core.executable.to_string_lossy(), window, cx),
@@ -55,10 +65,11 @@ impl CoreEditor {
     }
 
     pub fn title(&self) -> &'static str {
+        let t = self.text;
         if self.base.is_some() {
-            "Edit browser core"
+            t.edit_core_title
         } else {
-            "Add browser core"
+            t.add_core_title
         }
     }
 
@@ -87,12 +98,14 @@ impl CoreEditor {
     /// from the probe the service runs. The path is checked here so the obvious
     /// mistake is caught before a thread is spent on it.
     pub fn build_core(&self, cx: &App) -> Result<BrowserCore, String> {
-        let base = self.base.as_ref().ok_or_else(|| {
-            "a new core is added by picking a binary; use `add` instead".to_string()
-        })?;
+        let t = self.text;
+        let base = self
+            .base
+            .as_ref()
+            .ok_or_else(|| t.add_core_use_add.to_string())?;
         let executable = self.executable(cx);
         if executable.as_os_str().is_empty() {
-            return Err("the executable path cannot be empty".to_string());
+            return Err(t.executable_cannot_be_empty.to_string());
         }
         Ok(BrowserCore {
             name: self.name(cx).unwrap_or_else(|| base.name.clone()),
@@ -123,14 +136,14 @@ impl CoreEditor {
 
 impl Render for CoreEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.text;
         let p = palette(cx);
         let _ = cx;
         let known = self.base.as_ref().map(|core| {
             let generation = core.capabilities().map(|capabilities| {
-                format!(
-                    "{} · {}",
-                    capabilities.generation_label(),
-                    capabilities.exclusion_label()
+                t.core_picker_label(
+                    &capabilities.generation_label(),
+                    capabilities.exclusion_label(),
                 )
             });
             (core.version.clone(), generation)
@@ -141,30 +154,30 @@ impl Render for CoreEditor {
             .label_width(px(LABEL_WIDTH))
             .child(
                 Field::new()
-                    .label("Executable")
-                    .description("The fingerprint-chromium binary to launch.")
+                    .label(t.executable_field)
+                    .description(t.executable_help)
                     .child(
                         Input::new(&self.executable)
                             .id("core-executable")
-                            .aria_label("Core executable"),
+                            .aria_label(t.core_executable),
                     ),
             )
             .child(
                 Field::new()
-                    .label("Name")
-                    .description("Blank uses the binary's name and detected major.")
+                    .label(t.name_field)
+                    .description(t.core_name_help)
                     .child(
                         Input::new(&self.name)
                             .id("core-name")
-                            .aria_label("Core name"),
+                            .aria_label(t.core_name),
                     ),
             );
 
         if let Some((version, generation)) = known {
             form = form.child(
                 Field::new()
-                    .label("Version")
-                    .description("Read from the binary. Saving a different executable re-reads it.")
+                    .label(t.version_field)
+                    .description(t.version_help)
                     .child(
                         div()
                             .flex()
@@ -205,6 +218,8 @@ impl Render for CoreEditor {
 
 #[cfg(test)]
 mod tests {
+    use crate::text::en;
+
     // Explicit imports: a glob here pulls the whole gpui surface into the test
     // macro's expansion and makes it recurse.
     use super::CoreEditor;
@@ -229,8 +244,8 @@ mod tests {
     ) -> (Entity<CoreEditor>, &'a mut VisualTestContext) {
         let core = core.cloned();
         cx.add_window_view(move |window, cx| match &core {
-            Some(core) => CoreEditor::for_core(core, window, cx),
-            None => CoreEditor::new(window, cx),
+            Some(core) => CoreEditor::for_core(core, en(), window, cx),
+            None => CoreEditor::new(en(), window, cx),
         })
     }
 

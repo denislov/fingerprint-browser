@@ -16,6 +16,7 @@ use crate::state::{
     AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Page, ProfileRow, ProxyRow,
     ProxyTest, Toast, ToastKind, Verification,
 };
+use crate::text::{Lang, Text};
 use crate::theme::{Palette, ThemeChoice, palette};
 use crate::verifier::{FingerprintVerifier, VerificationReport};
 use application::{BrowserDataReport, Direction, RestoreMode};
@@ -348,12 +349,13 @@ impl AppView {
     /// Collect what the opener reported. The window never waited for it, so the
     /// answer arrives a tick later.
     fn drain_open_results(&mut self) -> bool {
+        let t = self.state.text();
         let mut received = false;
         while let Ok((path, result)) = self.open_results.try_recv() {
             match result {
                 Ok(()) => self
                     .state
-                    .push_notice(format!("Opened {}", path.display()), false),
+                    .push_notice(t.opened(&path.display().to_string()), false),
                 Err(reason) => self.state.push_notice(reason, true),
             }
             received = true;
@@ -395,11 +397,12 @@ impl AppView {
     /// later tick - the window is not blocked either way, and a spawn that found
     /// no handler is reported instead of being mistaken for an open.
     fn on_open_data_dir(&mut self, id: ProfileId, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let path = match self.state.profile(id) {
             Some(profile) => profile.user_data_dir,
             None => {
                 self.state
-                    .push_notice(format!("profile {id} is no longer there"), true);
+                    .push_notice(t.profile_gone(&id.to_string()), true);
                 cx.notify();
                 return;
             }
@@ -429,11 +432,12 @@ impl AppView {
     }
 
     fn on_copy_log(&mut self, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let text: String = self
             .state
             .log_rows()
             .iter()
-            .map(|row| format!("{} [{}] {}", row.who, row.level.label(), row.message))
+            .map(|row| format!("{} [{}] {}", row.who, row.level.label(t), row.message))
             .collect::<Vec<_>>()
             .join("\n");
         if !text.is_empty() {
@@ -443,16 +447,17 @@ impl AppView {
 
     /// Opens the editor for a profile and saves it through the dialog.
     fn on_edit(&mut self, id: ProfileId, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let Some(profile) = self.state.profile(id) else {
             self.state
-                .push_notice(format!("profile {id} is no longer there"), true);
+                .push_notice(t.profile_gone(&id.to_string()), true);
             cx.notify();
             return;
         };
         let cores = self.state.core_choices();
         let proxies = self.state.proxy_choices();
-        let editor = cx.new(|cx| ProfileEditor::new(&profile, &cores, &proxies, window, cx));
-        self.open_profile_form(editor, "Edit profile", "Save", window, cx);
+        let editor = cx.new(|cx| ProfileEditor::new(&profile, &cores, &proxies, t, window, cx));
+        self.open_profile_form(editor, t.edit_profile, t.save, window, cx);
     }
 
     /// Opens the form for a profile and wires its accept button.
@@ -467,6 +472,7 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let t = self.state.text();
         self.editor = Some(editor.clone());
         let view = cx.entity().downgrade();
         let accepted = editor.clone();
@@ -483,7 +489,7 @@ impl AppView {
                 .footer(
                     DialogFooter::new()
                         .child(
-                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                            DialogClose::new().trigger(|button| button.label(t.cancel).outline()),
                         )
                         .child(DialogAction::new().child(Button::new("ok").label(confirm))),
                 )
@@ -503,11 +509,11 @@ impl AppView {
                                     Err(message)
                                 }
                             })
-                            .unwrap_or_else(|_| Err("the window is gone".to_string())),
+                            .unwrap_or_else(|_| Err(t.window_gone.to_string())),
                         Ok(ProfileEdit::Save(profile)) => view
                             .update(cx, |view, _| match view.state.update_profile(profile) {
                                 Ok(()) => {
-                                    view.state.push_notice("Saved.", false);
+                                    view.state.push_notice(t.profile_saved, false);
                                     Ok(())
                                 }
                                 Err(error) => {
@@ -516,7 +522,7 @@ impl AppView {
                                     Err(message)
                                 }
                             })
-                            .unwrap_or_else(|_| Err("the window is gone".to_string())),
+                            .unwrap_or_else(|_| Err(t.window_gone.to_string())),
                         Err(message) => Err(message),
                     };
                     match saved {
@@ -540,8 +546,9 @@ impl AppView {
     }
 
     fn on_duplicate(&mut self, id: ProfileId, cx: &mut Context<Self>) {
+        let t = self.state.text();
         match self.state.duplicate_profile(id) {
-            Ok(_) => self.state.push_notice("Copied the profile.", false),
+            Ok(_) => self.state.push_notice(t.profile_duplicated, false),
             Err(error) => self.state.push_notice(error.to_string(), true),
         }
         cx.notify();
@@ -549,6 +556,7 @@ impl AppView {
 
     /// Deleting asks first: it removes the profile, not its sessions on disk.
     fn on_delete(&mut self, id: ProfileId, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let name = self
             .state
             .profile(id)
@@ -558,22 +566,18 @@ impl AppView {
         window.open_alert_dialog(cx, move |alert, _, _| {
             let view = view.clone();
             alert
-                .title("Delete profile")
-                .description(format!(
-                    "\"{name}\" will be removed from the list. Its browser data stays on disk.",
-                ))
+                .title(t.delete_profile_title)
+                .description(t.delete_profile_confirm(&name))
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("Delete")
-                        .cancel_text("Keep")
+                        .ok_text(t.delete)
+                        .cancel_text(t.keep)
                         .show_cancel(true)
                         .on_ok(move |_, _, cx| {
                             if let Some(view) = view.upgrade() {
                                 view.update(cx, |view, cx| {
                                     match view.state.delete_profile(id) {
-                                        Ok(()) => {
-                                            view.state.push_notice("Deleted the profile.", false)
-                                        }
+                                        Ok(()) => view.state.push_notice(t.profile_deleted, false),
                                         Err(error) => {
                                             view.state.push_notice(error.to_string(), true)
                                         }
@@ -605,11 +609,25 @@ impl AppView {
         cx.notify();
     }
 
+    /// Switches the window's language, and remembers the choice.
+    ///
+    /// Nothing to apply beyond the record and a repaint: every string is read
+    /// from the table during the render that is about to happen, so the whole
+    /// window changes at once and nothing can be left half-translated. As with
+    /// the appearance, the choice is stored *before* it is shown, so a config
+    /// file that cannot be written refuses rather than showing a language that
+    /// would be gone by the next start.
+    fn on_choose_language(&mut self, language: Lang, cx: &mut Context<Self>) {
+        let _ = self.state.set_language(language);
+        cx.notify();
+    }
+
     /// Asks for a new value for one editable setting.
     ///
     /// The dialog says when the value takes effect, because a setting that
     /// looks live and is not is the thing this page exists to avoid.
     fn on_edit_setting(&mut self, key: SettingKey, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let p = palette(cx);
         let row = self
             .state
@@ -618,7 +636,7 @@ impl AppView {
             .find(|row| row.key == key);
         let Some(row) = row else {
             self.state
-                .push_notice(format!("{} is not a setting", key.label()), true);
+                .push_notice(t.setting_not_a_setting(key.label(t)), true);
             cx.notify();
             return;
         };
@@ -633,11 +651,7 @@ impl AppView {
             let field = field.clone();
             let now = row.value.clone();
             dialog
-                .title(format!(
-                    "{} - takes effect at the {}",
-                    key.label(),
-                    key.effect()
-                ))
+                .title(t.setting_dialog_title(key.label(t), key.effect()))
                 .w(px(680.0))
                 .child(
                     div()
@@ -648,7 +662,7 @@ impl AppView {
                             div()
                                 .text_xs()
                                 .text_color(rgb(p.muted))
-                                .child(format!("Now: {now}")),
+                                .child(t.setting_now(&now)),
                         )
                         .child(
                             // Not `setting-{key}`: the row card already
@@ -656,7 +670,7 @@ impl AppView {
                             // id in a single tree is ambiguous.
                             Input::new(&field)
                                 .id(format!("setting-field-{}", key.id()))
-                                .aria_label(key.label()),
+                                .aria_label(key.label(t)),
                         )
                         .child(
                             div()
@@ -668,9 +682,9 @@ impl AppView {
                 .footer(
                     DialogFooter::new()
                         .child(
-                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                            DialogClose::new().trigger(|button| button.label(t.cancel).outline()),
                         )
-                        .child(DialogAction::new().child(Button::new("ok").label("Save"))),
+                        .child(DialogAction::new().child(Button::new("ok").label(t.save))),
                 )
                 .on_ok(move |_, _, cx| {
                     let value = field.read(cx).value().to_string();
@@ -688,16 +702,16 @@ impl AppView {
     /// core claims decides what the engine may be asked to spoof, so it is read
     /// rather than typed.
     fn on_edit_core(&mut self, id: Option<CoreId>, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let editing = id.and_then(|id| self.state.core(id));
         if id.is_some() && editing.is_none() {
-            self.state
-                .push_notice("that browser core is no longer there".to_string(), true);
+            self.state.push_notice(t.core_gone.to_string(), true);
             cx.notify();
             return;
         }
         let core_editor = cx.new(|cx| match &editing {
-            Some(core) => CoreEditor::for_core(core, window, cx),
-            None => CoreEditor::new(window, cx),
+            Some(core) => CoreEditor::for_core(core, t, window, cx),
+            None => CoreEditor::new(t, window, cx),
         });
         self.core_editor = Some(core_editor.clone());
         let view = cx.entity().downgrade();
@@ -714,9 +728,9 @@ impl AppView {
                 .footer(
                     DialogFooter::new()
                         .child(
-                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                            DialogClose::new().trigger(|button| button.label(t.cancel).outline()),
                         )
-                        .child(DialogAction::new().child(Button::new("ok").label("Save"))),
+                        .child(DialogAction::new().child(Button::new("ok").label(t.save))),
                 )
                 .on_ok(move |_, _, cx| {
                     let editing = core_editor.read(cx).is_edit();
@@ -725,7 +739,7 @@ impl AppView {
                     let built = if editing {
                         core_editor.read(cx).build_core(cx).map(Some)
                     } else if path.as_os_str().is_empty() {
-                        Err("the executable path cannot be empty".to_string())
+                        Err(t.executable_cannot_be_empty.to_string())
                     } else {
                         Ok(None)
                     };
@@ -746,7 +760,7 @@ impl AppView {
                                     }
                                 }
                             })
-                            .unwrap_or_else(|_| Err("the window is gone".to_string())),
+                            .unwrap_or_else(|_| Err(t.window_gone.to_string())),
                         Err(error) => Err(error),
                     };
                     match saved {
@@ -777,6 +791,7 @@ impl AppView {
 
     /// Removing a core is refused while a profile still launches with it.
     fn on_delete_core(&mut self, id: CoreId, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let (name, version, used_by) = match self.state.core(id) {
             Some(core) => {
                 let used_by = self
@@ -792,24 +807,21 @@ impl AppView {
             None => (id.to_string(), String::new(), Vec::new()),
         };
         let description = if used_by.is_empty() {
-            format!("\"{name}\" ({version}) will be removed.")
+            t.delete_core_confirm(&name, &version)
         } else {
-            format!(
-                "\"{name}\" is used by {}. Point those profiles at another core first.",
-                used_by.join(", ")
-            )
+            t.core_in_use(&name, &used_by.join(", "))
         };
         let view = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let view = view.clone();
             let description = description.clone();
             alert
-                .title("Delete browser core")
+                .title(t.delete_core_title)
                 .description(description)
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("Delete")
-                        .cancel_text("Keep")
+                        .ok_text(t.delete)
+                        .cancel_text(t.keep)
                         .show_cancel(true)
                         .on_ok(move |_, _, cx| {
                             if let Some(view) = view.upgrade() {
@@ -828,16 +840,16 @@ impl AppView {
 
     /// Opens the form for a new proxy, or for one that is already stored.
     fn on_edit_proxy(&mut self, id: Option<ProxyId>, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let editing = id.and_then(|id| self.state.proxy(id));
         if id.is_some() && editing.is_none() {
-            self.state
-                .push_notice("that proxy is no longer there".to_string(), true);
+            self.state.push_notice(t.proxy_gone.to_string(), true);
             cx.notify();
             return;
         }
         let proxy_editor = cx.new(|cx| match &editing {
-            Some(proxy) => ProxyEditor::for_proxy(proxy, window, cx),
-            None => ProxyEditor::new(window, cx),
+            Some(proxy) => ProxyEditor::for_proxy(proxy, t, window, cx),
+            None => ProxyEditor::new(t, window, cx),
         });
         self.proxy_editor = Some(proxy_editor.clone());
         let view = cx.entity().downgrade();
@@ -854,9 +866,9 @@ impl AppView {
                 .footer(
                     DialogFooter::new()
                         .child(
-                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                            DialogClose::new().trigger(|button| button.label(t.cancel).outline()),
                         )
-                        .child(DialogAction::new().child(Button::new("ok").label("Save"))),
+                        .child(DialogAction::new().child(Button::new("ok").label(t.save))),
                 )
                 .on_ok(move |_, _, cx| {
                     // A refusal from the service is shown in the form as well as
@@ -881,7 +893,7 @@ impl AppView {
                                     }
                                 }
                             })
-                            .unwrap_or_else(|_| Err("the window is gone".to_string()))
+                            .unwrap_or_else(|_| Err(t.window_gone.to_string()))
                         }
                         Err(error) => Err(error),
                     };
@@ -910,7 +922,8 @@ impl AppView {
     /// The dialog parses and the view stores; on a refusal the dialog stays open
     /// with the parser's own sentence, because the link is the thing to fix.
     fn on_import_proxy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let proxy_import = cx.new(|cx| ProxyImport::new(window, cx));
+        let t = self.state.text();
+        let proxy_import = cx.new(|cx| ProxyImport::new(t, window, cx));
         self.proxy_import = Some(proxy_import.clone());
         let view = cx.entity().downgrade();
         let accepted = proxy_import.clone();
@@ -925,9 +938,9 @@ impl AppView {
                 .footer(
                     DialogFooter::new()
                         .child(
-                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                            DialogClose::new().trigger(|button| button.label(t.cancel).outline()),
                         )
-                        .child(DialogAction::new().child(Button::new("ok").label("Import"))),
+                        .child(DialogAction::new().child(Button::new("ok").label(t.import))),
                 )
                 .on_ok(move |_, _, cx| {
                     let imported: Result<(), String> = match proxy_import.read(cx).read_link(cx) {
@@ -942,7 +955,7 @@ impl AppView {
                                     }
                                 }
                             })
-                            .unwrap_or_else(|_| Err("the window is gone".to_string())),
+                            .unwrap_or_else(|_| Err(t.window_gone.to_string())),
                         Err(error) => Err(error),
                     };
                     match imported {
@@ -968,6 +981,7 @@ impl AppView {
 
     /// Deleting a proxy that is still assigned is refused, and says by whom.
     fn on_delete_proxy(&mut self, id: ProxyId, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let (name, endpoint, used_by) = match self.state.proxy(id) {
             Some(proxy) => {
                 let used_by = self
@@ -984,24 +998,21 @@ impl AppView {
             None => (id.to_string(), String::new(), Vec::new()),
         };
         let description = if used_by.is_empty() {
-            format!("\"{name}\" ({endpoint}) will be removed.")
+            t.delete_proxy_confirm(&name, &endpoint)
         } else {
-            format!(
-                "\"{name}\" is assigned to {}. Assign those profiles to another proxy or to Direct first.",
-                used_by.join(", ")
-            )
+            t.proxy_in_use(&name, &used_by.join(", "))
         };
         let view = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let view = view.clone();
             let description = description.clone();
             alert
-                .title("Delete proxy")
+                .title(t.delete_proxy_title)
                 .description(description)
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("Delete")
-                        .cancel_text("Keep")
+                        .ok_text(t.delete)
+                        .cancel_text(t.keep)
                         .show_cancel(true)
                         .on_ok(move |_, _, cx| {
                             if let Some(view) = view.upgrade() {
@@ -1068,20 +1079,17 @@ impl AppView {
     /// configured - core included, because which engine runs a profile is what
     /// decides the switches it may claim.
     fn on_new_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let cores = self.state.core_choices();
         let Some(core) = cores.first().map(|choice| choice.id) else {
-            self.state.push_notice(
-                "no browser core is registered yet; add one on the Browser Cores page \
-                 before creating a profile",
-                true,
-            );
+            self.state.push_notice(t.no_core_registered, true);
             cx.notify();
             return;
         };
         let proxies = self.state.proxy_choices();
         let name = self.state.next_profile_name();
         let editor =
-            cx.new(|cx| ProfileEditor::new_profile(&name, core, &cores, &proxies, window, cx));
+            cx.new(|cx| ProfileEditor::new_profile(&name, core, &cores, &proxies, t, window, cx));
         self.open_profile_form(editor, "New profile", "Create", window, cx);
     }
 
@@ -1115,13 +1123,13 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
+        let t = self.state.text();
         if let Some(input) = &self.filter_input {
             return input.clone();
         }
 
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Filter by name, seed, core or proxy")
-        });
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t.profiles_filter_placeholder));
         // Observed rather than subscribed to change events: the field notifies
         // for every edit, and reading its value afterwards is what the listing
         // needs, so there is no event kind to match on and no way to miss one.
@@ -1167,13 +1175,11 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
+        let t = self.state.text();
         if let Some(input) = &self.export_input {
             return input.clone();
         }
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Leave empty for a new file under the data directory")
-        });
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t.leave_empty_new_file));
         self.export_input = Some(input.clone());
         input
     }
@@ -1207,12 +1213,11 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
+        let t = self.state.text();
         if let Some(input) = &self.import_input {
             return input.clone();
         }
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Path of a configuration backup to read")
-        });
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t.import_path_label));
         self.import_input = Some(input.clone());
         input
     }
@@ -1236,12 +1241,11 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
+        let t = self.state.text();
         if let Some(input) = &self.restore_input {
             return input.clone();
         }
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Path of a configuration backup to restore")
-        });
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t.restore_path_label));
         self.restore_input = Some(input.clone());
         input
     }
@@ -1254,6 +1258,7 @@ impl AppView {
     /// one opens a confirmation that says what will be replaced. The mode is the
     /// confirmation, so a mistaken click cannot replace a live configuration.
     fn on_restore_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
         if let Some(input) = self.restore_input.clone() {
             let typed = input.read(cx).value().to_string();
             self.state.set_restore_path(typed);
@@ -1261,8 +1266,7 @@ impl AppView {
         // The path is checked first, so an empty field is refused where it is
         // rather than opening a confirmation for a restore that could not run.
         if self.state.restore_source().is_none() {
-            self.state
-                .push_notice("Type the path of a configuration backup to restore.", true);
+            self.state.push_notice(t.restore_needs_path, true);
             cx.notify();
             return;
         }
@@ -1278,19 +1282,20 @@ impl AppView {
 
     /// Asks before a restore replaces a populated installation.
     fn confirm_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
         let view = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let view = view.clone();
             alert
-                .title("Restore configuration")
+                .title(t.restore_title)
                 .description(
                     "Every core, proxy and profile here is replaced by the file's configuration. \
                      Profiles keep their browser data on disk.",
                 )
                 .button_props(
                     DialogButtonProps::default()
-                        .ok_text("Replace")
-                        .cancel_text("Cancel")
+                        .ok_text(t.replace)
+                        .cancel_text(t.cancel)
                         .show_cancel(true)
                         .on_ok(move |_, _, cx| {
                             if let Some(view) = view.upgrade() {
@@ -1313,11 +1318,11 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
+        let t = self.state.text();
         if let Some(input) = &self.browser_data_input {
             return input.clone();
         }
-        let input = cx
-            .new(|cx| InputState::new(window, cx).placeholder("Directory to keep browser data in"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t.browser_data_path_label));
         self.browser_data_input = Some(input.clone());
         input
     }
@@ -1374,6 +1379,7 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.state.text();
         let p = palette(cx);
         // The overlay layers live above the view and are rendered by the view
         // itself: without these, a dialog can be opened and never appear.
@@ -1418,13 +1424,13 @@ impl Render for AppView {
             .size_full()
             .bg(rgb(p.bg))
             .text_color(rgb(p.text))
-            .child(header(cx))
+            .child(header(cx, t))
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(sidebar(self.state.page(), cx))
+                    .child(sidebar(self.state.page(), cx, t))
                     .child({
                         let page = self.state.page();
                         let proxy_rows = self.state.proxy_rows().unwrap_or_default();
@@ -1454,10 +1460,10 @@ impl Render for AppView {
                             .p_6()
                             .gap_4()
                             .child(match page {
-                                Page::Proxies => proxies_header(cx),
-                                Page::Cores => cores_header(cx),
-                                Page::Log => logs_header(log_filter, &log_status, cx, p),
-                                Page::Settings => settings_header(p),
+                                Page::Proxies => proxies_header(cx, t),
+                                Page::Cores => cores_header(cx, t),
+                                Page::Log => logs_header(log_filter, &log_status, cx, p, t),
+                                Page::Settings => settings_header(p, t),
                                 Page::Profiles => profiles_header(
                                     &ProfilesHeader {
                                         search: filter_input.clone(),
@@ -1466,17 +1472,18 @@ impl Render for AppView {
                                         visible: visible.len(),
                                     },
                                     cx,
+                                    t,
                                 ),
                             })
-                            .children(notice.map(|notice| notice_banner(notice, cx)))
+                            .children(notice.map(|notice| notice_banner(notice, cx, t)))
                             .when(page == Page::Proxies, |this| {
-                                this.child(proxies_body(&proxy_rows, &proxy_tests, cx))
+                                this.child(proxies_body(&proxy_rows, &proxy_tests, cx, t))
                             })
                             .when(page == Page::Cores, |this| {
-                                this.child(cores_body(&core_rows, cx))
+                                this.child(cores_body(&core_rows, cx, t))
                             })
                             .when(page == Page::Log, |this| {
-                                this.child(logs_body(&log_rows, log_count, log_filter, cx, p))
+                                this.child(logs_body(&log_rows, log_count, log_filter, cx, p, t))
                             })
                             .when(page == Page::Settings, |this| {
                                 this.child(settings_body(
@@ -1491,9 +1498,11 @@ impl Render for AppView {
                                         restore: restore_input.clone(),
                                         browser_data: browser_data_input.clone(),
                                         theme: self.state.theme(),
+                                        language: self.state.language(),
                                     },
                                     cx,
                                     p,
+                                    t,
                                 ))
                             })
                             .when(page == Page::Profiles, |this| {
@@ -1513,6 +1522,7 @@ impl Render for AppView {
                                             &filter,
                                             cx,
                                             p,
+                                            t,
                                         ))
                                         .child(profile_list(
                                             &visible,
@@ -1520,6 +1530,7 @@ impl Render for AppView {
                                             &verifications,
                                             cx,
                                             p,
+                                            t,
                                         )),
                                 )
                                 .child(details_panel(
@@ -1529,6 +1540,7 @@ impl Render for AppView {
                                     &log_tail,
                                     cx,
                                     p,
+                                    t,
                                 ))
                             })
                     }),
@@ -1539,7 +1551,7 @@ impl Render for AppView {
     }
 }
 
-fn header(cx: &mut Context<AppView>) -> Div {
+fn header(cx: &mut Context<AppView>, t: &Text) -> Div {
     let p = palette(cx);
     div()
         .flex()
@@ -1568,7 +1580,7 @@ fn header(cx: &mut Context<AppView>) -> Div {
                 )
                 .child(
                     Button::new("quit")
-                        .label("Quit")
+                        .label(t.quit)
                         .ghost()
                         .on_click(cx.listener(|this, _, _, cx| this.on_quit(cx))),
                 ),
@@ -1583,7 +1595,7 @@ const PAGES: [Page; 5] = [
     Page::Settings,
 ];
 
-fn sidebar(page: Page, cx: &mut Context<AppView>) -> Div {
+fn sidebar(page: Page, cx: &mut Context<AppView>, t: &Text) -> Div {
     let p = palette(cx);
     div()
         .flex()
@@ -1597,12 +1609,12 @@ fn sidebar(page: Page, cx: &mut Context<AppView>) -> Div {
         .children(PAGES.map(|candidate| {
             let active = candidate == page;
             let label = if candidate.is_ready() {
-                candidate.label().to_string()
+                candidate.label(t).to_string()
             } else {
-                format!("{} (soon)", candidate.label())
+                t.nav_soon(candidate.label(t))
             };
             div()
-                .id(format!("nav-{}", candidate.label()))
+                .id(format!("nav-{}", candidate.id()))
                 .test_support()
                 .px_3()
                 .py_2()
@@ -1636,7 +1648,7 @@ struct ProfilesHeader {
     visible: usize,
 }
 
-fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>) -> Div {
+fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>, t: &Text) -> Div {
     let p = palette(cx);
     // While a filter is on, the count is the useful sentence: it is how the user
     // finds out that the list is not the whole list. Without one, the header
@@ -1644,19 +1656,14 @@ fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>) -> Div {
     // both either way, because a status line is worth hearing in full.
     let filtering = header.total > 0 && !header.filter.trim().is_empty();
     let subtitle = if filtering {
-        format!("Showing {} of {} profiles.", header.visible, header.total)
+        t.profiles_showing(header.visible, header.total)
     } else {
-        "Each profile owns its seed, data directory and browser process.".to_string()
+        t.profiles_intro.to_string()
     };
     let announcement = if filtering {
-        format!(
-            "Showing {} of {} profiles, filtered by \"{}\".",
-            header.visible,
-            header.total,
-            header.filter.trim()
-        )
+        t.profiles_showing_filtered(header.visible, header.total, header.filter.trim())
     } else {
-        format!("{} profiles.", header.total)
+        t.profiles_total(header.total)
     };
 
     div()
@@ -1679,7 +1686,7 @@ fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>) -> Div {
                             div()
                                 .text_xl()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child("Profiles"),
+                                .child(t.nav_profiles),
                         )
                         .child(
                             div()
@@ -1693,7 +1700,7 @@ fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>) -> Div {
                 )
                 .child(
                     Button::new("new-profile")
-                        .label("New Profile")
+                        .label(t.new_profile)
                         .primary()
                         .on_click(
                             cx.listener(|this, _, window, cx| this.on_new_profile(window, cx)),
@@ -1704,13 +1711,13 @@ fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>) -> Div {
             div().w(px(PROFILE_FILTER_WIDTH)).child(
                 Input::new(&header.search)
                     .id("profile-filter")
-                    .aria_label("Filter profiles")
+                    .aria_label(t.profiles_filter_aria)
                     .cleanable(true),
             ),
         )
 }
 
-fn proxies_header(cx: &mut Context<AppView>) -> Div {
+fn proxies_header(cx: &mut Context<AppView>, t: &Text) -> Div {
     let p = palette(cx);
     div()
         .flex()
@@ -1725,13 +1732,13 @@ fn proxies_header(cx: &mut Context<AppView>) -> Div {
                     div()
                         .text_xl()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("Proxies"),
+                        .child(t.nav_proxies),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(rgb(p.muted))
-                        .child("Assign a proxy to a profile to route its traffic through it."),
+                        .child(t.proxies_intro),
                 ),
         )
         .child(
@@ -1741,14 +1748,14 @@ fn proxies_header(cx: &mut Context<AppView>) -> Div {
                 .gap_2()
                 .child(
                     Button::new("import-proxy")
-                        .label("Import from link")
+                        .label(t.import_from_link)
                         .on_click(
                             cx.listener(|this, _, window, cx| this.on_import_proxy(window, cx)),
                         ),
                 )
                 .child(
                     Button::new("new-proxy")
-                        .label("New Proxy")
+                        .label(t.new_proxy)
                         .primary()
                         .on_click(
                             cx.listener(|this, _, window, cx| this.on_edit_proxy(None, window, cx)),
@@ -1761,6 +1768,7 @@ fn proxies_body(
     rows: &[ProxyRow],
     tests: &std::collections::HashMap<ProxyId, ProxyTest>,
     cx: &mut Context<AppView>,
+    t: &Text,
 ) -> impl IntoElement {
     let p = palette(cx);
     div()
@@ -1780,9 +1788,7 @@ fn proxies_body(
                     .bg(rgb(p.panel))
                     .text_sm()
                     .text_color(rgb(p.muted))
-                    .child(
-                        "No proxies yet. A profile with no proxy goes direct from this machine.",
-                    ),
+                    .child(t.proxies_empty),
             )
         })
         // The cards are built inline: a helper would have to return a type
@@ -1823,9 +1829,9 @@ fn proxies_body(
                             div()
                                 .text_xs()
                                 .text_color(rgb(if row.is_used() { p.success } else { p.muted }))
-                                .child(row.usage_label()),
+                                .child(row.usage_label(t)),
                         )
-                        .children(proxy_test_reading(test, id, p)),
+                        .children(proxy_test_reading(test, id, p, t)),
                 )
                 .child(
                     div()
@@ -1834,7 +1840,7 @@ fn proxies_body(
                         .gap_2()
                         .child(
                             Button::new(format!("test-proxy-{index}"))
-                                .label("Test")
+                                .label(t.test)
                                 .outline()
                                 .disabled(test.is_some_and(ProxyTest::is_running))
                                 .on_click(
@@ -1843,7 +1849,7 @@ fn proxies_body(
                         )
                         .child(
                             Button::new(format!("edit-proxy-{index}"))
-                                .label("Edit")
+                                .label(t.edit)
                                 .outline()
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.on_edit_proxy(Some(id), window, cx)
@@ -1851,7 +1857,7 @@ fn proxies_body(
                         )
                         .child(
                             Button::new(format!("delete-proxy-{index}"))
-                                .label("Delete")
+                                .label(t.delete)
                                 .outline()
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.on_delete_proxy(id, window, cx)
@@ -1866,7 +1872,12 @@ fn proxies_body(
 /// The row says which engine was probed, because "this proxy works" and "this
 /// profile's traffic is going through it" are different claims and only the
 /// second one is about a leak.
-fn proxy_test_reading(test: Option<&ProxyTest>, id: ProxyId, p: Palette) -> Option<AnyElement> {
+fn proxy_test_reading(
+    test: Option<&ProxyTest>,
+    id: ProxyId,
+    p: Palette,
+    t: &Text,
+) -> Option<AnyElement> {
     let test = test?;
     let colour = match test {
         ProxyTest::Running => p.dim,
@@ -1874,20 +1885,19 @@ fn proxy_test_reading(test: Option<&ProxyTest>, id: ProxyId, p: Palette) -> Opti
         ProxyTest::Passed(_) => p.info,
         ProxyTest::Failed(_) => p.danger,
     };
-    let text = match test {
-        ProxyTest::Running => test.label(),
-        ProxyTest::Passed(reading) => format!(
-            "{} {}",
-            test.label(),
+    let summary = match test {
+        ProxyTest::Running => test.label(t),
+        ProxyTest::Passed(reading) => t.proxy_test_reading(
+            &test.label(t),
             if reading.live {
-                "through the engine a running profile is using"
+                t.engine_running_profile
             } else {
-                "through a temporary engine"
-            }
+                t.engine_temporary
+            },
         ),
         // The evidence behind the class is in the activity log: a row is one
         // line, and an engine's own words are not.
-        ProxyTest::Failed(_) => format!("{}; see the log", test.label()),
+        ProxyTest::Failed(_) => t.proxy_test_failed(&test.label(t)),
     };
     Some(
         div()
@@ -1895,12 +1905,12 @@ fn proxy_test_reading(test: Option<&ProxyTest>, id: ProxyId, p: Palette) -> Opti
             .test_support()
             .text_xs()
             .text_color(rgb(colour))
-            .child(text)
+            .child(summary)
             .into_any_element(),
     )
 }
 
-fn cores_header(cx: &mut Context<AppView>) -> Div {
+fn cores_header(cx: &mut Context<AppView>, t: &Text) -> Div {
     let p = palette(cx);
     div()
         .flex()
@@ -1915,21 +1925,24 @@ fn cores_header(cx: &mut Context<AppView>) -> Div {
                     div()
                         .text_xl()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("Browser Cores"),
+                        .child(t.nav_cores),
                 )
-                .child(div().text_xs().text_color(rgb(p.muted)).child(
-                    "Each core is a fingerprint-chromium binary; its detected version decides which switches a profile may claim.",
-                )),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.muted))
+                        .child(t.cores_intro),
+                ),
         )
         .child(
             Button::new("new-core")
-                .label("Add Core")
+                .label(t.add_core)
                 .primary()
                 .on_click(cx.listener(|this, _, window, cx| this.on_edit_core(None, window, cx))),
         )
 }
 
-fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
+fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>, t: &Text) -> impl IntoElement {
     let p = palette(cx);
     div()
         .id("cores-scroll")
@@ -1948,9 +1961,7 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                     .bg(rgb(p.panel))
                     .text_sm()
                     .text_color(rgb(p.muted))
-                    .child(
-                        "No browser core yet. Add a fingerprint-chromium binary to launch profiles with it.",
-                    ),
+                    .child(t.cores_empty),
             )
         })
         // Built inline: a helper returning a borrowed type cannot escape the
@@ -1990,7 +2001,7 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                                         div()
                                             .text_xs()
                                             .text_color(rgb(p.danger))
-                                            .child("executable missing"),
+                                            .child(t.core_executable_missing),
                                     )
                                 }),
                         )
@@ -1998,7 +2009,7 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                             div()
                                 .text_xs()
                                 .text_color(rgb(p.muted))
-                                .child(format!("{} · major {}", row.core.version, row.core.major)),
+                                .child(t.core_label(&row.core.version, row.core.major)),
                         )
                         .child(
                             div()
@@ -2008,9 +2019,10 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                                     Some(_) => p.warning,
                                     None => p.danger,
                                 }))
-                                .child(row.generation_label().unwrap_or_else(|| {
-                                    "no detected version: no switches can be claimed".to_string()
-                                })),
+                                .child(
+                                    row.generation_label()
+                                        .unwrap_or_else(|| t.core_no_version.to_string()),
+                                ),
                         )
                         .child(
                             div()
@@ -2022,7 +2034,7 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                             div()
                                 .text_xs()
                                 .text_color(rgb(if row.is_used() { p.success } else { p.muted }))
-                                .child(row.usage_label()),
+                                .child(row.usage_label(t)),
                         ),
                 )
                 .child(
@@ -2032,15 +2044,17 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                         .gap_2()
                         .child(
                             Button::new(format!("redetect-core-{index}"))
-                                .label("Re-detect")
+                                .label(t.redetect)
                                 .outline()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.on_redetect_core(id, cx)
-                                })),
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.on_redetect_core(id, cx)
+                                    }),
+                                ),
                         )
                         .child(
                             Button::new(format!("edit-core-{index}"))
-                                .label("Edit")
+                                .label(t.edit)
                                 .outline()
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.on_edit_core(Some(id), window, cx)
@@ -2048,7 +2062,7 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                         )
                         .child(
                             Button::new(format!("delete-core-{index}"))
-                                .label("Delete")
+                                .label(t.delete)
                                 .outline()
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.on_delete_core(id, window, cx)
@@ -2075,7 +2089,7 @@ fn key_help(key: SettingKey) -> String {
     }
 }
 
-fn settings_header(p: Palette) -> Div {
+fn settings_header(p: Palette, t: &Text) -> Div {
     div()
         .flex()
         .flex_col()
@@ -2084,11 +2098,14 @@ fn settings_header(p: Palette) -> Div {
             div()
                 .text_xl()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("Settings"),
+                .child(t.nav_settings),
         )
-        .child(div().text_xs().text_color(rgb(p.muted)).child(
-            "The value in force and where it came from. An environment variable wins over the config file, and the row says so.",
-        ))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(p.muted))
+                .child(t.settings_intro),
+        )
 }
 
 /// Everything the export card needs that is not already in [`AppState`].
@@ -2116,6 +2133,7 @@ struct SettingsCards {
     restore: Entity<InputState>,
     browser_data: Entity<InputState>,
     theme: ThemeChoice,
+    language: Lang,
 }
 
 fn settings_body(
@@ -2123,17 +2141,19 @@ fn settings_body(
     cards: SettingsCards,
     cx: &mut Context<AppView>,
     p: Palette,
+    t: &Text,
 ) -> impl IntoElement {
     // Built first, with their lifetimes erased: each card borrows the context
     // and the chain below borrows it again for its own listeners, and an
     // opaque return type would keep the first borrow alive to the end of the
     // chain.
-    let appearance: AnyElement = appearance_card(cards.theme, cx).into_any_element();
-    let export_card: AnyElement = export_card(&cards.export, cx).into_any_element();
-    let import_card: AnyElement = import_card(&cards.import, cx).into_any_element();
-    let restore_card: AnyElement = restore_card(&cards.restore, cx).into_any_element();
+    let appearance: AnyElement =
+        appearance_card(cards.theme, cards.language, cx, t).into_any_element();
+    let export_card: AnyElement = export_card(&cards.export, cx, t).into_any_element();
+    let import_card: AnyElement = import_card(&cards.import, cx, t).into_any_element();
+    let restore_card: AnyElement = restore_card(&cards.restore, cx, t).into_any_element();
     let browser_data_card: AnyElement =
-        browser_data_card(&cards.browser_data, cx).into_any_element();
+        browser_data_card(&cards.browser_data, cx, t).into_any_element();
     div()
         .id("settings-scroll")
         .flex()
@@ -2174,7 +2194,7 @@ fn settings_body(
                                     div()
                                         .text_sm()
                                         .font_weight(FontWeight::MEDIUM)
-                                        .child(key.label()),
+                                        .child(key.label(t)),
                                 )
                                 .child(
                                     div()
@@ -2186,7 +2206,7 @@ fn settings_body(
                                                 p.muted
                                             },
                                         ))
-                                        .child(row.source_label()),
+                                        .child(row.source_label(t)),
                                 ),
                         )
                         .child(
@@ -2196,7 +2216,7 @@ fn settings_body(
                                 .child(row.value.clone()),
                         )
                         .children(
-                            row.shadowed_label().map(|label| {
+                            row.shadowed_label(t).map(|label| {
                                 div().text_xs().text_color(rgb(p.warning)).child(label)
                             }),
                         )
@@ -2215,12 +2235,12 @@ fn settings_body(
                             div()
                                 .text_xs()
                                 .text_color(rgb(p.muted))
-                                .child(row.key.effect()),
+                                .child(row.key.effect().label(t)),
                         )
                         .when(editable, |this| {
                             this.child(
                                 Button::new(format!("edit-setting-{}", key.id()))
-                                    .label("Change")
+                                    .label(t.change)
                                     .outline()
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.on_edit_setting(key, window, cx)
@@ -2246,11 +2266,58 @@ fn settings_body(
 /// visible at once. A toggle hides the alternative behind the label of the thing
 /// you are not currently looking at, which is the one thing the reader cannot
 /// check against the window in front of them.
-fn appearance_card(choice: ThemeChoice, cx: &mut Context<AppView>) -> impl IntoElement {
+fn appearance_card(
+    choice: ThemeChoice,
+    language: Lang,
+    cx: &mut Context<AppView>,
+    t: &Text,
+) -> impl IntoElement {
     let p = palette(cx);
-    div()
+    settings_card(p)
         .id("appearance")
         .test_support()
+        .child(settings_card_heading(
+            t.interface_title,
+            t.interface_body,
+            p,
+        ))
+        // Appearance: two chips, so both options are visible at once. A toggle
+        // hides the alternative behind the label of the mode you are not looking
+        // at, which is the one thing the reader cannot check against the window.
+        .child(
+            settings_card_row(t.appearance_title, p).children(ThemeChoice::ALL.map(|option| {
+                let active = option == choice;
+                chip(
+                    format!("theme-{}", option.code()),
+                    option.label(t),
+                    active,
+                    p,
+                )
+                .test_support()
+                .aria_label(t.theme_aria(option.label(t)))
+                .on_click(cx.listener(move |this, _, _, cx| this.on_choose_theme(option, cx)))
+            })),
+        )
+        // Language: each chip is labelled in its own language, so someone who
+        // cannot read the one they are in can still find the way out of it.
+        .child(
+            settings_card_row(t.language_title, p).children(Lang::ALL.map(|option| {
+                let active = option == language;
+                chip(
+                    format!("language-{}", option.code()),
+                    option.label(),
+                    active,
+                    p,
+                )
+                .test_support()
+                .on_click(cx.listener(move |this, _, _, cx| this.on_choose_language(option, cx)))
+            })),
+        )
+}
+
+/// The frame the Settings cards share: a bordered column.
+fn settings_card(p: Palette) -> Div {
+    div()
         .flex()
         .flex_col()
         .gap_3()
@@ -2259,50 +2326,61 @@ fn appearance_card(choice: ThemeChoice, cx: &mut Context<AppView>) -> impl IntoE
         .rounded_md()
         .border_1()
         .border_color(rgb(p.border))
+}
+
+/// A card's title and the sentence under it.
+fn settings_card_heading(title: &str, body: &str, p: Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Appearance"),
-                )
-                .child(div().text_xs().text_color(rgb(p.muted)).child(
-                    "The window repaints as soon as you choose, and the choice is kept for the next start.",
-                )),
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .child(title.to_string()),
         )
         .child(
             div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .children(ThemeChoice::ALL.into_iter().map(|option| {
-                    let active = option == choice;
-                    div()
-                        .id(format!("theme-{}", option.code()))
-                        .test_support()
-                        .px_3()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(if active { p.dim } else { p.border }))
-                        .text_xs()
-                        .when(active, |this| {
-                            this.bg(rgb(p.border))
-                                .text_color(rgb(p.text))
-                                .font_weight(FontWeight::MEDIUM)
-                        })
-                        .when(!active, |this| this.text_color(rgb(p.muted)))
-                        .aria_label(format!("{} theme", option.label()))
-                        .child(option.label())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.on_choose_theme(option, cx)
-                        }))
-                })),
+                .text_xs()
+                .text_color(rgb(p.muted))
+                .child(body.to_string()),
         )
+}
+
+/// A labelled row of chips inside a card.
+fn settings_card_row(label: &str, p: Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(p.muted))
+                .child(label.to_string()),
+        )
+        .child(div().flex().items_center().gap_2())
+}
+
+/// One chip of a choice: the same control the editors use, for the same reason -
+/// the chosen one is filled, the others are not, and both are always on screen.
+fn chip(id: String, label: &str, active: bool, p: Palette) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(if active { p.dim } else { p.border }))
+        .text_xs()
+        .when(active, |this| {
+            this.bg(rgb(p.border))
+                .text_color(rgb(p.text))
+                .font_weight(FontWeight::MEDIUM)
+        })
+        .when(!active, |this| this.text_color(rgb(p.muted)))
+        .child(label.to_string())
 }
 
 /// The export card at the foot of the Settings page.
@@ -2312,7 +2390,7 @@ fn appearance_card(choice: ThemeChoice, cx: &mut Context<AppView>) -> impl IntoE
 /// integration most likely to behave differently over RDP - which is a supported
 /// way to run this. The field starts empty, and the line under it names the file
 /// an empty field would write, so the default is shown rather than described.
-fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoElement {
+fn export_card(export: &SettingsExport, cx: &mut Context<AppView>, t: &Text) -> impl IntoElement {
     let p = palette(cx);
     let view = cx.entity().downgrade();
     div()
@@ -2335,11 +2413,14 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .child("Export configuration"),
+                        .child(t.export_title),
                 )
-                .child(div().text_xs().text_color(rgb(p.muted)).child(
-                    "Writes cores, proxies and profiles to a JSON file, for another machine or for keeping. Browser data is not included: it is far larger, and a copy belongs beside the profile it came from.",
-                )),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.muted))
+                        .child(t.export_body),
+                ),
         )
         .child(
             div()
@@ -2350,12 +2431,12 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
                     div().flex_1().min_w_0().child(
                         Input::new(&export.path)
                             .id("export-path")
-                            .aria_label("Export file path"),
+                            .aria_label(t.export_path_label),
                     ),
                 )
                 .child(
                     Button::new("export-run")
-                        .label("Export")
+                        .label(t.export)
                         .on_click(cx.listener(|this, _, _, cx| this.on_export_configuration(cx))),
                 ),
         )
@@ -2363,7 +2444,7 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
             div()
                 .text_xs()
                 .text_color(rgb(p.dim))
-                .child(format!("Empty writes {}", export.destination.display())),
+                .child(t.export_empty_writes(&export.destination.display().to_string())),
         )
         .child(
             div()
@@ -2372,7 +2453,7 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
                 .gap_2()
                 .child(
                     Checkbox::new("export-credentials")
-                        .label("Include proxy credentials")
+                        .label(t.export_credentials)
                         .checked(export.include_credentials)
                         .on_change(move |&checked, _, cx: &mut App| {
                             if let Some(view) = view.upgrade() {
@@ -2386,13 +2467,14 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
                     div()
                         .text_xs()
                         .text_color(rgb(p.muted))
-                        .child("Left off, the passwords are dropped and the rest of each proxy is kept."),
+                        .child(t.export_credentials_note),
                 ),
         )
         .child(
-            div().text_xs().text_color(rgb(p.warning)).child(
-                "A file that includes credentials holds them in plain text. Do not send it to anyone casually.",
-            ),
+            div()
+                .text_xs()
+                .text_color(rgb(p.warning))
+                .child(t.export_credentials_warning),
         )
 }
 
@@ -2402,7 +2484,11 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
 /// line: nothing already here is overwritten. That is not a promise the
 /// program can keep on its own - it is what the rules do - but it is the
 /// sentence a reader needs before they type a path and press the button.
-fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl IntoElement {
+fn import_card(
+    input: &Entity<InputState>,
+    cx: &mut Context<AppView>,
+    t: &Text,
+) -> impl IntoElement {
     let p = palette(cx);
     div()
         .id("import-configuration")
@@ -2424,11 +2510,14 @@ fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl In
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .child("Import configuration"),
+                        .child(t.import_title),
                 )
-                .child(div().text_xs().text_color(rgb(p.muted)).child(
-                    "Reads a backup written by the export above. Nothing already here is overwritten: identifiers that exist are kept as they are, a profile whose core is not here is skipped, and the report says which was which.",
-                )),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.muted))
+                        .child(t.import_body),
+                ),
         )
         .child(
             div()
@@ -2439,20 +2528,16 @@ fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl In
                     div().flex_1().min_w_0().child(
                         Input::new(input)
                             .id("import-path")
-                            .aria_label("Import file path"),
+                            .aria_label(t.import_path_label),
                     ),
                 )
                 .child(
                     Button::new("import-run")
-                        .label("Import")
+                        .label(t.import)
                         .on_click(cx.listener(|this, _, _, cx| this.on_import_configuration(cx))),
                 ),
         )
-        .child(
-            div().text_xs().text_color(rgb(p.dim)).child(
-                "Nothing is confirmed first: import only adds, so undoing one is deleting the rows it named.",
-            ),
-        )
+        .child(div().text_xs().text_color(rgb(p.dim)).child(t.import_note))
 }
 
 /// The restore card, under the import one.
@@ -2462,7 +2547,11 @@ fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl In
 /// restore replaces. The confirmation is not on the card but behind the button,
 /// and only when there is something to replace, so the card states the rule
 /// rather than describing a dialog.
-fn restore_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl IntoElement {
+fn restore_card(
+    input: &Entity<InputState>,
+    cx: &mut Context<AppView>,
+    t: &Text,
+) -> impl IntoElement {
     let p = palette(cx);
     div()
         .id("restore-configuration")
@@ -2484,11 +2573,14 @@ fn restore_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl I
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .child("Restore configuration"),
+                        .child(t.restore_title),
                 )
-                .child(div().text_xs().text_color(rgb(p.muted)).child(
-                    "Makes this installation be the file's configuration, replacing what is here. An empty installation is restored at once; a populated one asks before replacing anything.",
-                )),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.muted))
+                        .child(t.restore_body),
+                ),
         )
         .child(
             div()
@@ -2499,22 +2591,14 @@ fn restore_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl I
                     div().flex_1().min_w_0().child(
                         Input::new(input)
                             .id("restore-path")
-                            .aria_label("Restore file path"),
+                            .aria_label(t.restore_path_label),
                     ),
                 )
-                .child(
-                    Button::new("restore-run")
-                        .label("Restore")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.on_restore_configuration(window, cx)
-                        })),
-                ),
+                .child(Button::new("restore-run").label(t.restore).on_click(
+                    cx.listener(|this, _, window, cx| this.on_restore_configuration(window, cx)),
+                )),
         )
-        .child(
-            div().text_xs().text_color(rgb(p.dim)).child(
-                "This replaces the configuration, not the sessions: a profile keeps its browser data on disk.",
-            ),
-        )
+        .child(div().text_xs().text_color(rgb(p.dim)).child(t.restore_note))
 }
 
 /// The browser-data card, below the configuration ones.
@@ -2523,7 +2607,11 @@ fn restore_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl I
 /// backup, and the half that carries the logins. One directory field with two
 /// buttons, because a copy out writes to a place and a copy back in reads from
 /// the same one.
-fn browser_data_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl IntoElement {
+fn browser_data_card(
+    input: &Entity<InputState>,
+    cx: &mut Context<AppView>,
+    t: &Text,
+) -> impl IntoElement {
     let p = palette(cx);
     div()
         .id("browser-data")
@@ -2545,11 +2633,14 @@ fn browser_data_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> i
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .child("Browser data"),
+                        .child(t.browser_data_title),
                 )
-                .child(div().text_xs().text_color(rgb(p.muted)).child(
-                    "Copies each profile's cookies, storage and sessions to a directory of your own, or back from one. Only stopped profiles are copied: a running browser is still writing.",
-                )),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.muted))
+                        .child(t.browser_data_body),
+                ),
         )
         .child(
             div()
@@ -2560,19 +2651,15 @@ fn browser_data_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> i
                     div().flex_1().min_w_0().child(
                         Input::new(input)
                             .id("browser-data-path")
-                            .aria_label("Browser data directory"),
+                            .aria_label(t.browser_data_path_label),
                     ),
                 )
-                .child(
-                    Button::new("browser-data-out")
-                        .label("Copy out")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.on_browser_data(Direction::ToBackup, cx)
-                        })),
-                )
+                .child(Button::new("browser-data-out").label(t.copy_out).on_click(
+                    cx.listener(|this, _, _, cx| this.on_browser_data(Direction::ToBackup, cx)),
+                ))
                 .child(
                     Button::new("browser-data-in")
-                        .label("Copy in")
+                        .label(t.copy_in)
                         .outline()
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.on_browser_data(Direction::FromBackup, cx)
@@ -2580,9 +2667,10 @@ fn browser_data_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> i
                 ),
         )
         .child(
-            div().text_xs().text_color(rgb(p.dim)).child(
-                "The directory holds one subdirectory per profile, named after its identifier, so it lines up with the configuration.",
-            ),
+            div()
+                .text_xs()
+                .text_color(rgb(p.dim))
+                .child(t.browser_data_note),
         )
 }
 
@@ -2591,6 +2679,7 @@ fn logs_header(
     status: &Result<String, String>,
     cx: &mut Context<AppView>,
     p: Palette,
+    t: &Text,
 ) -> Div {
     div()
         .flex()
@@ -2603,25 +2692,28 @@ fn logs_header(
                 .flex_col()
                 .gap_1()
                 .min_w_0()
-                .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Log"))
-                .child(div().text_xs().text_color(rgb(p.muted)).child(
-                    "What this window has done and seen: starts, stops, warnings, errors and reads, newest first.",
-                ))
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(t.nav_log),
+                )
+                .child(div().text_xs().text_color(rgb(p.muted)).child(t.log_intro))
                 .child(match status {
                     Ok(path) => div()
                         .id("log-file-status")
                         .test_support()
-                        .aria_label(format!("Also written to {path}"))
+                        .aria_label(t.log_written_to(path))
                         .text_xs()
                         .text_color(rgb(p.dim))
-                        .child(format!("Also written to {path}")),
+                        .child(t.log_written_to(path)),
                     Err(error) => div()
                         .id("log-file-status")
                         .test_support()
-                        .aria_label(format!("Not written to a file: {error}"))
+                        .aria_label(t.log_not_written(error))
                         .text_xs()
                         .text_color(rgb(p.danger))
-                        .child(format!("Not written to a file: {error}")),
+                        .child(t.log_not_written(error)),
                 }),
         )
         .child(
@@ -2637,7 +2729,7 @@ fn logs_header(
                         .children(LogFilter::ALL.map(|candidate| {
                             let active = candidate == filter;
                             Button::new(candidate.id())
-                                .label(candidate.label())
+                                .label(candidate.label(t))
                                 .when(active, |button| button.primary())
                                 .when(!active, |button| button.outline())
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2647,13 +2739,13 @@ fn logs_header(
                 )
                 .child(
                     Button::new("copy-log")
-                        .label("Copy")
+                        .label(t.copy)
                         .outline()
                         .on_click(cx.listener(|this, _, _, cx| this.on_copy_log(cx))),
                 )
                 .child(
                     Button::new("clear-log")
-                        .label("Clear")
+                        .label(t.clear)
                         .outline()
                         .on_click(cx.listener(|this, _, _, cx| this.on_clear_log(cx))),
                 ),
@@ -2666,6 +2758,7 @@ fn logs_body(
     filter: LogFilter,
     _cx: &mut Context<AppView>,
     p: Palette,
+    t: &Text,
 ) -> impl IntoElement {
     div()
         .id("logs-scroll")
@@ -2680,11 +2773,8 @@ fn logs_body(
             // An empty page says which kind of empty it is: nothing happened,
             // or the filter is hiding what did.
             let message = match total {
-                0 => "Nothing has happened yet in this window.".to_string(),
-                count => format!(
-                    "No {} lines; {count} were recorded - switch the filter to All to see them",
-                    filter.noun()
-                ),
+                0 => t.log_empty.to_string(),
+                count => t.log_none_of_kind(filter.noun(t), count),
             };
             this.child(
                 div()
@@ -2698,7 +2788,7 @@ fn logs_body(
             )
         })
         .children(rows.iter().enumerate().map(|(index, row)| {
-            let label = format!("{} [{}] {}", row.who, row.level.label(), row.message);
+            let label = format!("{} [{}] {}", row.who, row.level.label(t), row.message);
             div()
                 .id(format!("log-{index}"))
                 .test_support()
@@ -2718,7 +2808,7 @@ fn logs_body(
                         .text_xs()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(log_level_color(row.level, p)))
-                        .child(row.level.label()),
+                        .child(row.level.label(t)),
                 )
                 .child(
                     div()
@@ -2726,7 +2816,7 @@ fn logs_body(
                         .flex_shrink_0()
                         .text_xs()
                         .text_color(rgb(p.dim))
-                        .child(format_age(row.at)),
+                        .child(format_age(row.at, t)),
                 )
                 .child(
                     div()
@@ -2757,13 +2847,13 @@ fn log_level_color(level: LogLevel, p: Palette) -> u32 {
 }
 
 /// How long ago a line was written, freshly computed on each render.
-fn format_age(at: SystemTime) -> String {
+fn format_age(at: SystemTime, t: &Text) -> String {
     let seconds = SystemTime::now()
         .duration_since(at)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
     match seconds {
-        0..=1 => "now".to_string(),
+        0..=1 => t.just_now.to_string(),
         seconds if seconds < 60 => format!("{seconds}s"),
         seconds if seconds < 3600 => format!("{}m", seconds / 60),
         seconds => format!("{}h", seconds / 3600),
@@ -2787,7 +2877,7 @@ fn push_toasts(toasts: &[Toast], window: &mut Window, cx: &mut App) {
     }
 }
 
-fn notice_banner(notice: crate::state::Notice, cx: &mut Context<AppView>) -> Div {
+fn notice_banner(notice: crate::state::Notice, cx: &mut Context<AppView>, t: &Text) -> Div {
     let p = palette(cx);
     let (background, foreground) = if notice.error {
         (p.danger_bg, p.danger)
@@ -2812,7 +2902,7 @@ fn notice_banner(notice: crate::state::Notice, cx: &mut Context<AppView>) -> Div
         )
         .child(
             Button::new("dismiss-notice")
-                .label("Dismiss")
+                .label(t.dismiss)
                 .ghost()
                 .on_click(cx.listener(|this, _, _, cx| this.on_dismiss_notice(cx))),
         )
@@ -2825,6 +2915,7 @@ fn empty_hint(
     filter: &str,
     cx: &mut Context<AppView>,
     p: Palette,
+    t: &Text,
 ) -> Option<Div> {
     // Two kinds of empty look the same in a list and mean different things:
     // there are no profiles, or a filter is hiding the ones there are. Only the
@@ -2835,12 +2926,9 @@ fn empty_hint(
     }
 
     let message = if filtering {
-        format!(
-            "No profile answers to \"{}\"; all {total} are hidden by it.",
-            filter.trim()
-        )
+        t.empty_no_match(filter.trim(), total)
     } else if has_core {
-        "No profiles yet. Create one to start a browser.".to_string()
+        t.empty_no_profiles.to_string()
     } else {
         "No browser core found. Set FP_BROWSER_CHROMIUM_BIN to a fingerprint-chromium \
          (or Chromium) executable and restart."
@@ -2861,7 +2949,7 @@ fn empty_hint(
             .child(div().text_xs().text_color(rgb(p.muted)).child(message))
             .when(filtering, |this| {
                 this.child(
-                    Button::new("clear-filter").label("Clear filter").on_click(
+                    Button::new("clear-filter").label(t.clear_filter).on_click(
                         cx.listener(|this, _, window, cx| this.on_clear_filter(window, cx)),
                     ),
                 )
@@ -2875,6 +2963,7 @@ fn profile_list(
     verifications: &std::collections::HashMap<ProfileId, Verification>,
     cx: &mut Context<AppView>,
     p: Palette,
+    t: &Text,
 ) -> Div {
     div()
         .flex()
@@ -2910,17 +2999,21 @@ fn profile_list(
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(row.profile.name.clone()),
                         )
-                        .child(div().text_xs().text_color(rgb(p.muted)).child(format!(
-                            "seed {} · {} · {}",
-                            row.profile.fingerprint.seed,
-                            row.profile.fingerprint.brand,
-                            row.profile.fingerprint.platform,
-                        )))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(p.muted))
+                                .child(t.profile_seed_line(
+                                    row.profile.fingerprint.seed,
+                                    row.profile.fingerprint.brand,
+                                    row.profile.fingerprint.platform,
+                                )),
+                        )
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(rgb(p.dim))
-                                .child(route_label(row)),
+                                .child(route_label(row, t)),
                         ),
                 )
                 .child(
@@ -2934,8 +3027,8 @@ fn profile_list(
                                 .flex_col()
                                 .items_end()
                                 .gap_1()
-                                .child(state_badge(row, p))
-                                .children(verification_badge(verifications.get(&id), p))
+                                .child(state_badge(row, p, t))
+                                .children(verification_badge(verifications.get(&id), p, t))
                                 .children(row.last_warning().map(|warning| {
                                     // The full text lives in Runtime Details; the row
                                     // only needs to say that something is off.
@@ -2946,7 +3039,7 @@ fn profile_list(
                                         .truncate()
                                         .text_xs()
                                         .text_color(rgb(p.warning))
-                                        .child(format!("warning: {warning}"))
+                                        .child(t.warning_line(warning))
                                 }))
                                 .children(row.last_error().map(|error| {
                                     div()
@@ -2955,12 +3048,12 @@ fn profile_list(
                                         .child(error.to_string())
                                 })),
                         )
-                        .child(row_actions(row, cx)),
+                        .child(row_actions(row, cx, t)),
                 )
         }))
 }
 
-fn row_actions(row: &ProfileRow, cx: &mut Context<AppView>) -> Div {
+fn row_actions(row: &ProfileRow, cx: &mut Context<AppView>, t: &Text) -> Div {
     let id = row.profile.id;
 
     div()
@@ -2969,35 +3062,35 @@ fn row_actions(row: &ProfileRow, cx: &mut Context<AppView>) -> Div {
         .gap_2()
         .child(
             Button::new(format!("start-{id}"))
-                .label("Start")
+                .label(t.start)
                 .primary()
                 .disabled(!row.can_start())
                 .on_click(cx.listener(move |this, _, _, cx| this.on_start(id, cx))),
         )
         .child(
             Button::new(format!("stop-{id}"))
-                .label("Stop")
+                .label(t.stop)
                 .danger()
                 .disabled(!row.can_stop())
                 .on_click(cx.listener(move |this, _, _, cx| this.on_stop(id, cx))),
         )
         .child(
             Button::new(format!("restart-{id}"))
-                .label("Restart")
+                .label(t.restart)
                 .outline()
                 .disabled(!row.can_restart())
                 .on_click(cx.listener(move |this, _, _, cx| this.on_restart(id, cx))),
         )
 }
 
-fn route_label(row: &ProfileRow) -> String {
+fn route_label(row: &ProfileRow, t: &Text) -> String {
     match &row.proxy_name {
-        Some(proxy) => format!("{} · proxy: {proxy}", row.core_name),
-        None => format!("{} · direct", row.core_name),
+        Some(proxy) => t.profile_meta_proxy(&row.core_name, proxy),
+        None => t.profile_meta_direct(&row.core_name),
     }
 }
 
-fn state_badge(row: &ProfileRow, p: Palette) -> impl IntoElement {
+fn state_badge(row: &ProfileRow, p: Palette, t: &Text) -> impl IntoElement {
     let (background, foreground) = match row.state() {
         RuntimeState::Running => (p.success_bg, p.success_strong),
         RuntimeState::Starting | RuntimeState::Stopping => (p.warning_bg, p.warning),
@@ -3011,7 +3104,7 @@ fn state_badge(row: &ProfileRow, p: Palette) -> impl IntoElement {
         .id(format!("state-{}", row.profile.id))
         .role(Role::Status)
         .test_support()
-        .aria_label(row.state_label())
+        .aria_label(row.state_label(t))
         .px_2()
         .py_1()
         .rounded_full()
@@ -3019,7 +3112,7 @@ fn state_badge(row: &ProfileRow, p: Palette) -> impl IntoElement {
         .text_color(rgb(foreground))
         .text_xs()
         .font_weight(FontWeight::MEDIUM)
-        .child(row.state_label())
+        .child(row.state_label(t))
 }
 
 fn details_panel(
@@ -3029,6 +3122,7 @@ fn details_panel(
     log_tail: &[LogRow],
     cx: &mut Context<AppView>,
     p: Palette,
+    t: &Text,
 ) -> Div {
     // The three views are different element types once an id makes them
     // stateful, so the panel erases them before choosing one.
@@ -3036,7 +3130,7 @@ fn details_panel(
         None => div()
             .text_xs()
             .text_color(rgb(p.muted))
-            .child("Select a profile to inspect its runtime.")
+            .child(t.details_empty)
             .into_any_element(),
         Some(row) => {
             let mut grid = div()
@@ -3048,33 +3142,36 @@ fn details_panel(
                 .gap_y_2();
             let verification = verification.clone();
             for (label, value) in [
-                ("Profile ID", row.profile.id.to_string()),
+                (t.field_profile_id, row.profile.id.to_string()),
                 (
-                    "State",
+                    t.field_state,
                     match row.state_message() {
-                        Some(message) => format!("{}: {message}", row.state_label()),
-                        None => row.state_label().to_string(),
+                        Some(message) => t.profile_state_message(row.state_label(t), message),
+                        None => row.state_label(t).to_string(),
                     },
                 ),
-                ("Seed", row.profile.fingerprint.seed.to_string()),
+                (t.field_seed, row.profile.fingerprint.seed.to_string()),
                 ("Brand", row.profile.fingerprint.brand.to_string()),
                 ("Platform", row.profile.fingerprint.platform.to_string()),
-                ("Language", row.profile.fingerprint.language.clone()),
+                (t.language_title, row.profile.fingerprint.language.clone()),
                 ("Timezone", row.profile.fingerprint.timezone.clone()),
-                ("Core", row.core_name.clone()),
+                (t.field_core, row.core_name.clone()),
                 (
-                    "Proxy",
+                    t.field_proxy,
                     row.proxy_name
                         .clone()
                         .unwrap_or_else(|| "direct".to_string()),
                 ),
-                ("Data dir", row.profile.user_data_dir.display().to_string()),
-                ("Browser PID", optional(row.browser_pid())),
-                ("Xray PID", optional(row.xray_pid())),
-                ("CDP port", optional(row.cdp_port())),
-                ("SOCKS port", optional(row.socks_port())),
-                ("Started", elapsed(row)),
-                ("Dropped events", row.dropped_events().to_string()),
+                (
+                    t.field_data_dir,
+                    row.profile.user_data_dir.display().to_string(),
+                ),
+                (t.field_browser_pid, optional(row.browser_pid())),
+                (t.field_xray_pid, optional(row.xray_pid())),
+                (t.field_cdp_port, optional(row.cdp_port())),
+                (t.field_socks_port, optional(row.socks_port())),
+                (t.field_started, elapsed(row, t)),
+                (t.field_dropped_events, row.dropped_events().to_string()),
             ] {
                 grid = grid.child(key_value(label, value, p));
             }
@@ -3084,18 +3181,18 @@ fn details_panel(
                 .flex_col()
                 .gap_3()
                 .child(grid)
-                .child(verification_block(verification, p))
+                .child(verification_block(verification, p, t))
                 .children(row.last_warning().map(|warning| {
                     div()
                         .text_xs()
                         .text_color(rgb(p.warning))
-                        .child(format!("warning: {warning}"))
+                        .child(t.warning_line(warning))
                 }))
                 .children(row.last_error().map(|error| {
                     div()
                         .text_xs()
                         .text_color(rgb(p.danger_strong))
-                        .child(format!("error: {error}"))
+                        .child(t.error_line(error))
                 }));
 
             // Only one of the three questions is answered at a time, so the
@@ -3108,9 +3205,9 @@ fn details_panel(
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(effective_args(row, p))
+                    .child(effective_args(row, p, t))
                     .into_any_element(),
-                DetailsTab::Log => panel_log(log_tail, p).into_any_element(),
+                DetailsTab::Log => panel_log(log_tail, p, t).into_any_element(),
             }
         }
     };
@@ -3134,7 +3231,7 @@ fn details_panel(
                     div()
                         .text_sm()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("Runtime Details"),
+                        .child(t.runtime_details),
                 )
                 .child(
                     div()
@@ -3143,7 +3240,7 @@ fn details_panel(
                         .gap_2()
                         .child(
                             Button::new("copy-args")
-                                .label("Copy args")
+                                .label(t.copy_args)
                                 .outline()
                                 .disabled(
                                     selected
@@ -3158,7 +3255,7 @@ fn details_panel(
                                     .map(|row| format!("open-dir-{}", row.profile.id))
                                     .unwrap_or_else(|| "open-dir".to_string()),
                             )
-                            .label("Open data dir")
+                            .label(t.open_data_dir)
                             .outline()
                             .disabled(selected.is_none())
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3174,7 +3271,7 @@ fn details_panel(
                                     .map(|row| format!("verify-{}", row.profile.id))
                                     .unwrap_or_else(|| "verify".to_string()),
                             )
-                            .label("Verify fingerprint")
+                            .label(t.verify_fingerprint)
                             .outline()
                             .disabled(!can_verify(selected, verification.as_ref()))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3190,7 +3287,7 @@ fn details_panel(
                                     .map(|row| format!("edit-{}", row.profile.id))
                                     .unwrap_or_else(|| "edit".to_string()),
                             )
-                            .label("Edit")
+                            .label(t.edit)
                             .outline()
                             .disabled(selected.is_none())
                             .on_click(cx.listener(
@@ -3208,7 +3305,7 @@ fn details_panel(
                                     .map(|row| format!("duplicate-{}", row.profile.id))
                                     .unwrap_or_else(|| "duplicate".to_string()),
                             )
-                            .label("Duplicate")
+                            .label(t.duplicate)
                             .outline()
                             .disabled(selected.is_none())
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3224,7 +3321,7 @@ fn details_panel(
                                     .map(|row| format!("delete-{}", row.profile.id))
                                     .unwrap_or_else(|| "delete".to_string()),
                             )
-                            .label("Delete")
+                            .label(t.delete)
                             .outline()
                             .disabled(selected.is_none())
                             .on_click(cx.listener(
@@ -3246,7 +3343,7 @@ fn details_panel(
                 .children(DetailsTab::ALL.map(|candidate| {
                     let active = candidate == tab;
                     Button::new(candidate.id())
-                        .label(candidate.label())
+                        .label(candidate.label(t))
                         .when(active, |button| button.primary())
                         .when(!active, |button| button.ghost())
                         .on_click(
@@ -3268,7 +3365,7 @@ fn details_panel(
 }
 
 /// The tail of one profile's activity log, for the panel's Log view.
-fn panel_log(rows: &[LogRow], p: Palette) -> impl IntoElement {
+fn panel_log(rows: &[LogRow], p: Palette, t: &Text) -> impl IntoElement {
     if rows.is_empty() {
         return div()
             .id("panel-log-body")
@@ -3291,7 +3388,7 @@ fn panel_log(rows: &[LogRow], p: Palette) -> impl IntoElement {
             div()
                 .text_xs()
                 .text_color(rgb(p.muted))
-                .child(format!("This profile, newest first ({})", rows.len())),
+                .child(t.panel_log_title(rows.len())),
         )
         .children(rows.iter().enumerate().map(|(index, row)| {
             div()
@@ -3306,14 +3403,14 @@ fn panel_log(rows: &[LogRow], p: Palette) -> impl IntoElement {
                         .w(px(56.0))
                         .flex_shrink_0()
                         .text_color(rgb(log_level_color(row.level, p)))
-                        .child(row.level.label()),
+                        .child(row.level.label(t)),
                 )
                 .child(
                     div()
                         .w(px(48.0))
                         .flex_shrink_0()
                         .text_color(rgb(p.dim))
-                        .child(format_age(row.at)),
+                        .child(format_age(row.at, t)),
                 )
                 .child(
                     div()
@@ -3339,7 +3436,7 @@ fn can_verify(selected: Option<&ProfileRow>, verification: Option<&Verification>
 }
 
 /// The verification result for one profile, or a hint that it has not run.
-fn verification_block(verification: Option<Verification>, p: Palette) -> Div {
+fn verification_block(verification: Option<Verification>, p: Palette, t: &Text) -> Div {
     let Some(verification) = verification else {
         return div().text_xs().text_color(rgb(p.dim)).child(
             "Fingerprint not verified in this session. Verification reads the \
@@ -3350,25 +3447,25 @@ fn verification_block(verification: Option<Verification>, p: Palette) -> Div {
         return div()
             .text_xs()
             .text_color(rgb(p.muted))
-            .child("Reading the fingerprint out of the running browser...");
+            .child(t.reading_fingerprint);
     }
     if let Some(reason) = verification.failure() {
         return div()
             .text_xs()
             .text_color(rgb(p.danger_strong))
-            .child(format!("Could not read the fingerprint: {reason}"));
+            .child(t.fingerprint_unreadable(reason));
     }
     let found = verification.disagreements();
     let headline = if found.is_empty() {
         div()
             .text_xs()
             .text_color(rgb(p.success_strong))
-            .child("Confirmed: every claim this profile makes was read back from the browser.")
+            .child(t.fingerprint_confirmed)
     } else {
-        div().text_xs().text_color(rgb(p.warning)).child(format!(
-            "{} claim(s) the browser did not reproduce:",
-            found.len()
-        ))
+        div()
+            .text_xs()
+            .text_color(rgb(p.warning))
+            .child(t.claims_not_reproduced(found.len()))
     };
 
     let mut block = div().flex().flex_col().gap_1().child(headline);
@@ -3403,16 +3500,21 @@ fn verification_block(verification: Option<Verification>, p: Palette) -> Div {
             .test_support()
             .text_xs()
             .text_color(rgb(p.warning))
-            .child(format!(
-                "  {}: expected {}, observed {}",
-                discrepancy.claim, discrepancy.expected, discrepancy.observed
+            .child(t.claim_line(
+                discrepancy.claim,
+                &discrepancy.expected,
+                &discrepancy.observed,
             ))
     }))
 }
 
 /// A compact marker for the row: the user should not have to select a profile
 /// to know whether its fingerprint was confirmed.
-fn verification_badge(verification: Option<&Verification>, p: Palette) -> Option<impl IntoElement> {
+fn verification_badge(
+    verification: Option<&Verification>,
+    p: Palette,
+    t: &Text,
+) -> Option<impl IntoElement> {
     let verification = verification?;
     let (background, foreground) = match verification {
         Verification::Confirmed(_) => (p.success_bg, p.success_strong),
@@ -3422,24 +3524,24 @@ fn verification_badge(verification: Option<&Verification>, p: Palette) -> Option
     };
     Some(
         div()
-            .id(format!("verification-{}", verification.label()))
+            .id(format!("verification-{}", verification.label(t)))
             .px_2()
             .py_1()
             .rounded_full()
             .bg(rgb(background))
             .text_color(rgb(foreground))
             .text_xs()
-            .child(verification.label()),
+            .child(verification.label(t)),
     )
 }
 
-fn effective_args(row: &ProfileRow, p: Palette) -> Div {
+fn effective_args(row: &ProfileRow, p: Palette, t: &Text) -> Div {
     let args = row.effective_args();
     if args.is_empty() {
         return div()
             .text_xs()
             .text_color(rgb(p.dim))
-            .child("No launch recorded yet.");
+            .child(t.no_launch_recorded);
     }
 
     div()
@@ -3450,7 +3552,7 @@ fn effective_args(row: &ProfileRow, p: Palette) -> Div {
             div()
                 .text_xs()
                 .text_color(rgb(p.muted))
-                .child(format!("Effective args ({})", args.len())),
+                .child(t.effective_args(args.len())),
         )
         .child(
             div()
@@ -3487,19 +3589,21 @@ fn optional<T: ToString>(value: Option<T>) -> String {
         .unwrap_or_else(|| "—".to_string())
 }
 
-fn elapsed(row: &ProfileRow) -> String {
+fn elapsed(row: &ProfileRow, t: &Text) -> String {
     let started = row
         .snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.started_at);
     match started.and_then(|started| SystemTime::now().duration_since(started).ok()) {
-        Some(elapsed) => format!("{}s ago", elapsed.as_secs()),
+        Some(elapsed) => t.elapsed_seconds(elapsed.as_secs()),
         None => "—".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::text::en;
+
     use super::AppView;
     use crate::browser_data::testing::FakeBrowserDataCopier;
     use crate::open_dir::testing::FakeOpener;
@@ -4019,7 +4123,7 @@ mod tests {
             test.fault().expect("the fault").class,
             FaultClass::Unreachable
         );
-        assert_eq!(test.label(), "no traffic (unreachable)");
+        assert_eq!(test.label(en()), "no traffic (unreachable)");
         assert_eq!(tester.calls(), 1);
         cx.update(|window, _| {
             assert!(
@@ -4271,7 +4375,7 @@ mod tests {
             let verification = view
                 .read_with(cx, |view, _| view.state().verification(id).cloned())
                 .expect("a result is recorded");
-            assert_eq!(verification.label(), "1 claim not confirmed");
+            assert_eq!(verification.label(en()), "1 claim not confirmed");
             assert_eq!(verification.disagreements()[0].observed, "Linux x86_64");
             assert!(
                 !view.read_with(cx, |view, _| view
@@ -4680,7 +4784,7 @@ mod tests {
             "the cores page is not shown first"
         );
 
-        cx.update(|window, cx| window.click("nav-Browser Cores", cx));
+        cx.update(|window, cx| window.click("nav-Cores", cx));
         settle(cx);
 
         assert!(
@@ -4712,7 +4816,7 @@ mod tests {
             crate::state::testing::CoreBinary::new("ui-add", Some("Chromium 148.0.7778.215"));
         let path = binary.path_buf();
 
-        cx.update(|window, cx| window.click("nav-Browser Cores", cx));
+        cx.update(|window, cx| window.click("nav-Cores", cx));
         settle(cx);
         cx.update(|window, cx| window.click("new-core", cx));
         settle(cx);
@@ -4756,7 +4860,7 @@ mod tests {
         let binary = crate::state::testing::CoreBinary::new("ui-silent", None);
         let path = binary.path_buf();
 
-        cx.update(|window, cx| window.click("nav-Browser Cores", cx));
+        cx.update(|window, cx| window.click("nav-Cores", cx));
         settle(cx);
         let before = view.read_with(cx, |view, _| view.state().core_rows().expect("rows").len());
         cx.update(|window, cx| window.click("new-core", cx));
@@ -4815,7 +4919,7 @@ mod tests {
         // The fixture seeds one core; a profile is created against it.
         seed_profile(cx, &view);
         settle(cx);
-        cx.update(|window, cx| window.click("nav-Browser Cores", cx));
+        cx.update(|window, cx| window.click("nav-Cores", cx));
         settle(cx);
         cx.update(|window, cx| window.click("delete-core-0", cx));
         settle(cx);
@@ -4847,7 +4951,7 @@ mod tests {
             crate::state::testing::CoreBinary::new("ui-redetect", Some("Chromium 148.0.7778.215"));
         let path = binary.path_buf();
 
-        cx.update(|window, cx| window.click("nav-Browser Cores", cx));
+        cx.update(|window, cx| window.click("nav-Cores", cx));
         settle(cx);
         cx.update(|window, cx| window.click("new-core", cx));
         settle(cx);
@@ -5031,6 +5135,65 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.state().theme(), ThemeChoice::Light);
         });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The switch repaints the window, and the identifiers it is addressed by do
+    /// not move with the language: every test that clicks `nav-Settings`, and
+    /// every script built on top of them, keeps working in either language.
+    #[gpui_kit::test]
+    fn choosing_a_language_repaints_and_leaves_the_identifiers_alone(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = std::env::temp_dir().join(format!("fp-ui-language-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let config = dir.join("config.json");
+        let (view, _runtime) = view_with_config(cx, &config);
+        let cx = window(cx, &view);
+        seed_named_profile(cx, &view, "Work");
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        scroll_settings_to_the_cards(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("language-zh").is_some()),
+            "the language sits beside the appearance"
+        );
+
+        cx.update(|window, cx| window.click("language-zh", cx));
+        settle(cx);
+
+        view.read_with(cx, |view, _| {
+            assert_eq!(
+                view.state().language(),
+                crate::text::Lang::Zh,
+                "the choice took effect"
+            );
+        });
+        let stored = std::fs::read_to_string(&config).expect("the config file was written");
+        assert!(stored.contains("\"zh\""), "{stored}");
+
+        // The frozen identifiers: a language is a way of reading the window, not
+        // a second window with its own names.
+        assert!(
+            cx.update(|window, _| window.try_find("nav-Settings").is_some()),
+            "the page identifier did not move"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("setting-data-dir").is_some()),
+            "a setting's row identifier did not move either"
+        );
+
+        // A sentence the window computed rather than a label it looked up: the
+        // profile count is built from the table on every render.
+        cx.update(|window, cx| window.click("nav-Profiles", cx));
+        settle(cx);
+        assert_eq!(
+            cx.update(|window, _| window.find("profile-count").label().map(str::to_string)),
+            Some("共 1 个档案。".to_string()),
+            "the header counts in the language now in force"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

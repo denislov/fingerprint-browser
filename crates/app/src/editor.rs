@@ -14,6 +14,7 @@
 //! fields that a cancelled form would leave behind.
 
 use crate::state::CoreChoice;
+use crate::text::Text;
 use crate::theme::{Palette, palette};
 use application::NewProfile;
 use domain::{
@@ -63,6 +64,14 @@ struct Draft {
 
 /// An editable copy of one profile.
 pub struct ProfileEditor {
+    /// The table the form's labels come from, taken when it is opened.
+    ///
+    /// Carried rather than looked up: the editor is its own entity and has no
+    /// route to the application state. A language switched while this form is
+    /// open therefore applies to the next time it is opened, which is the one
+    /// place the window can be briefly half-translated - and the alternative is
+    /// a global, which the tests would then have to serialise.
+    text: &'static Text,
     mode: Mode,
     /// The core the profile runs on.
     ///
@@ -106,17 +115,21 @@ const PLATFORMS: [(Platform, &str); 3] = [
     (Platform::Linux, "Linux"),
 ];
 
-const WEBRTC_POLICIES: [(WebRtcPolicy, &str); 3] = [
-    (WebRtcPolicy::DisableNonProxiedUdp, "No non-proxied UDP"),
-    (
-        WebRtcPolicy::DefaultPublicInterfaceOnly,
-        "Public interface only",
-    ),
-    (
-        WebRtcPolicy::DefaultPublicAndPrivateInterfaces,
-        "Public and private",
-    ),
-];
+/// The WebRTC policies, named in the window's language.
+///
+/// A function rather than a `const` because the labels are translated: the two
+/// brand and platform lists below stay constants, because a brand and a platform
+/// are proper names that read the same in both languages.
+fn webrtc_policies(t: &Text) -> [(WebRtcPolicy, &'static str); 3] {
+    [
+        (WebRtcPolicy::DisableNonProxiedUdp, t.webrtc_none),
+        (WebRtcPolicy::DefaultPublicInterfaceOnly, t.webrtc_public),
+        (
+            WebRtcPolicy::DefaultPublicAndPrivateInterfaces,
+            t.webrtc_public_private,
+        ),
+    ]
+}
 
 const SPOOFING_FEATURES: [(SpoofingFeature, &str); 5] = [
     (SpoofingFeature::Font, "font"),
@@ -136,6 +149,7 @@ impl ProfileEditor {
         profile: &BrowserProfile,
         cores: &[CoreChoice],
         proxies: &[(ProxyId, String)],
+        text: &'static Text,
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
@@ -150,6 +164,7 @@ impl ProfileEditor {
             },
             cores,
             proxies,
+            text,
             window,
             cx,
         )
@@ -166,6 +181,7 @@ impl ProfileEditor {
         core: CoreId,
         cores: &[CoreChoice],
         proxies: &[(ProxyId, String)],
+        text: &'static Text,
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
@@ -180,17 +196,24 @@ impl ProfileEditor {
             },
             cores,
             proxies,
+            text,
             window,
             cx,
         )
     }
 
+    /// Eight parameters, and each one is a different thing the form is built
+    /// from: the mode, the starting core, the draft, the two lists it picks
+    /// from, the language table, and the window pair. A struct would only move
+    /// the list somewhere else.
+    #[allow(clippy::too_many_arguments)]
     fn form(
         mode: Mode,
         core: CoreId,
         draft: Draft,
         cores: &[CoreChoice],
         proxies: &[(ProxyId, String)],
+        text: &'static Text,
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
@@ -199,6 +222,7 @@ impl ProfileEditor {
             cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()))
         };
         Self {
+            text,
             mode,
             core,
             cores: cores.to_vec(),
@@ -252,6 +276,7 @@ impl ProfileEditor {
     /// Turns the form into what the window should do, or explains what is wrong
     /// with it.
     pub fn build(&self, cx: &App) -> Result<ProfileEdit, String> {
+        let t = self.text;
         let text = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
         let optional = |input: &Entity<InputState>| {
             let value = text(input);
@@ -260,21 +285,21 @@ impl ProfileEditor {
 
         let seed: u32 = text(&self.seed)
             .parse()
-            .map_err(|_| "seed must be a whole number".to_string())?;
+            .map_err(|_| t.seed_whole_number.to_string())?;
         let hardware_concurrency = match optional(&self.hardware_concurrency) {
             Some(value) => Some(
                 value
                     .parse::<u8>()
-                    .map_err(|_| "hardware concurrency must be a whole number".to_string())?,
+                    .map_err(|_| t.concurrency_whole_number.to_string())?,
             ),
             None => None,
         };
         let width: u32 = text(&self.window_width)
             .parse()
-            .map_err(|_| "window width must be a whole number".to_string())?;
+            .map_err(|_| t.width_whole_number.to_string())?;
         let height: u32 = text(&self.window_height)
             .parse()
-            .map_err(|_| "window height must be a whole number".to_string())?;
+            .map_err(|_| t.height_whole_number.to_string())?;
 
         let fingerprint = FingerprintProfile {
             seed,
@@ -377,12 +402,11 @@ impl ProfileEditor {
     /// decides whether the exclusions below are honoured at all, and a form that
     /// kept quiet about it would let a checkbox be ticked and ignored.
     fn core_note(&self) -> String {
+        let t = self.text;
         match self.cores.iter().find(|choice| choice.id == self.core) {
             Some(choice) => match &choice.generation {
                 Some(generation) if choice.exclusions_honoured => generation.clone(),
-                Some(generation) => {
-                    format!("{generation}; the exclusions below are ignored by this engine")
-                }
+                Some(generation) => t.generation_ignores_exclusions(generation),
                 None => "this core answered no version, so a profile on it cannot be started \
                          until one is recorded"
                     .to_string(),
@@ -413,6 +437,7 @@ fn proxy_row(
     selected: Option<ProxyId>,
     options: &[(ProxyId, String)],
     p: Palette,
+    t: &Text,
 ) -> Div {
     let missing = selected.filter(|id| !options.iter().any(|(candidate, _)| candidate == id));
 
@@ -424,7 +449,7 @@ fn proxy_row(
         .child(proxy_choice(
             editor.clone(),
             "editor-proxy-direct".to_string(),
-            "Direct".to_string(),
+            t.direct.to_string(),
             selected.is_none(),
             None,
             p,
@@ -444,7 +469,7 @@ fn proxy_row(
             proxy_choice(
                 editor.clone(),
                 "editor-proxy-missing".to_string(),
-                format!("(missing proxy {id})"),
+                t.missing_proxy(&id.to_string()),
                 true,
                 Some(id),
                 p,
@@ -518,6 +543,7 @@ fn core_row(
     selected: CoreId,
     options: &[CoreChoice],
     p: Palette,
+    t: &Text,
 ) -> Div {
     let missing = (!options.iter().any(|choice| choice.id == selected)).then_some(selected);
     div()
@@ -529,7 +555,7 @@ fn core_row(
             core_choice(
                 editor.clone(),
                 format!("editor-core-{index}"),
-                choice.label(),
+                choice.label(t),
                 selected == choice.id,
                 Some(choice.id),
                 p,
@@ -539,7 +565,7 @@ fn core_row(
             core_choice(
                 editor.clone(),
                 "editor-core-missing".to_string(),
-                format!("(missing core {id})"),
+                t.missing_core(&id.to_string()),
                 true,
                 Some(id),
                 p,
@@ -626,6 +652,7 @@ fn choice_row<T: std::marker::Copy + PartialEq + 'static>(
 
 impl Render for ProfileEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.text;
         let p = palette(cx);
         let editor = cx.entity();
         let core_note = self.core_note();
@@ -633,22 +660,22 @@ impl Render for ProfileEditor {
             .label_layout(Axis::Horizontal)
             .label_width(px(LABEL_WIDTH))
             .child(
-                Field::new().label("Name").child(
+                Field::new().label(t.name_field).child(
                     Input::new(&self.name)
                         .id("editor-name")
-                        .aria_label("Profile name"),
+                        .aria_label(t.profile_name),
                 ),
             )
             .child(
                 Field::new()
-                    .label("Browser core")
+                    .label(t.browser_core)
                     .description(core_note)
-                    .child(core_row(editor.clone(), self.core, &self.cores, p)),
+                    .child(core_row(editor.clone(), self.core, &self.cores, p, t)),
             )
             .child(
                 Field::new()
-                    .label("Seed")
-                    .description("Drives every noisy surface the profile claims.")
+                    .label(t.field_seed)
+                    .description(t.seed_help)
                     .child(
                         div()
                             .flex()
@@ -657,11 +684,11 @@ impl Render for ProfileEditor {
                             .child(
                                 Input::new(&self.seed)
                                     .id("editor-seed")
-                                    .aria_label("Fingerprint seed"),
+                                    .aria_label(t.fingerprint_seed),
                             )
                             .child(
                                 Button::new("editor-reroll")
-                                    .label("New seed")
+                                    .label(t.new_seed)
                                     .outline()
                                     .on_click({
                                         let editor = editor.clone();
@@ -675,7 +702,7 @@ impl Render for ProfileEditor {
                             ),
                     ),
             )
-            .child(Field::new().label("Brand").child(choice_row(
+            .child(Field::new().label(t.brand_field).child(choice_row(
                 editor.clone(),
                 "editor-brand",
                 &BRANDS,
@@ -685,14 +712,12 @@ impl Render for ProfileEditor {
             )))
             .child(
                 Field::new()
-                    .label("Brand version")
-                    .description(
-                        "Reported to pages only when a brand is set. Blank means the engine's own.",
-                    )
+                    .label(t.brand_version)
+                    .description(t.brand_version_help)
                     .child(
                         Input::new(&self.brand_version)
                             .id("editor-brand-version")
-                            .aria_label("Brand version"),
+                            .aria_label(t.brand_version),
                     ),
             )
             .child(Field::new().label("Platform").child(choice_row(
@@ -711,41 +736,41 @@ impl Render for ProfileEditor {
                 ),
             )
             .child(
-                Field::new().label("Language").child(
+                Field::new().label(t.language_title).child(
                     Input::new(&self.language)
                         .id("editor-language")
-                        .aria_label("Language"),
+                        .aria_label(t.language_title),
                 ),
             )
             .child(
                 Field::new()
-                    .label("Accept language")
-                    .description("What navigator.language reports; the first entry wins.")
+                    .label(t.accept_language)
+                    .description(t.accept_language_help)
                     .child(
                         Input::new(&self.accept_language)
                             .id("editor-accept-language")
-                            .aria_label("Accept language"),
+                            .aria_label(t.accept_language),
                     ),
             )
             .child(
-                Field::new().label("Timezone").child(
+                Field::new().label(t.timezone_field).child(
                     Input::new(&self.timezone)
                         .id("editor-timezone")
-                        .aria_label("Timezone"),
+                        .aria_label(t.timezone_field),
                 ),
             )
             .child(
                 Field::new()
-                    .label("CPU cores")
-                    .description("Blank leaves the engine's own value.")
+                    .label(t.cpu_cores)
+                    .description(t.cpu_cores_help)
                     .child(
                         Input::new(&self.hardware_concurrency)
                             .id("editor-hardware-concurrency")
-                            .aria_label("Hardware concurrency"),
+                            .aria_label(t.hardware_concurrency),
                     ),
             )
             .child(
-                Field::new().label("Window").child(
+                Field::new().label(t.window_field).child(
                     div()
                         .flex()
                         .items_center()
@@ -754,7 +779,7 @@ impl Render for ProfileEditor {
                             div().w(px(90.0)).child(
                                 Input::new(&self.window_width)
                                     .id("editor-window-width")
-                                    .aria_label("Window width"),
+                                    .aria_label(t.window_width),
                             ),
                         )
                         .child(div().text_xs().text_color(rgb(p.muted)).child("x"))
@@ -762,31 +787,29 @@ impl Render for ProfileEditor {
                             div().w(px(90.0)).child(
                                 Input::new(&self.window_height)
                                     .id("editor-window-height")
-                                    .aria_label("Window height"),
+                                    .aria_label(t.window_height),
                             ),
                         ),
                 ),
             )
             .child(
                 Field::new()
-                    .label("Proxy")
-                    .description(
-                        "Chosen when the profile starts. A change applies to the next start.",
-                    )
-                    .child(proxy_row(editor.clone(), self.proxy, &self.proxies, p)),
+                    .label(t.field_proxy)
+                    .description(t.proxy_field_help)
+                    .child(proxy_row(editor.clone(), self.proxy, &self.proxies, p, t)),
             )
-            .child(Field::new().label("WebRTC").child(choice_row(
+            .child(Field::new().label(t.webrtc_field).child(choice_row(
                 editor.clone(),
                 "editor-webrtc",
-                &WEBRTC_POLICIES,
+                &webrtc_policies(t),
                 self.webrtc_policy,
                 |editor, value| editor.webrtc_policy = value,
                 p,
             )))
             .child(
                 Field::new()
-                    .label("Excluded spoofing")
-                    .description("Features the engine must leave at the host's real value.")
+                    .label(t.excluded_spoofing)
+                    .description(t.excluded_spoofing_help)
                     .child(div().flex().flex_wrap().gap_3().children(
                         SPOOFING_FEATURES.iter().map(|(feature, label)| {
                             let feature = *feature;
@@ -828,6 +851,8 @@ impl Render for ProfileEditor {
 
 #[cfg(test)]
 mod tests {
+    use crate::text::en;
+
     // Explicit imports: a glob here pulls the whole gpui surface into the test
     // macro's expansion and makes it recurse.
     use super::{ProfileEdit, ProfileEditor};
@@ -896,7 +921,7 @@ mod tests {
         let cores = cores.to_vec();
         let proxies = proxies.to_vec();
         cx.add_window_view(move |window, cx| {
-            ProfileEditor::new(&profile, &cores, &proxies, window, cx)
+            ProfileEditor::new(&profile, &cores, &proxies, en(), window, cx)
         })
     }
 
@@ -908,7 +933,7 @@ mod tests {
         let cores = cores.to_vec();
         let core = cores.first().expect("a core to open the form on").id;
         cx.add_window_view(move |window, cx| {
-            ProfileEditor::new_profile("Profile 1", core, &cores, &[], window, cx)
+            ProfileEditor::new_profile("Profile 1", core, &cores, &[], en(), window, cx)
         })
     }
 
@@ -1294,16 +1319,16 @@ mod tests {
     #[test]
     fn a_core_chip_names_the_core_without_repeating_an_automatic_major() {
         assert_eq!(
-            choice(CoreId::new(), "chrome 148", 148).label(),
+            choice(CoreId::new(), "chrome 148", 148).label(en()),
             "chrome 148"
         );
         assert_eq!(
-            choice(CoreId::new(), "Daily driver", 148).label(),
+            choice(CoreId::new(), "Daily driver", 148).label(en()),
             "Daily driver (Chrome 148)",
             "a name the user chose does not carry the major, so the chip adds it"
         );
         assert_eq!(
-            choice(CoreId::new(), "chrome", 0).label(),
+            choice(CoreId::new(), "chrome", 0).label(en()),
             "chrome (version unknown)"
         );
     }
@@ -1320,7 +1345,7 @@ mod tests {
         let (editor, cx) = new_editor(cx, &[unread]);
 
         assert_eq!(
-            editor.read_with(cx, |editor, _| editor.cores[0].label()),
+            editor.read_with(cx, |editor, _| editor.cores[0].label(en())),
             "chrome (version unknown)"
         );
         let note = editor.read_with(cx, |editor, _| editor.core_note());

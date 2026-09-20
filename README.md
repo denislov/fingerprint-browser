@@ -54,6 +54,11 @@ this repository does not bundle or fork them.
   painted, or **Light**. The window repaints as soon as the choice is made - it is
   the one setting that does not wait for the next start - and the choice is kept
   in the config file.
+- Choose the window's language: **English** or **简体中文**, labelled in their own
+  language. Both switches change the running window at once, and both are kept in
+  the config file. Identifiers the window is addressed by do not change with the
+  language, and the faults reported by the engine's own layers stay in English;
+  see [interface text](docs/i18n.md).
 
 ## Proxy testing
 
