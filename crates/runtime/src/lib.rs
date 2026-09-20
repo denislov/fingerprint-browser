@@ -1,6 +1,8 @@
 pub mod capability;
 pub mod cdp;
 pub mod compat;
+pub mod diagnostic;
+pub mod egress;
 pub mod error;
 pub mod events;
 pub mod facade;
@@ -15,8 +17,14 @@ pub mod version;
 pub mod xray;
 
 pub use capability::{CapabilityResolver, DefaultCapabilityResolver};
-pub use cdp::{CdpInfo, CdpProbe, CdpSession, CdpTarget, HttpCdpProbe};
+pub use cdp::{CdpInfo, CdpProbe, CdpSession, CdpTarget, DocumentState, HttpCdpProbe};
 pub use compat::{CompatibilityReport, Finding as CompatibilityFinding};
+pub use diagnostic::{
+    DEFAULT_ECHO_URL, Diagnosis, DiagnosticRequest, EchoClient, Engine, Fault, FaultClass,
+    SocksEchoClient, check_echo_url, classify_engine_log, diagnose as diagnose_proxy,
+    extract_exit_ip,
+};
+pub use egress::{EgressOutcome, EgressProbe, EgressReading, verify_egress};
 pub use error::{
     CapabilityError, CdpError, JournalError, LaunchPlanError, PortError, ProcessError, ProxyError,
     RuntimeCommandError, RuntimeError,

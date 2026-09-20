@@ -122,6 +122,22 @@ pub fn timestamp(at: SystemTime) -> String {
     )
 }
 
+/// The same instant as [`timestamp`], spelled so it can be part of a file name:
+/// `20260920-160400`.
+///
+/// The colon in a clock time is not a legal character in a Windows path, so a
+/// name built from `timestamp` would produce a backup that cannot be written on
+/// one of the platforms this program runs on. The date arithmetic is not
+/// duplicated - both read the same [`civil_from_unix`].
+pub fn file_stamp(at: SystemTime) -> String {
+    let seconds = at
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let (year, month, day, hour, minute, second) = civil_from_unix(seconds);
+    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
+}
+
 /// Days since the Unix epoch to a civil date, and seconds to a clock time.
 ///
 /// Howard Hinnant's `civil_from_days`, which is exact for every date this is
@@ -263,5 +279,24 @@ mod tests {
             timestamp(UNIX_EPOCH + Duration::from_millis(1_700_000_000_123)),
             "2023-11-14T22:13:20.123Z"
         );
+    }
+
+    #[test]
+    fn a_file_stamp_is_the_same_instant_without_the_characters_a_path_cannot_hold() {
+        assert_eq!(file_stamp(UNIX_EPOCH), "19700101-000000");
+        assert_eq!(
+            file_stamp(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            "20231114-221320"
+        );
+        assert_eq!(
+            file_stamp(UNIX_EPOCH + Duration::from_secs(951_782_400)),
+            "20000229-000000"
+        );
+
+        // The whole reason this exists: a name built from `timestamp` would
+        // carry colons, and a Windows path cannot hold one.
+        let stamp = file_stamp(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+        assert!(!stamp.contains(':'), "{stamp}");
+        assert_eq!(stamp.matches('-').count(), 1, "{stamp}");
     }
 }

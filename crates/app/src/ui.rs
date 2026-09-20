@@ -9,24 +9,26 @@ use crate::editor::{ProfileEdit, ProfileEditor};
 use crate::open_dir::DirectoryOpener;
 use crate::proxy_editor::ProxyEditor;
 use crate::proxy_import::ProxyImport;
+use crate::proxy_tester::ProxyTester;
 use crate::settings::SettingKey;
 use crate::state::{
-    AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Page, ProfileRow, ProxyRow, Toast,
-    ToastKind, Verification,
+    AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Page, ProfileRow, ProxyRow,
+    ProxyTest, Toast, ToastKind, Verification,
 };
-use crate::verifier::FingerprintVerifier;
+use crate::verifier::{FingerprintVerifier, VerificationReport};
 use crossbeam_channel::{Receiver, Sender};
 use domain::{CoreId, ProfileId, ProxyId, RuntimeState};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::Root;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::*;
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::{Notification, NotificationType};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use runtime::{Discrepancy, RuntimeEvent};
+use runtime::{Diagnosis, Fault, RuntimeEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -44,6 +46,8 @@ const TICK: Duration = Duration::from_millis(200);
 const RECONCILE_EVERY: u64 = 5;
 /// Cap on the per-row warning line; the full text is in Runtime Details.
 const WARNING_WIDTH: f32 = 420.0;
+/// Wide enough for a profile name or a proxy name without crowding the title.
+const PROFILE_FILTER_WIDTH: f32 = 320.0;
 
 pub struct AppView {
     /// The editor behind the open dialog, if any.
@@ -58,11 +62,29 @@ pub struct AppView {
     setting_editor: Option<Entity<InputState>>,
     /// Which setting that field belongs to.
     setting_key: Option<SettingKey>,
+    /// The Profiles page's filter field.
+    ///
+    /// Built on the first render rather than here: an `InputState` needs a
+    /// window, and neither this constructor nor `boot` has one.
+    filter_input: Option<Entity<InputState>>,
+    /// The Settings page's export path field. Built on the first render for the
+    /// same reason, and watched by nobody: an export is the only thing the text
+    /// is for, so the button reads it when it is pressed.
+    export_input: Option<Entity<InputState>>,
+    /// The Settings page's import path field. Built and read the same way the
+    /// export one is: the text exists for one button, which reads it when it is
+    /// pressed.
+    import_input: Option<Entity<InputState>>,
     verifier: Arc<dyn FingerprintVerifier>,
+    /// Sends one request through a proxy. Injected so a test never dials one.
+    tester: Arc<dyn ProxyTester>,
     /// Opens a profile's data directory. Injected so a test does not open one.
     opener: Arc<dyn DirectoryOpener>,
-    verifications: Receiver<(ProfileId, Result<Vec<Discrepancy>, String>)>,
-    verification_tx: Sender<(ProfileId, Result<Vec<Discrepancy>, String>)>,
+    verifications: Receiver<(ProfileId, Result<VerificationReport, String>)>,
+    verification_tx: Sender<(ProfileId, Result<VerificationReport, String>)>,
+    /// Finished proxy tests, with whether the engine probed was already up.
+    proxy_tests: Receiver<(ProxyId, bool, Result<Diagnosis, Fault>)>,
+    proxy_test_tx: Sender<(ProxyId, bool, Result<Diagnosis, Fault>)>,
     /// What the opener reported, once it was done handing the request off.
     open_results: Receiver<(PathBuf, Result<(), String>)>,
     open_tx: Sender<(PathBuf, Result<(), String>)>,
@@ -70,6 +92,8 @@ pub struct AppView {
     events: Receiver<RuntimeEvent>,
     /// Kept alive: dropping a GPUI subscription unregisters the observer.
     window_closed: Option<Subscription>,
+    /// The same, for the filter field's change events.
+    filter_changed: Option<Subscription>,
 }
 
 impl AppView {
@@ -77,13 +101,16 @@ impl AppView {
         state: AppState,
         events: Receiver<RuntimeEvent>,
         verifier: Arc<dyn FingerprintVerifier>,
+        tester: Arc<dyn ProxyTester>,
         opener: Arc<dyn DirectoryOpener>,
     ) -> Self {
         // A reading takes seconds and blocks on the browser, so it runs on a
-        // worker thread and reports back through this channel. Opening a
-        // directory waits for the desktop's opener the same way, for the same
-        // reason: neither may block the window.
+        // worker thread and reports back through this channel. Testing a proxy
+        // starts an engine and waits for one request, which blocks the same way
+        // and for the same reason. Opening a directory waits for the desktop's
+        // opener too: none of the three may block the window.
         let (verification_tx, verifications) = crossbeam_channel::unbounded();
+        let (proxy_test_tx, proxy_tests) = crossbeam_channel::unbounded();
         let (open_tx, open_results) = crossbeam_channel::unbounded();
         Self {
             editor: None,
@@ -92,15 +119,22 @@ impl AppView {
             core_editor: None,
             setting_editor: None,
             setting_key: None,
+            filter_input: None,
+            export_input: None,
+            import_input: None,
             verifier,
+            tester,
             opener,
             verifications,
             verification_tx,
+            proxy_tests,
+            proxy_test_tx,
             open_results,
             open_tx,
             state,
             events,
             window_closed: None,
+            filter_changed: None,
         }
     }
 
@@ -146,6 +180,27 @@ impl AppView {
         self.setting_editor.clone()
     }
 
+    /// The Profiles page's filter field, for tests that type into it.
+    ///
+    /// Built during the first render, so it is `None` until the view has been
+    /// drawn once.
+    #[cfg(test)]
+    pub fn filter_input(&self) -> Option<Entity<InputState>> {
+        self.filter_input.clone()
+    }
+
+    /// The Settings page's export path field, once a render has built it.
+    #[cfg(test)]
+    pub fn export_input(&self) -> Option<Entity<InputState>> {
+        self.export_input.clone()
+    }
+
+    /// The Settings page's import path field, once a render has built it.
+    #[cfg(test)]
+    pub fn import_input(&self) -> Option<Entity<InputState>> {
+        self.import_input.clone()
+    }
+
     fn on_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.state.set_page(page);
         cx.notify();
@@ -184,8 +239,9 @@ impl AppView {
 
                     let notified = view.drain_events();
                     let verified = view.drain_verifications();
+                    let tested = view.drain_proxy_tests();
                     let opened = view.drain_open_results();
-                    if notified || reconcile || verified || opened {
+                    if notified || reconcile || verified || tested || opened {
                         view.state.refresh_runtime();
                         cx.notify();
                     }
@@ -237,6 +293,21 @@ impl AppView {
                 .is_some_and(Verification::is_running)
             {
                 self.state.finish_verification(id, outcome);
+            }
+            received = true;
+        }
+        received
+    }
+
+    /// Collect finished proxy tests from the worker threads.
+    ///
+    /// A proxy deleted or edited while the test ran is dropped: the answer
+    /// describes an upstream that is no longer the one on the row.
+    fn drain_proxy_tests(&mut self) -> bool {
+        let mut received = false;
+        while let Ok((id, live, outcome)) = self.proxy_tests.try_recv() {
+            if self.state.proxy_test(id).is_some_and(ProxyTest::is_running) {
+                self.state.finish_proxy_test(id, live, outcome);
             }
             received = true;
         }
@@ -897,8 +968,33 @@ impl AppView {
         let verifier = Arc::clone(&self.verifier);
         let sender = self.verification_tx.clone();
         std::thread::spawn(move || {
-            let outcome = verifier.verify(job.port, &job.profile, &job.capabilities);
+            let outcome = verifier.verify(&job);
             let _ = sender.send((job.profile_id, outcome));
+        });
+        cx.notify();
+    }
+
+    /// Sends one request through a proxy and reports what left.
+    ///
+    /// The work is a socket held open for as long as the far end takes, so it
+    /// runs on a worker and the window stays responsive. `live` travels with
+    /// the answer because the row has to say whether the engine probed was
+    /// already carrying a profile's traffic or was started for the test.
+    fn on_test_proxy(&mut self, id: ProxyId, cx: &mut Context<Self>) {
+        let job = match self.state.begin_proxy_test(id) {
+            Ok(job) => job,
+            Err(error) => {
+                self.state.push_notice(error.to_string(), true);
+                cx.notify();
+                return;
+            }
+        };
+        let tester = Arc::clone(&self.tester);
+        let sender = self.proxy_test_tx.clone();
+        std::thread::spawn(move || {
+            let live = job.is_live();
+            let outcome = tester.test(&job);
+            let _ = sender.send((job.proxy_id, live, outcome));
         });
         cx.notify();
     }
@@ -947,6 +1043,131 @@ impl AppView {
         cx.notify();
     }
 
+    /// The filter field, built the first time the view renders and kept after.
+    ///
+    /// Kept rather than rebuilt, so the text survives a trip to another page: a
+    /// filter box that forgets what it was narrowing would be a small betrayal
+    /// of what a filter box usually means.
+    fn ensure_filter_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(input) = &self.filter_input {
+            return input.clone();
+        }
+
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Filter by name, seed, core or proxy")
+        });
+        // Observed rather than subscribed to change events: the field notifies
+        // for every edit, and reading its value afterwards is what the listing
+        // needs, so there is no event kind to match on and no way to miss one.
+        self.filter_changed = Some(cx.observe(&input, Self::on_filter_changed));
+        self.filter_input = Some(input.clone());
+        input
+    }
+
+    /// Narrows the profiles list to what the field holds.
+    ///
+    /// Only what the page lists. A profile that stops matching keeps running,
+    /// keeps its reading, and stays the profile the details panel answers for;
+    /// the filter is a way of looking, not a way of acting.
+    fn on_filter_changed(&mut self, input: Entity<InputState>, cx: &mut Context<Self>) {
+        let typed = input.read(cx).value().to_string();
+        if typed == self.state.profile_filter() {
+            return;
+        }
+        self.state.set_profile_filter(typed);
+        cx.notify();
+    }
+
+    /// Empties the filter, from a button rather than from the field.
+    ///
+    /// `InputState::set_value` deliberately emits no change event, so the
+    /// filter is cleared here instead of waiting to be told about it.
+    fn on_clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.set_profile_filter(String::new());
+        if let Some(input) = self.filter_input.clone() {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Builds the Settings page's export path field on first use.
+    ///
+    /// Started empty rather than filled with the default path. An empty field
+    /// resolves to a new file each time it is used, so a window left open
+    /// overnight does not propose a name from yesterday - and the sentence under
+    /// the field says which path it would be right now.
+    fn ensure_export_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(input) = &self.export_input {
+            return input.clone();
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Leave empty for a new file under the data directory")
+        });
+        self.export_input = Some(input.clone());
+        input
+    }
+
+    /// Writes a configuration backup to whatever the field says.
+    fn on_export_configuration(&mut self, cx: &mut Context<Self>) {
+        // Read here rather than watched, so there is no observer to keep in step
+        // and no notification that can be missed: the text exists for this one
+        // button, and reading it at the moment it is pressed is the whole of its
+        // job.
+        if let Some(input) = self.export_input.clone() {
+            let typed = input.read(cx).value().to_string();
+            self.state.set_export_path(typed);
+        }
+        // The result - and whether the file carries credentials - is reported
+        // through the banner, the toast and the activity log, all of which
+        // `export_configuration` reaches by way of `set_notice`.
+        let _ = self.state.export_configuration();
+        cx.notify();
+    }
+
+    fn on_toggle_export_credentials(&mut self, include: bool, cx: &mut Context<Self>) {
+        self.state.set_export_includes_credentials(include);
+        cx.notify();
+    }
+
+    /// Builds the Settings page's import path field on first use, the way the
+    /// export one is built.
+    fn ensure_import_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(input) = &self.import_input {
+            return input.clone();
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Path of a configuration backup to read")
+        });
+        self.import_input = Some(input.clone());
+        input
+    }
+
+    /// Reads a configuration backup from whatever the field says.
+    fn on_import_configuration(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = self.import_input.clone() {
+            let typed = input.read(cx).value().to_string();
+            self.state.set_import_path(typed);
+        }
+        // The result - and every shortfall the report carries - is reported
+        // through `set_notice`, which routes shortfalls to the banner and
+        // clean imports to a toast.
+        let _ = self.state.import_configuration();
+        cx.notify();
+    }
+
     fn on_dismiss_notice(&mut self, cx: &mut Context<Self>) {
         self.state.dismiss_notice();
         cx.notify();
@@ -975,7 +1196,16 @@ impl Render for AppView {
         let dialogs = Root::render_dialog_layer(window, cx);
         let sheets = Root::render_sheet_layer(window, cx);
         let notifications = Root::render_notification_layer(window, cx);
-        let rows = self.state.rows().to_vec();
+        // The filter field is built here because rendering is the first place
+        // with a window to give an `InputState`; the view keeps it after that.
+        let filter_input = self.ensure_filter_input(window, cx);
+        let export_input = self.ensure_export_input(window, cx);
+        let import_input = self.ensure_import_input(window, cx);
+        let export_destination = self.state.export_destination();
+        let export_includes_credentials = self.state.export_includes_credentials();
+        let filter = self.state.profile_filter().to_string();
+        let total = self.state.rows().len();
+        let visible = self.state.visible_rows();
         let selected = self.state.selected().cloned();
         let selected_id = self.state.selected_id();
         let verifications: std::collections::HashMap<ProfileId, Verification> = self
@@ -1012,6 +1242,14 @@ impl Render for AppView {
                     .child({
                         let page = self.state.page();
                         let proxy_rows = self.state.proxy_rows().unwrap_or_default();
+                        let proxy_tests: std::collections::HashMap<ProxyId, ProxyTest> = proxy_rows
+                            .iter()
+                            .filter_map(|row| {
+                                self.state
+                                    .proxy_test(row.proxy.id)
+                                    .map(|test| (row.proxy.id, test.clone()))
+                            })
+                            .collect();
                         let core_rows = self.state.core_rows().unwrap_or_default();
                         let setting_rows = self.state.setting_rows();
                         let log_rows = self.state.log_rows();
@@ -1034,11 +1272,19 @@ impl Render for AppView {
                                 Page::Cores => cores_header(cx),
                                 Page::Log => logs_header(log_filter, &log_status, cx),
                                 Page::Settings => settings_header(),
-                                Page::Profiles => profiles_header(cx),
+                                Page::Profiles => profiles_header(
+                                    &ProfilesHeader {
+                                        search: filter_input.clone(),
+                                        filter: filter.clone(),
+                                        total,
+                                        visible: visible.len(),
+                                    },
+                                    cx,
+                                ),
                             })
                             .children(notice.map(|notice| notice_banner(notice, cx)))
                             .when(page == Page::Proxies, |this| {
-                                this.child(proxies_body(&proxy_rows, cx))
+                                this.child(proxies_body(&proxy_rows, &proxy_tests, cx))
                             })
                             .when(page == Page::Cores, |this| {
                                 this.child(cores_body(&core_rows, cx))
@@ -1047,7 +1293,16 @@ impl Render for AppView {
                                 this.child(logs_body(&log_rows, log_count, log_filter, cx))
                             })
                             .when(page == Page::Settings, |this| {
-                                this.child(settings_body(&setting_rows, cx))
+                                this.child(settings_body(
+                                    &setting_rows,
+                                    SettingsExport {
+                                        path: export_input.clone(),
+                                        destination: export_destination.clone(),
+                                        include_credentials: export_includes_credentials,
+                                    },
+                                    import_input.clone(),
+                                    cx,
+                                ))
                             })
                             .when(page == Page::Profiles, |this| {
                                 this.child(
@@ -1059,9 +1314,15 @@ impl Render for AppView {
                                         .min_h_0()
                                         .gap_2()
                                         .overflow_y_scroll()
-                                        .children(empty_hint(&rows, has_core))
+                                        .children(empty_hint(
+                                            total,
+                                            visible.len(),
+                                            has_core,
+                                            &filter,
+                                            cx,
+                                        ))
                                         .child(profile_list(
-                                            &rows,
+                                            &visible,
                                             selected_id,
                                             &verifications,
                                             cx,
@@ -1164,34 +1425,90 @@ fn sidebar(page: Page, cx: &mut Context<AppView>) -> Div {
         }))
 }
 
-fn profiles_header(cx: &mut Context<AppView>) -> Div {
+/// What the Profiles page's header needs to render its filter.
+///
+/// One struct rather than four arguments, because this is where the page says
+/// what it is showing, and the list of things it has to say grows.
+struct ProfilesHeader {
+    /// The filter field, built by the view on its first render.
+    search: Entity<InputState>,
+    /// What the field holds, so the subtitle can say whether it is narrowing.
+    filter: String,
+    /// Every profile, and how many of them the filter left.
+    total: usize,
+    visible: usize,
+}
+
+fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>) -> Div {
+    // While a filter is on, the count is the useful sentence: it is how the user
+    // finds out that the list is not the whole list. Without one, the header
+    // goes back to explaining what a profile is. The accessible name spells out
+    // both either way, because a status line is worth hearing in full.
+    let filtering = header.total > 0 && !header.filter.trim().is_empty();
+    let subtitle = if filtering {
+        format!("Showing {} of {} profiles.", header.visible, header.total)
+    } else {
+        "Each profile owns its seed, data directory and browser process.".to_string()
+    };
+    let announcement = if filtering {
+        format!(
+            "Showing {} of {} profiles, filtered by \"{}\".",
+            header.visible,
+            header.total,
+            header.filter.trim()
+        )
+    } else {
+        format!("{} profiles.", header.total)
+    };
+
     div()
         .flex()
-        .items_center()
-        .justify_between()
+        .flex_col()
+        .gap_3()
         .child(
             div()
                 .flex()
-                .flex_col()
-                .gap_1()
+                .items_center()
+                .justify_between()
+                .gap_4()
                 .child(
                     div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Profiles"),
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_xl()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Profiles"),
+                        )
+                        .child(
+                            div()
+                                .id("profile-count")
+                                .test_support()
+                                .aria_label(announcement)
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(subtitle),
+                        ),
                 )
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(MUTED))
-                        .child("Each profile owns its seed, data directory and browser process."),
+                    Button::new("new-profile")
+                        .label("New Profile")
+                        .primary()
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.on_new_profile(window, cx)),
+                        ),
                 ),
         )
         .child(
-            Button::new("new-profile")
-                .label("New Profile")
-                .primary()
-                .on_click(cx.listener(|this, _, window, cx| this.on_new_profile(window, cx))),
+            div().w(px(PROFILE_FILTER_WIDTH)).child(
+                Input::new(&header.search)
+                    .id("profile-filter")
+                    .aria_label("Filter profiles")
+                    .cleanable(true),
+            ),
         )
 }
 
@@ -1241,7 +1558,11 @@ fn proxies_header(cx: &mut Context<AppView>) -> Div {
         )
 }
 
-fn proxies_body(rows: &[ProxyRow], cx: &mut Context<AppView>) -> impl IntoElement {
+fn proxies_body(
+    rows: &[ProxyRow],
+    tests: &std::collections::HashMap<ProxyId, ProxyTest>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
     div()
         .id("proxies-scroll")
         .flex()
@@ -1268,6 +1589,7 @@ fn proxies_body(rows: &[ProxyRow], cx: &mut Context<AppView>) -> impl IntoElemen
         // borrowing the context, which the closure cannot hand back.
         .children(rows.iter().enumerate().map(|(index, row)| {
             let id = row.proxy.id;
+            let test = tests.get(&id);
             div()
                 .id(format!("proxy-{index}"))
                 .test_support()
@@ -1297,13 +1619,23 @@ fn proxies_body(rows: &[ProxyRow], cx: &mut Context<AppView>) -> impl IntoElemen
                                 .text_xs()
                                 .text_color(rgb(if row.is_used() { 0x86efac } else { 0x71717a }))
                                 .child(row.usage_label()),
-                        ),
+                        )
+                        .children(proxy_test_reading(test, id)),
                 )
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap_2()
+                        .child(
+                            Button::new(format!("test-proxy-{index}"))
+                                .label("Test")
+                                .outline()
+                                .disabled(test.is_some_and(ProxyTest::is_running))
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.on_test_proxy(id, cx)),
+                                ),
+                        )
                         .child(
                             Button::new(format!("edit-proxy-{index}"))
                                 .label("Edit")
@@ -1322,6 +1654,45 @@ fn proxies_body(rows: &[ProxyRow], cx: &mut Context<AppView>) -> impl IntoElemen
                         ),
                 )
         }))
+}
+
+/// The result of the last test of one proxy, or nothing when it has not run.
+///
+/// The row says which engine was probed, because "this proxy works" and "this
+/// profile's traffic is going through it" are different claims and only the
+/// second one is about a leak.
+fn proxy_test_reading(test: Option<&ProxyTest>, id: ProxyId) -> Option<AnyElement> {
+    let test = test?;
+    let colour = match test {
+        ProxyTest::Running => DIM,
+        ProxyTest::Passed(reading) if reading.live => 0x86efac,
+        ProxyTest::Passed(_) => 0x7dd3fc,
+        ProxyTest::Failed(_) => 0xfca5a5,
+    };
+    let text = match test {
+        ProxyTest::Running => test.label(),
+        ProxyTest::Passed(reading) => format!(
+            "{} {}",
+            test.label(),
+            if reading.live {
+                "through the engine a running profile is using"
+            } else {
+                "through a temporary engine"
+            }
+        ),
+        // The evidence behind the class is in the activity log: a row is one
+        // line, and an engine's own words are not.
+        ProxyTest::Failed(_) => format!("{}; see the log", test.label()),
+    };
+    Some(
+        div()
+            .id(format!("proxy-test-{id}"))
+            .test_support()
+            .text_xs()
+            .text_color(rgb(colour))
+            .child(text)
+            .into_any_element(),
+    )
 }
 
 fn cores_header(cx: &mut Context<AppView>) -> Div {
@@ -1513,10 +1884,31 @@ fn settings_header() -> Div {
         ))
 }
 
+/// Everything the export card needs that is not already in [`AppState`].
+///
+/// A value rather than four positional parameters, for the reason
+/// [`crate::verifier::VerificationJob`] is one: the list grows, and every call
+/// site should not have to change when it does.
+struct SettingsExport {
+    path: Entity<InputState>,
+    /// Where an empty field would write right now, shown under the field so the
+    /// default is never a guess.
+    destination: PathBuf,
+    include_credentials: bool,
+}
+
 fn settings_body(
     rows: &[crate::settings::SettingRow],
+    export: SettingsExport,
+    import_input: Entity<InputState>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    // Built first, with their lifetimes erased: each card borrows the context
+    // and the chain below borrows it again for its own listeners, and an
+    // opaque return type would keep the first borrow alive to the end of the
+    // chain.
+    let export_card: AnyElement = export_card(&export, cx).into_any_element();
+    let import_card: AnyElement = import_card(&import_input, cx).into_any_element();
     div()
         .id("settings-scroll")
         .flex()
@@ -1612,6 +2004,156 @@ fn settings_body(
                         }),
                 )
         }))
+        .child(export_card)
+        .child(import_card)
+}
+
+/// The export card at the foot of the Settings page.
+///
+/// The path is typed rather than picked from a native file dialog. A chooser
+/// would mean another dependency, and opening one is the part of a desktop
+/// integration most likely to behave differently over RDP - which is a supported
+/// way to run this. The field starts empty, and the line under it names the file
+/// an empty field would write, so the default is shown rather than described.
+fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoElement {
+    let view = cx.entity().downgrade();
+    div()
+        .id("export-configuration")
+        .test_support()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .px_4()
+        .py_4()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Export configuration"),
+                )
+                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                    "Writes cores, proxies and profiles to a JSON file, for another machine or for keeping. Browser data is not included: it is far larger, and a copy belongs beside the profile it came from.",
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(&export.path)
+                            .id("export-path")
+                            .aria_label("Export file path"),
+                    ),
+                )
+                .child(
+                    Button::new("export-run")
+                        .label("Export")
+                        .on_click(cx.listener(|this, _, _, cx| this.on_export_configuration(cx))),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(DIM))
+                .child(format!("Empty writes {}", export.destination.display())),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Checkbox::new("export-credentials")
+                        .label("Include proxy credentials")
+                        .checked(export.include_credentials)
+                        .on_change(move |&checked, _, cx: &mut App| {
+                            if let Some(view) = view.upgrade() {
+                                view.update(cx, |view, cx| {
+                                    view.on_toggle_export_credentials(checked, cx)
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child("Left off, the passwords are dropped and the rest of each proxy is kept."),
+                ),
+        )
+        .child(
+            div().text_xs().text_color(rgb(0xfbbf24)).child(
+                "A file that includes credentials holds them in plain text. Do not send it to anyone casually.",
+            ),
+        )
+}
+
+/// The import card under the export one.
+///
+/// The import is the quieter of the two verbs, and the card says why in one
+/// line: nothing already here is overwritten. That is not a promise the
+/// program can keep on its own - it is what the rules do - but it is the
+/// sentence a reader needs before they type a path and press the button.
+fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl IntoElement {
+    div()
+        .id("import-configuration")
+        .test_support()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .px_4()
+        .py_4()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(BORDER))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Import configuration"),
+                )
+                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                    "Reads a backup written by the export above. Nothing already here is overwritten: identifiers that exist are kept as they are, a profile whose core is not here is skipped, and the report says which was which.",
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(input)
+                            .id("import-path")
+                            .aria_label("Import file path"),
+                    ),
+                )
+                .child(
+                    Button::new("import-run")
+                        .label("Import")
+                        .on_click(cx.listener(|this, _, _, cx| this.on_import_configuration(cx))),
+                ),
+        )
+        .child(
+            div().text_xs().text_color(rgb(DIM)).child(
+                "Nothing is confirmed first: import only adds, so undoing one is deleting the rows it named.",
+            ),
+        )
 }
 
 fn logs_header(
@@ -1843,12 +2385,27 @@ fn notice_banner(notice: crate::state::Notice, cx: &mut Context<AppView>) -> Div
         )
 }
 
-fn empty_hint(rows: &[ProfileRow], has_core: bool) -> Option<Div> {
-    if !rows.is_empty() {
+fn empty_hint(
+    total: usize,
+    visible: usize,
+    has_core: bool,
+    filter: &str,
+    cx: &mut Context<AppView>,
+) -> Option<Div> {
+    // Two kinds of empty look the same in a list and mean different things:
+    // there are no profiles, or a filter is hiding the ones there are. Only the
+    // second can be undone from here, so only it offers to.
+    let filtering = total > 0 && visible == 0;
+    if total > 0 && !filtering {
         return None;
     }
 
-    let message = if has_core {
+    let message = if filtering {
+        format!(
+            "No profile answers to \"{}\"; all {total} are hidden by it.",
+            filter.trim()
+        )
+    } else if has_core {
         "No profiles yet. Create one to start a browser.".to_string()
     } else {
         "No browser core found. Set FP_BROWSER_CHROMIUM_BIN to a fingerprint-chromium \
@@ -1863,9 +2420,18 @@ fn empty_hint(rows: &[ProfileRow], has_core: bool) -> Option<Div> {
             .border_1()
             .border_color(rgb(BORDER))
             .bg(rgb(PANEL))
-            .text_xs()
-            .text_color(rgb(MUTED))
-            .child(message),
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .child(div().text_xs().text_color(rgb(MUTED)).child(message))
+            .when(filtering, |this| {
+                this.child(
+                    Button::new("clear-filter").label("Clear filter").on_click(
+                        cx.listener(|this, _, window, cx| this.on_clear_filter(window, cx)),
+                    ),
+                )
+            }),
     )
 }
 
@@ -2350,33 +2916,55 @@ fn verification_block(verification: Option<Verification>) -> Div {
             .child(format!("Could not read the fingerprint: {reason}"));
     }
     let found = verification.disagreements();
-    if found.is_empty() {
-        return div()
+    let headline = if found.is_empty() {
+        div()
             .text_xs()
             .text_color(rgb(0x4ade80))
-            .child("Confirmed: every claim this profile makes was read back from the browser.");
+            .child("Confirmed: every claim this profile makes was read back from the browser.")
+    } else {
+        div().text_xs().text_color(rgb(0xfbbf24)).child(format!(
+            "{} claim(s) the browser did not reproduce:",
+            found.len()
+        ))
+    };
+
+    let mut block = div().flex().flex_col().gap_1().child(headline);
+    // The path is the half of the answer no other panel carries, and it is the
+    // reason to trust a proxy at all: an address that matches the one the proxy
+    // was tested at is worth seeing without having to open the log.
+    if let Some(report) = verification.report()
+        && let Some(label) = report.exit_label()
+    {
+        let colour = if report.exit_ip.is_some() {
+            0x7dd3fc
+        } else {
+            DIM
+        };
+        block = block.child(
+            div()
+                .id("exit-address")
+                .test_support()
+                .text_xs()
+                .text_color(rgb(colour))
+                .child(label),
+        );
+    }
+    if found.is_empty() {
+        return block;
     }
     // The panel scrolls, so a long list of findings stays reachable instead of
     // being clipped to the first few.
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(div().text_xs().text_color(rgb(0xfbbf24)).child(format!(
-            "{} claim(s) the browser did not reproduce:",
-            found.len()
-        )))
-        .children(found.iter().enumerate().map(|(index, discrepancy)| {
-            div()
-                .id(("disagreement", index))
-                .test_support()
-                .text_xs()
-                .text_color(rgb(0xfbbf24))
-                .child(format!(
-                    "  {}: expected {}, observed {}",
-                    discrepancy.claim, discrepancy.expected, discrepancy.observed
-                ))
-        }))
+    block.children(found.iter().enumerate().map(|(index, discrepancy)| {
+        div()
+            .id(("disagreement", index))
+            .test_support()
+            .text_xs()
+            .text_color(rgb(0xfbbf24))
+            .child(format!(
+                "  {}: expected {}, observed {}",
+                discrepancy.claim, discrepancy.expected, discrepancy.observed
+            ))
+    }))
 }
 
 /// A compact marker for the row: the user should not have to select a profile
@@ -2384,7 +2972,7 @@ fn verification_block(verification: Option<Verification>) -> Div {
 fn verification_badge(verification: Option<&Verification>) -> Option<impl IntoElement> {
     let verification = verification?;
     let (background, foreground) = match verification {
-        Verification::Confirmed => (0x14351f, 0x4ade80),
+        Verification::Confirmed(_) => (0x14351f, 0x4ade80),
         Verification::Running => (BORDER, 0xa1a1aa),
         Verification::Disagreements(_) => (0x3a2f12, 0xfbbf24),
         Verification::Unreadable(_) => (0x3a1717, 0xf87171),
@@ -2471,17 +3059,18 @@ fn elapsed(row: &ProfileRow) -> String {
 mod tests {
     use super::AppView;
     use crate::open_dir::testing::FakeOpener;
+    use crate::proxy_tester::testing::FakeProxyTester;
     use crate::state::AppState;
     use crate::state::Verification;
     use crate::state::testing::{FakeRuntime, core};
     use crate::verifier::testing::FakeVerifier;
     use application::{DefaultProfileService, DefaultProxyService, ProxyService, RuntimeService};
-    use domain::{CoreId, ProfileId};
+    use domain::{CoreId, ProfileId, ProxyId};
     use gpui_kit::component::Root;
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext, px, size};
-    use runtime::{Discrepancy, RuntimeEvent};
+    use runtime::{Diagnosis, Discrepancy, Fault, FaultClass, RuntimeEvent};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
@@ -2527,6 +3116,9 @@ mod tests {
     }
 
     /// The same view, with an activity log the test can read back.
+    ///
+    /// The proxy tester is a passing fake here: tests that are about something
+    /// else should not have to think about it.
     fn view_with_log(
         cx: &mut TestAppContext,
         verifier: Arc<FakeVerifier>,
@@ -2534,6 +3126,31 @@ mod tests {
         opener: Arc<FakeOpener>,
         log_file: Option<crate::log_file::LogFile>,
     ) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>, Arc<FakeOpener>) {
+        let (view, runtime, opener, _tester) = view_with_tester(
+            cx,
+            verifier,
+            Arc::new(FakeProxyTester::passing()),
+            config,
+            opener,
+            log_file,
+        );
+        (view, runtime, opener)
+    }
+
+    /// The same view, with the proxy tester the test drives.
+    fn view_with_tester(
+        cx: &mut TestAppContext,
+        verifier: Arc<FakeVerifier>,
+        tester: Arc<FakeProxyTester>,
+        config: Option<&std::path::Path>,
+        opener: Arc<FakeOpener>,
+        log_file: Option<crate::log_file::LogFile>,
+    ) -> (
+        gpui_kit::Entity<AppView>,
+        Arc<FakeRuntime>,
+        Arc<FakeOpener>,
+        Arc<FakeProxyTester>,
+    ) {
         let profile_repo: Arc<MemProfileRepository> = Arc::new(MemProfileRepository::new());
         let core_repo: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
         let proxy_repo: Arc<MemProxyRepository> = Arc::new(MemProxyRepository::new());
@@ -2571,11 +3188,11 @@ mod tests {
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
 
         let view = cx.new(|cx| {
-            let mut view = AppView::new(state, event_rx, verifier, opener.clone());
+            let mut view = AppView::new(state, event_rx, verifier, tester.clone(), opener.clone());
             view.boot(cx);
             view
         });
-        (view, runtime, opener)
+        (view, runtime, opener, tester)
     }
 
     fn view(cx: &mut TestAppContext) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>) {
@@ -2597,6 +3214,91 @@ mod tests {
                 .expect("seed a profile");
             cx.notify();
             id
+        })
+    }
+
+    /// A profile whose name a test chose, for the filter to match on.
+    fn seed_named_profile<C: gpui_kit::AppContext>(
+        cx: &mut C,
+        view: &gpui_kit::Entity<AppView>,
+        name: &str,
+    ) -> ProfileId {
+        view.update(cx, |view, cx| {
+            let id = view
+                .state_mut()
+                .create_profile(name)
+                .expect("seed a profile");
+            cx.notify();
+            id
+        })
+    }
+
+    /// Types into the Profiles page's filter, the way the field reports an edit.
+    fn type_filter(
+        cx: &mut gpui_kit::VisualTestContext,
+        view: &gpui_kit::Entity<AppView>,
+        text: &str,
+    ) {
+        let field = view
+            .read_with(cx, |view, _| view.filter_input())
+            .expect("the first render builds the filter field");
+        cx.update(|window, cx| {
+            field.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
+        settle(cx);
+    }
+
+    /// Types into the Settings page's export path field.
+    fn type_export_path(
+        cx: &mut gpui_kit::VisualTestContext,
+        view: &gpui_kit::Entity<AppView>,
+        text: &str,
+    ) {
+        let field = view
+            .read_with(cx, |view, _| view.export_input())
+            .expect("rendering the Settings page builds the export field");
+        cx.update(|window, cx| {
+            field.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
+        settle(cx);
+    }
+
+    /// The last thing the window was told, from the state rather than a toast
+    /// that has already been drained.
+    fn last_message(
+        cx: &mut gpui_kit::VisualTestContext,
+        view: &gpui_kit::Entity<AppView>,
+    ) -> String {
+        view.read_with(cx, |view, _| {
+            view.state()
+                .toasts()
+                .last()
+                .map(|toast| toast.message.clone())
+        })
+        .expect("the window was told something")
+    }
+
+    /// A proxy to work with, made without going through the dialog.
+    ///
+    /// Building one through the form has its own test; a test about testing a
+    /// proxy should not have to drive a dialog to get one.
+    fn seed_proxy(
+        cx: &mut gpui_kit::VisualTestContext,
+        view: &gpui_kit::Entity<AppView>,
+        name: &str,
+    ) -> ProxyId {
+        view.update(cx, |view, _| {
+            view.state_mut()
+                .create_proxy(
+                    name,
+                    domain::ProxyOutbound::Socks5(domain::Socks5Outbound {
+                        host: "10.0.0.1".to_string(),
+                        port: 1080,
+                        username: None,
+                        password: None,
+                    }),
+                )
+                .expect("seed a proxy")
         })
     }
 
@@ -2759,6 +3461,140 @@ mod tests {
         .unwrap();
     }
 
+    /// One request through a proxy, and the address it left from on the row.
+    ///
+    /// This is the whole capability: without it the window only ever knows that
+    /// the engine's local port is open, and a proxy that accepts the connection
+    /// and carries nothing is indistinguishable from a working one.
+    #[gpui_kit::test]
+    fn testing_a_proxy_from_the_window_reports_where_the_traffic_left(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime, _opener, tester) = view_with_tester(
+            cx,
+            Arc::new(FakeVerifier::passing()),
+            Arc::new(FakeProxyTester::passing_from("198.51.100.9")),
+            None,
+            Arc::new(FakeOpener::working()),
+            None,
+        );
+        let cx = window(cx, &view);
+        let proxy_id = seed_proxy(cx, &view, "Office");
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("test-proxy-0", cx));
+        settle(cx);
+
+        wait_for_state(cx, &view, |state| {
+            state
+                .proxy_test(proxy_id)
+                .is_some_and(|test| !test.is_running())
+        });
+
+        let test = view
+            .read_with(cx, |view, _| view.state().proxy_test(proxy_id).cloned())
+            .expect("a result");
+        let reading = test.reading().expect("a reading, not a fault");
+        assert_eq!(reading.exit_ip, "198.51.100.9");
+        assert!(
+            !reading.live,
+            "nothing was running, so the test started an engine of its own"
+        );
+        assert_eq!(tester.calls(), 1);
+        assert_eq!(
+            tester.ports_asked(),
+            vec![None],
+            "nothing was running, so no port was handed to the tester"
+        );
+
+        // And the row says what the request found, not just that it ran.
+        let row = cx.update(|window, _| window.find(format!("proxy-test-{proxy_id}")));
+        assert!(row.visible(), "the row reports the reading");
+    }
+
+    /// A proxy that carries nothing must not read as a working one, and the row
+    /// must name the class rather than only that something failed.
+    #[gpui_kit::test]
+    fn a_proxy_that_carries_nothing_says_so_on_the_row(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime, _opener, tester) = view_with_tester(
+            cx,
+            Arc::new(FakeVerifier::passing()),
+            Arc::new(FakeProxyTester::with_outcome(Err(Fault::new(
+                FaultClass::Unreachable,
+                "no route to the upstream",
+            )))),
+            None,
+            Arc::new(FakeOpener::working()),
+            None,
+        );
+        let cx = window(cx, &view);
+        let proxy_id = seed_proxy(cx, &view, "Office");
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("test-proxy-0", cx));
+        settle(cx);
+
+        wait_for_state(cx, &view, |state| {
+            state
+                .proxy_test(proxy_id)
+                .is_some_and(|test| !test.is_running())
+        });
+
+        let test = view
+            .read_with(cx, |view, _| view.state().proxy_test(proxy_id).cloned())
+            .expect("a result");
+        assert!(
+            test.reading().is_none(),
+            "nothing left, so nothing may be reported as a reading"
+        );
+        assert_eq!(
+            test.fault().expect("the fault").class,
+            FaultClass::Unreachable
+        );
+        assert_eq!(test.label(), "no traffic (unreachable)");
+        assert_eq!(tester.calls(), 1);
+        cx.update(|window, _| {
+            assert!(
+                window.find(format!("proxy-test-{proxy_id}")).visible(),
+                "the row reports the failure"
+            )
+        });
+    }
+
+    /// A proxy still being tested cannot be tested again: that would start a
+    /// second engine for an answer already on its way.
+    #[gpui_kit::test]
+    fn a_proxy_already_being_tested_is_not_tested_twice(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime, _opener, tester) = view_with_tester(
+            cx,
+            Arc::new(FakeVerifier::passing()),
+            Arc::new(FakeProxyTester::passing()),
+            None,
+            Arc::new(FakeOpener::working()),
+            None,
+        );
+        let cx = window(cx, &view);
+        let proxy_id = seed_proxy(cx, &view, "Office");
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("test-proxy-0", cx));
+        settle(cx);
+        // The first click's worker has not reported yet, so the slot is taken.
+        cx.update(|window, cx| window.click("test-proxy-0", cx));
+        settle(cx);
+
+        wait_for_state(cx, &view, |state| {
+            state
+                .proxy_test(proxy_id)
+                .is_some_and(|test| !test.is_running())
+        });
+        assert_eq!(tester.calls(), 1, "the second click was refused");
+    }
+
     /// Drives the verification channel until the worker reports, so the test
     /// never depends on the tick timer firing.
     fn wait_for_verification<C: gpui_kit::AppContext>(
@@ -2792,6 +3628,7 @@ mod tests {
             );
             view.update(cx, |view, cx| {
                 view.drain_verifications();
+                view.drain_proxy_tests();
                 view.drain_open_results();
                 cx.notify();
             });
@@ -2835,20 +3672,112 @@ mod tests {
             let verification = view
                 .read_with(cx, |view, _| view.state().verification(id).cloned())
                 .expect("a result is recorded");
-            assert_eq!(verification, Verification::Confirmed);
+            assert!(matches!(verification, Verification::Confirmed(_)));
             assert_eq!(verifier.calls(), 1);
         })
         .unwrap();
     }
 
+    /// A running profile leaving by a proxy that has been tested.
+    ///
+    /// The whole path a proxied profile takes to being verified: a proxy, its
+    /// pre-flight, the profile pointed at it, and the browser up with a debug
+    /// port. Tests about the address question should not each re-derive it.
+    fn started_proxied_profile(
+        cx: &mut gpui_kit::VisualTestContext,
+        view: &gpui_kit::Entity<AppView>,
+        runtime: &Arc<FakeRuntime>,
+    ) -> ProfileId {
+        let id = seed_profile(cx, view);
+        let proxy_id = seed_proxy(cx, view, "Office");
+        view.update(cx, |view, cx| {
+            let state = view.state_mut();
+            state.begin_proxy_test(proxy_id).expect("begin");
+            state.finish_proxy_test(
+                proxy_id,
+                false,
+                Ok(Diagnosis {
+                    exit_ip: "198.51.100.9".to_string(),
+                    elapsed: Duration::from_millis(80),
+                }),
+            );
+            let mut profile = state.profile(id).expect("the profile");
+            profile.proxy_id = Some(proxy_id);
+            state.update_profile(profile).expect("assign");
+            cx.notify();
+        });
+        cx.update(|window, cx| window.click(format!("start-{id}"), cx));
+        runtime.set_cdp_port(id, 9333);
+        view.update(cx, |view, cx| {
+            view.state_mut().refresh_runtime();
+            cx.notify();
+        });
+        settle(cx);
+        id
+    }
+
+    /// Verifying a proxied profile also asks where its traffic leaves from. The
+    /// expectation is the address the proxy was measured at, because that is the
+    /// only place in the product that knows where the traffic should have gone.
+    #[gpui_kit::test]
+    fn verifying_a_proxied_profile_asks_the_endpoint_its_proxy_was_tested_at(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let verifier = Arc::new(FakeVerifier::passing_from("203.0.113.7"));
+        let (view, runtime) = view_with_verifier(cx, verifier.clone());
+        let cx = window(cx, &view);
+        let id = started_proxied_profile(cx, &view, &runtime);
+
+        cx.update(|window, cx| window.click(format!("verify-{id}"), cx));
+        wait_for_verification(cx, &view);
+
+        let asked = verifier.egrees_asked();
+        assert_eq!(asked.len(), 1, "the address question is asked once");
+        let egress = asked[0]
+            .clone()
+            .expect("a proxied profile is asked about its address");
+        assert_eq!(
+            egress.expected.as_deref(),
+            Some("198.51.100.9"),
+            "the expectation is what the proxy was measured at, not the reading"
+        );
+        assert!(
+            egress.echo_url.starts_with("http://"),
+            "the same endpoint the pre-flight used: {}",
+            egress.echo_url
+        );
+    }
+
+    /// Where the traffic went is the half of the answer that says the path is
+    /// the intended one, so it is shown rather than left in the log.
+    #[gpui_kit::test]
+    fn the_address_a_verified_profile_left_from_is_shown_on_the_profile(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, runtime) =
+            view_with_verifier(cx, Arc::new(FakeVerifier::passing_from("203.0.113.7")));
+        let cx = window(cx, &view);
+        let id = started_proxied_profile(cx, &view, &runtime);
+
+        cx.update(|window, cx| window.click(format!("verify-{id}"), cx));
+        wait_for_verification(cx, &view);
+        settle(cx);
+
+        let reading = cx.update(|window, _| window.find("exit-address"));
+        assert!(
+            reading.visible(),
+            "the address the traffic left from belongs on the profile"
+        );
+    }
+
     #[gpui_kit::test]
     fn disagreements_are_listed_claim_by_claim(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let verifier = Arc::new(FakeVerifier::with_outcome(Ok(vec![Discrepancy {
+        let verifier = Arc::new(FakeVerifier::disagreeing(vec![Discrepancy {
             claim: "platform",
             expected: "Win32".to_string(),
             observed: "Linux x86_64".to_string(),
-        }])));
+        }]));
         let (view, runtime) = view_with_verifier(cx, verifier);
 
         let handle = cx.open_window(size(px(1200.), px(900.)), |window, cx| {
@@ -2897,8 +3826,7 @@ mod tests {
                 observed: format!("observed-{index}"),
             })
             .collect();
-        let (view, runtime) =
-            view_with_verifier(cx, Arc::new(FakeVerifier::with_outcome(Ok(found))));
+        let (view, runtime) = view_with_verifier(cx, Arc::new(FakeVerifier::disagreeing(found)));
 
         let handle = cx.open_window(size(px(1200.), px(700.)), |window, cx| {
             Root::new(view.clone(), window, cx)
@@ -3956,6 +4884,119 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn the_filter_narrows_the_profile_list(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        let work = seed_named_profile(cx, &view, "Work laptop");
+        let shopping = seed_named_profile(cx, &view, "Shopping");
+        settle(cx);
+        assert_eq!(
+            cx.update(|window, _| window.find("profile-count").label().map(str::to_string)),
+            Some("2 profiles.".to_string()),
+            "without a filter the header says how many there are"
+        );
+
+        type_filter(cx, &view, "work");
+
+        assert!(
+            cx.update(|window, _| window.try_find(format!("profile-{work}")).is_some()),
+            "the profile that matches is listed"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find(format!("profile-{shopping}")).is_none()),
+            "the one that does not match is not"
+        );
+        assert_eq!(
+            cx.update(|window, _| window.find("profile-count").label().map(str::to_string)),
+            Some("Showing 1 of 2 profiles, filtered by \"work\".".to_string()),
+            "the header says the list is not the whole list"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_filter_that_matches_nothing_offers_the_way_back(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        let id = seed_named_profile(cx, &view, "Work laptop");
+        settle(cx);
+
+        type_filter(cx, &view, "nothing is called this");
+
+        assert!(
+            cx.update(|window, _| window.try_find(format!("profile-{id}")).is_none()),
+            "the list is empty"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("clear-filter").is_some()),
+            "an empty list says which kind of empty it is, and offers the way out"
+        );
+
+        cx.update(|window, cx| window.click("clear-filter", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find(format!("profile-{id}")).is_some()),
+            "clearing brings the profile back"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().profile_filter().to_string()),
+            "",
+            "the list is unfiltered again"
+        );
+        let field = view
+            .read_with(cx, |view, _| view.filter_input())
+            .expect("the field is built by now");
+        assert_eq!(
+            field.read_with(cx, |state, _| state.value().to_string()),
+            "",
+            "the field was emptied too: setting a value emits no change event"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("clear-filter").is_none()),
+            "and the hint goes with it"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn the_filter_survives_a_trip_to_another_page(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        let work = seed_named_profile(cx, &view, "Work laptop");
+        seed_named_profile(cx, &view, "Shopping");
+        settle(cx);
+
+        type_filter(cx, &view, "work");
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("nav-Profiles", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find(format!("profile-{work}")).is_some()),
+            "the filter is still narrowing the list"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().visible_rows().len()),
+            1
+        );
+        let field = view
+            .read_with(cx, |view, _| view.filter_input())
+            .expect("the field outlives the page it was built for");
+        assert_eq!(
+            field.read_with(cx, |state, _| state.value().to_string()),
+            "work",
+            "and it still shows the term"
+        );
+    }
+
+    #[gpui_kit::test]
     fn a_refused_edit_keeps_the_dialog_open_and_shows_why(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (view, _runtime) = view(cx);
@@ -4061,6 +5102,7 @@ mod tests {
                 state,
                 event_rx,
                 Arc::new(FakeVerifier::passing()),
+                Arc::new(FakeProxyTester::passing()),
                 Arc::new(FakeOpener::working()),
             );
             view.boot(cx);
@@ -4085,5 +5127,177 @@ mod tests {
             assert!(notice.contains("no browser core"));
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn exporting_from_the_settings_page_writes_the_file_and_says_what_it_did(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        let dir = std::env::temp_dir().join(format!("fp-ui-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("config.json");
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        // The field exists only after the page has been rendered, which is where
+        // an `InputState` gets the window it needs.
+        type_export_path(cx, &view, path.to_string_lossy().as_ref());
+        cx.update(|window, cx| window.click("export-run", cx));
+        settle(cx);
+
+        assert!(path.exists(), "{} should exist", path.display());
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(text.contains("fp-browser/config-backup"), "{text}");
+
+        // This fixture has no proxies, so the sentence is the one about there
+        // having been nothing to leave out - not a claim about credentials that
+        // were not there.
+        let message = last_message(cx, &view);
+        assert!(message.contains("config.json"), "{message}");
+        assert!(
+            message.contains("no proxy credentials to leave out"),
+            "{message}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[gpui_kit::test]
+    fn the_export_card_offers_the_choice_about_credentials(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+
+        // Left out by default, because a file carrying plain-text passwords is
+        // the thing to choose deliberately.
+        assert!(!view.read_with(cx, |view, _| view.state().export_includes_credentials()));
+
+        // And the line under the field names the file an empty field would
+        // write, so the default is shown rather than described.
+        let shown = view
+            .read_with(cx, |view, _| view.state().export_destination())
+            .display()
+            .to_string();
+        assert!(shown.ends_with(".json"), "{shown}");
+        assert!(shown.contains("exports"), "{shown}");
+    }
+
+    /// Types into the Settings page's import path field.
+    fn type_import_path(
+        cx: &mut gpui_kit::VisualTestContext,
+        view: &gpui_kit::Entity<AppView>,
+        text: &str,
+    ) {
+        let field = view
+            .read_with(cx, |view, _| view.import_input())
+            .expect("rendering the Settings page builds the import field");
+        cx.update(|window, cx| {
+            field.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
+        settle(cx);
+    }
+
+    /// Brings the import card into view.
+    ///
+    /// The Settings page scrolls and the import card sits under the export
+    /// one, below the fold of the test window; a click on an off-screen
+    /// element is refused. The wheel event is dispatched over the export card
+    /// (the scrolling container is not a leaf the helpers can aim at) and
+    /// bubbles up to the page that scrolls.
+    fn scroll_settings_to_the_import_card(cx: &mut gpui_kit::VisualTestContext) {
+        cx.update(|window, cx| {
+            window.scroll(
+                "export-run",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                    gpui_kit::px(0.),
+                    gpui_kit::px(-4000.),
+                )),
+                cx,
+            );
+        });
+        settle(cx);
+    }
+
+    #[gpui_kit::test]
+    fn importing_from_the_settings_page_reads_the_file_and_says_what_it_did(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        // The file to import is written the honest way: through the same
+        // document the export writes, for an installation that holds nothing.
+        // The state-level tests cover a full round trip; what is under test
+        // here is the wiring from the card to the use case.
+        let dir = std::env::temp_dir().join(format!("fp-ui-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("config.json");
+        let snapshot = application::ConfigSnapshot {
+            cores: Vec::new(),
+            proxies: Vec::new(),
+            profiles: Vec::new(),
+        };
+        let document = application::ConfigBackup::build(
+            snapshot,
+            application::Credentials::Excluded,
+            application::ExportOrigin {
+                exported_at: "2026-09-21T00:00:00Z".to_string(),
+                source_data_dir: dir.display().to_string(),
+            },
+        );
+        std::fs::write(&path, document.to_json().expect("serialise")).expect("write");
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        type_import_path(cx, &view, path.to_string_lossy().as_ref());
+        scroll_settings_to_the_import_card(cx);
+        cx.update(|window, cx| window.click("import-run", cx));
+        settle(cx);
+
+        // An empty installation importing an empty file is the quiet case: a
+        // toast that says so, not a banner that pretends something happened.
+        let message = last_message(cx, &view);
+        assert!(message.contains("config.json"), "{message}");
+        assert!(message.contains("nothing was added"), "{message}");
+        assert!(
+            view.read_with(cx, |view, _| view.state().notice().is_none()),
+            "the quiet case does not sit in the banner"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[gpui_kit::test]
+    fn importing_without_a_path_is_refused_in_the_banner(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        scroll_settings_to_the_import_card(cx);
+        cx.update(|window, cx| window.click("import-run", cx));
+        settle(cx);
+
+        // Refused where the field is, and stayed to be dismissed - the same
+        // treatment every other refusal in the window gets.
+        let notice = view.read_with(cx, |view, _| view.state().notice().cloned());
+        let notice = notice.expect("the refusal is shown");
+        assert!(notice.error, "{:?}", notice.message);
+        assert!(
+            notice.message.contains("Type the path"),
+            "{:?}",
+            notice.message
+        );
     }
 }

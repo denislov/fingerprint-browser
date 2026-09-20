@@ -1,10 +1,13 @@
 //! Process-level configuration, and where each value came from.
 //!
-//! Two settings can be changed from the window: the data directory and the Xray
-//! executable. Both decide what the *next* start does, so they cannot live in
-//! the data directory's database: changing the data directory would move the
-//! database, and the setting would be forgotten in the move. They live in a
-//! config file of their own instead, outside the data directory.
+//! Three settings can be changed from the window: the data directory, the Xray
+//! executable, and the address endpoint the proxy diagnostic asks. The first two
+//! decide what the *next* start does, so they cannot live in the data
+//! directory's database: changing the data directory would move the database,
+//! and the setting would be forgotten in the move. They live in a config file of
+//! their own instead, outside the data directory. The endpoint is read fresh on
+//! every test, so it takes effect immediately; it lives here because it is a
+//! standing choice about a machine, not a per-profile one.
 //!
 //! Precedence is environment, then config file, then default. The page shows
 //! which one won, and when the environment is overriding a stored value it says
@@ -30,10 +33,12 @@ pub const DATA_DIR_ENV: &str = "FP_BROWSER_DATA_DIR";
 pub const XRAY_BIN_ENV: &str = "FP_BROWSER_XRAY_BIN";
 /// Chromium binary registered at startup; cores are managed on their own page.
 pub const CHROMIUM_BIN_ENV: &str = "FP_BROWSER_CHROMIUM_BIN";
-/// Major for binaries that do not answer `--version` usefully.
+/// Majors for binaries that do not answer `--version` usefully.
 pub const CHROMIUM_MAJOR_ENV: &str = "FP_BROWSER_CHROMIUM_MAJOR";
 /// Where the two editable settings are stored.
 pub const CONFIG_ENV: &str = "FP_BROWSER_CONFIG";
+/// The address endpoint the proxy diagnostic asks.
+pub const ECHO_URL_ENV: &str = "FP_BROWSER_ECHO_URL";
 
 /// A message for the window banner: the text and whether it is an error.
 pub type Notice = (String, bool);
@@ -51,6 +56,7 @@ fn default_xray() -> PathBuf {
 pub enum SettingKey {
     DataDir,
     XrayExecutable,
+    EchoUrl,
     ChromiumBin,
     ChromiumMajor,
     ConfigFile,
@@ -60,9 +66,10 @@ pub enum SettingKey {
 impl SettingKey {
     /// Every key, in the order the page shows them.
     #[cfg(test)]
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::DataDir,
         Self::XrayExecutable,
+        Self::EchoUrl,
         Self::ChromiumBin,
         Self::ChromiumMajor,
         Self::ConfigFile,
@@ -74,6 +81,7 @@ impl SettingKey {
         match self {
             Self::DataDir => "data-dir",
             Self::XrayExecutable => "xray-executable",
+            Self::EchoUrl => "echo-url",
             Self::ChromiumBin => "chromium-bin",
             Self::ChromiumMajor => "chromium-major",
             Self::ConfigFile => "config-file",
@@ -85,6 +93,7 @@ impl SettingKey {
         match self {
             Self::DataDir => "Data directory",
             Self::XrayExecutable => "Xray executable",
+            Self::EchoUrl => "Proxy test endpoint",
             Self::ChromiumBin => "Chromium binary",
             Self::ChromiumMajor => "Chromium major override",
             Self::ConfigFile => "Config file",
@@ -94,7 +103,7 @@ impl SettingKey {
 
     /// Whether the window may change it.
     pub fn editable(self) -> bool {
-        matches!(self, Self::DataDir | Self::XrayExecutable)
+        matches!(self, Self::DataDir | Self::XrayExecutable | Self::EchoUrl)
     }
 
     /// When a change takes effect.
@@ -167,6 +176,7 @@ impl SettingRow {
 struct Stored {
     data_dir: Option<String>,
     xray_executable: Option<String>,
+    echo_url: Option<String>,
 }
 
 /// The environment, read once so a test can supply its own.
@@ -174,6 +184,7 @@ struct Stored {
 pub struct Environment {
     pub data_dir: Option<String>,
     pub xray_executable: Option<String>,
+    pub echo_url: Option<String>,
     pub chromium_bin: Option<String>,
     pub chromium_major: Option<String>,
     pub config: Option<String>,
@@ -190,6 +201,7 @@ impl Environment {
         Self {
             data_dir: read(DATA_DIR_ENV),
             xray_executable: read(XRAY_BIN_ENV),
+            echo_url: read(ECHO_URL_ENV),
             chromium_bin: read(CHROMIUM_BIN_ENV),
             chromium_major: read(CHROMIUM_MAJOR_ENV),
             config: read(CONFIG_ENV),
@@ -205,6 +217,21 @@ fn default_config_path(host: &paths::Host) -> PathBuf {
         .join("config.json")
 }
 
+/// The endpoint the proxy diagnostic asks what address it left from.
+///
+/// The default is plain HTTP on purpose. The first question a proxy test asks is
+/// whether traffic left at all; over TLS a certificate that does not match the
+/// endpoint would look exactly like a proxy that does not forward, and the two
+/// need opposite fixes. An `https://` value is not downgraded: the diagnostic
+/// refuses it with a configuration fault rather than quietly asking a different
+/// question than the one the address appears to ask.
+fn resolve_echo_url(stored: &Stored, env: &Environment) -> String {
+    env.echo_url
+        .clone()
+        .or_else(|| stored.echo_url.clone())
+        .unwrap_or_else(|| runtime::DEFAULT_ECHO_URL.to_string())
+}
+
 pub struct Settings {
     config_path: PathBuf,
     stored: Stored,
@@ -213,6 +240,7 @@ pub struct Settings {
     config_error: Option<String>,
     data_dir: PathBuf,
     xray_executable: PathBuf,
+    echo_url: String,
 }
 
 impl Settings {
@@ -245,6 +273,8 @@ impl Settings {
             .or_else(|| stored.xray_executable.as_ref().map(PathBuf::from))
             .unwrap_or_else(default_xray);
 
+        let echo_url = resolve_echo_url(&stored, &env);
+
         let notice = config_error.as_ref().map(|error| {
             (
                 format!("{error}; using defaults, and settings cannot be saved until it is fixed"),
@@ -259,6 +289,7 @@ impl Settings {
             config_error,
             data_dir,
             xray_executable,
+            echo_url,
         };
         (settings, notice)
     }
@@ -269,6 +300,12 @@ impl Settings {
 
     pub fn xray_executable(&self) -> &Path {
         &self.xray_executable
+    }
+
+    /// The endpoint the proxy test asks, which may see the address it is asked
+    /// from: that is the whole point of asking it.
+    pub fn echo_url(&self) -> &str {
+        &self.echo_url
     }
 
     pub fn runtime_dir(&self) -> PathBuf {
@@ -298,6 +335,18 @@ impl Settings {
                 env: self.env.xray_executable.as_ref().map(|_| XRAY_BIN_ENV),
                 shadowed: shadowed(&self.stored.xray_executable, self.env.xray_executable.is_some()),
                 note: None,
+            },
+            SettingRow {
+                key: SettingKey::EchoUrl,
+                value: self.echo_url.clone(),
+                source: self.source_of(self.env.echo_url.is_some(), self.stored.echo_url.is_some()),
+                env: self.env.echo_url.as_ref().map(|_| ECHO_URL_ENV),
+                shadowed: shadowed(&self.stored.echo_url, self.env.echo_url.is_some()),
+                note: Some(
+                    "asked to report the address a connection left from, so it sees that address; \
+                     asked only when you run a proxy test"
+                        .to_string(),
+                ),
             },
             SettingRow {
                 key: SettingKey::ChromiumBin,
@@ -401,6 +450,7 @@ impl Settings {
         match key {
             SettingKey::DataDir => stored.data_dir = Some(value.to_string()),
             SettingKey::XrayExecutable => stored.xray_executable = Some(value.to_string()),
+            SettingKey::EchoUrl => stored.echo_url = Some(value.to_string()),
             _ => return Err(format!("{} is not editable", key.label())),
         }
 
@@ -422,10 +472,18 @@ impl Settings {
             .map(PathBuf::from)
             .or_else(|| self.stored.xray_executable.as_ref().map(PathBuf::from))
             .unwrap_or_else(default_xray);
+        // This one is read fresh on every test, so the new value is live now
+        // rather than at the next start.
+        self.echo_url = resolve_echo_url(&self.stored, &self.env);
         Ok(())
     }
 
     /// The value a setting would take on the next start.
+    ///
+    /// `None` means nothing is pending: either the setting is not stored, or the
+    /// environment is winning and what was saved will not be used. A setting
+    /// whose `effect` is "now" is never pending either - it is already in use, so
+    /// there is no restart for it to wait on.
     #[cfg(test)]
     pub fn pending(&self, key: SettingKey) -> Option<String> {
         match key {
@@ -571,6 +629,7 @@ mod tests {
         for key in [
             SettingKey::DataDir,
             SettingKey::XrayExecutable,
+            SettingKey::EchoUrl,
             SettingKey::ChromiumBin,
             SettingKey::ChromiumMajor,
         ] {
@@ -629,6 +688,98 @@ mod tests {
         );
     }
 
+    /// The endpoint the proxy test asks is a standing choice about this machine,
+    /// so it is stored and overridable rather than hard-coded.
+    #[test]
+    fn the_proxy_test_endpoint_is_stored_and_takes_effect_immediately() {
+        let config = TempConfig::new("echo");
+        let (mut settings, _) = Settings::load(env(&config));
+
+        assert_eq!(settings.echo_url(), runtime::DEFAULT_ECHO_URL);
+        assert!(
+            settings.echo_url().starts_with("http://"),
+            "the default must be plain http, so a certificate problem cannot be \
+             read as a proxy problem: {}",
+            settings.echo_url()
+        );
+
+        settings
+            .set(SettingKey::EchoUrl, "  http://echo.example/ip  ")
+            .expect("save the endpoint");
+
+        assert_eq!(settings.echo_url(), "http://echo.example/ip", "trimmed");
+        assert!(
+            config.read().contains("http://echo.example/ip"),
+            "it is stored, not just held in memory: {}",
+            config.read()
+        );
+
+        let row = settings
+            .rows()
+            .into_iter()
+            .find(|row| row.key == SettingKey::EchoUrl)
+            .expect("a row for the endpoint");
+        assert_eq!(row.source, Source::ConfigFile);
+        assert_eq!(
+            row.key.effect(),
+            "now",
+            "the next test asks this endpoint, not the next start"
+        );
+        assert_eq!(row.value, "http://echo.example/ip");
+        assert_eq!(
+            settings.pending(SettingKey::EchoUrl),
+            None,
+            "nothing is waiting on a restart: the endpoint is already in use"
+        );
+    }
+
+    /// The row has to say that the endpoint learns the address it is asked from,
+    /// because that is the one thing about this setting a user cannot infer.
+    #[test]
+    fn the_endpoint_row_says_what_the_endpoint_learns() {
+        let config = TempConfig::new("echo-note");
+        let (settings, _) = Settings::load(env(&config));
+        let row = settings
+            .rows()
+            .into_iter()
+            .find(|row| row.key == SettingKey::EchoUrl)
+            .expect("a row for the endpoint");
+        let note = row.note.expect("a note about what it sees");
+        assert!(note.contains("sees that address"), "{note}");
+        assert!(
+            note.contains("only when you run a proxy test"),
+            "it is asked on demand, not in the background: {note}"
+        );
+        assert!(row.key.editable(), "the endpoint is the user's to choose");
+    }
+
+    #[test]
+    fn an_environment_endpoint_shadows_the_stored_one() {
+        let config = TempConfig::new("echo-env");
+        config.write(r#"{"echo_url": "http://stored.example/ip"}"#);
+        let mut environment = env(&config);
+        environment.echo_url = Some("http://env.example/ip".to_string());
+        let (settings, _) = Settings::load(environment);
+
+        assert_eq!(settings.echo_url(), "http://env.example/ip");
+        let row = settings
+            .rows()
+            .into_iter()
+            .find(|row| row.key == SettingKey::EchoUrl)
+            .expect("a row for the endpoint");
+        assert_eq!(row.source, Source::Environment);
+        assert_eq!(row.source_label(), "set by FP_BROWSER_ECHO_URL");
+        assert_eq!(
+            row.value, "http://env.example/ip",
+            "the page shows the endpoint a test would really ask"
+        );
+        assert_eq!(
+            row.shadowed_label().as_deref(),
+            Some("the config file holds http://stored.example/ip, which this overrides"),
+            "a stored endpoint the environment wins must be shown, not hidden"
+        );
+    }
+
     #[test]
     fn a_broken_config_file_is_reported_and_does_not_lose_settings() {
         let config = TempConfig::new("broken");
@@ -666,15 +817,24 @@ mod tests {
         settings
             .set(SettingKey::XrayExecutable, "/opt/xray")
             .expect("save xray");
+        settings
+            .set(SettingKey::EchoUrl, "http://echo.example/ip")
+            .expect("save the endpoint");
 
         let text = config.read();
         assert!(text.contains("/srv/fp"), "{text}");
         assert!(text.contains("/opt/xray"), "{text}");
+        assert!(
+            text.contains("http://echo.example/ip"),
+            "saving one setting rewrites the file, so every other value has to \
+             survive the rewrite: {text}"
+        );
 
         // And a fresh load agrees.
         let (reloaded, _) = Settings::load(env(&config));
         assert_eq!(reloaded.data_dir(), Path::new("/srv/fp"));
         assert_eq!(reloaded.xray_executable(), Path::new("/opt/xray"));
+        assert_eq!(reloaded.echo_url(), "http://echo.example/ip");
     }
 
     #[test]

@@ -24,9 +24,29 @@ pub struct NewProfile {
     pub start_target: Option<StartTarget>,
 }
 
+/// Where a profile's browser data goes when nothing else says.
+///
+/// One function because two places have to agree: [`DefaultProfileService::create`]
+/// gives a new profile this path, and an import gives it to a profile whose
+/// recorded directory is not on the machine reading the file. Two copies of the
+/// rule would let a created profile and an imported one live in different places
+/// under the same identifier - which is precisely the pairing the identifier
+/// exists to keep.
+pub fn default_user_data_dir(base: &std::path::Path, id: ProfileId) -> PathBuf {
+    base.join("profiles").join(id.to_string())
+}
+
 pub trait ProfileService: Send + Sync {
     fn create(&self, draft: NewProfile) -> Result<BrowserProfile, AppError>;
     fn update(&self, profile: BrowserProfile) -> Result<(), AppError>;
+    /// Stores a profile exactly as given, keeping its identifier and its path.
+    ///
+    /// For import. [`ProfileService::create`] would mint a new identifier and
+    /// derive a new directory, and both are the things a restored profile has to
+    /// keep: the identifier is what its browser data is named after. The rules
+    /// are still the domain's, so a profile with no name is refused here rather
+    /// than stored.
+    fn insert(&self, profile: BrowserProfile) -> Result<(), AppError>;
     fn delete(&self, id: ProfileId, mode: DeleteMode) -> Result<(), AppError>;
     fn duplicate(&self, id: ProfileId, new_name: String) -> Result<BrowserProfile, AppError>;
     fn get(&self, id: ProfileId) -> Result<Option<BrowserProfile>, AppError>;
@@ -60,7 +80,7 @@ impl ProfileService for DefaultProfileService {
         let id = ProfileId::new();
         let user_data_dir = draft
             .user_data_dir
-            .unwrap_or_else(|| self.default_base_dir.join("profiles").join(id.to_string()));
+            .unwrap_or_else(|| default_user_data_dir(&self.default_base_dir, id));
 
         let seed = self.generate_seed();
         let fingerprint = draft
@@ -89,6 +109,12 @@ impl ProfileService for DefaultProfileService {
         Ok(())
     }
 
+    fn insert(&self, profile: BrowserProfile) -> Result<(), AppError> {
+        validate_profile(&profile)?;
+        self.repo.insert(&profile)?;
+        Ok(())
+    }
+
     fn delete(&self, id: ProfileId, mode: DeleteMode) -> Result<(), AppError> {
         if let Some(profile) = self.repo.get(id)? {
             self.repo.delete(id)?;
@@ -112,10 +138,7 @@ impl ProfileService for DefaultProfileService {
             .ok_or_else(|| AppError::NotFound(format!("profile {id} not found")))?;
 
         let new_id = ProfileId::new();
-        let new_user_data_dir = self
-            .default_base_dir
-            .join("profiles")
-            .join(new_id.to_string());
+        let new_user_data_dir = default_user_data_dir(&self.default_base_dir, new_id);
         let new_seed = self.generate_seed();
 
         let duplicated = existing.duplicate(new_id, new_name, new_user_data_dir, new_seed);

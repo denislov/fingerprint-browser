@@ -8,5 +8,7 @@ license.workspace = true
 domain = { workspace = true }
 storage = { workspace = true }
 runtime = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

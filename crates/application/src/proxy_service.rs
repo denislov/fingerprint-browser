@@ -23,6 +23,14 @@ pub struct NewProxy {
 pub trait ProxyService: Send + Sync {
     fn create(&self, draft: NewProxy) -> Result<ProxyProfile, AppError>;
     fn update(&self, proxy: ProxyProfile) -> Result<(), AppError>;
+    /// Stores a proxy exactly as given, keeping its identifier.
+    ///
+    /// For import. [`ProxyService::create`] would mint a new identifier, and the
+    /// identifier is what a profile's assignment travels by. The rules are the
+    /// same ones an edit answers to, which is the point: a proxy whose
+    /// credentials were left out of the file is refused here by
+    /// [`validate_proxy`], exactly as it would be if someone typed it in.
+    fn insert(&self, proxy: ProxyProfile) -> Result<(), AppError>;
     fn delete(&self, id: ProxyId) -> Result<(), AppError>;
     fn get(&self, id: ProxyId) -> Result<Option<ProxyProfile>, AppError>;
     fn list(&self) -> Result<Vec<ProxyProfile>, AppError>;
@@ -80,6 +88,12 @@ impl ProxyService for DefaultProxyService {
         if self.proxies.get(proxy.id)?.is_none() {
             return Err(AppError::NotFound(format!("proxy {}", proxy.id)));
         }
+        self.check(&proxy)?;
+        self.proxies.save(&proxy)?;
+        Ok(())
+    }
+
+    fn insert(&self, proxy: ProxyProfile) -> Result<(), AppError> {
         self.check(&proxy)?;
         self.proxies.save(&proxy)?;
         Ok(())

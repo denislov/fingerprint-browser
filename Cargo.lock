@@ -210,6 +210,8 @@ version = "0.1.0"
 dependencies = [
  "domain",
  "runtime",
+ "serde",
+ "serde_json",
  "storage",
  "thiserror 2.0.20",
  "tracing",

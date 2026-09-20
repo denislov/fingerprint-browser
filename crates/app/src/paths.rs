@@ -104,6 +104,24 @@ pub fn data_dir_or_fallback(host: &Host) -> PathBuf {
     data_dir(host).unwrap_or_else(|| PathBuf::from(FALLBACK_DATA_DIR))
 }
 
+/// The directory a configuration export writes into when the user has not said
+/// where.
+pub const EXPORT_DIR: &str = "exports";
+
+/// Where a configuration export writes with no path typed:
+/// `<data dir>/exports/fp-browser-config-<stamp>.json`.
+///
+/// The stamp is what makes the default destination safe to write over. An export
+/// replaces whatever is at its path, so a default that named a fixed file would
+/// destroy the previous backup every time it was used; naming a new one each
+/// second means reaching an existing path is something the user did on purpose.
+pub fn default_export_file(data_dir: &Path, at: std::time::SystemTime) -> PathBuf {
+    data_dir.join(EXPORT_DIR).join(format!(
+        "fp-browser-config-{}.json",
+        crate::log_file::file_stamp(at)
+    ))
+}
+
 /// A notice for a run that follows the move of the default data directory.
 ///
 /// The default used to be the relative `data`, next to wherever the program was
@@ -334,5 +352,48 @@ mod tests {
         assert_eq!(moved_data_dir_notice(&data, &legacy), None);
 
         std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn the_default_export_lands_under_the_data_directory_in_its_own_folder() {
+        let data = Path::new("/home/alice/.local/share/FpBrowser");
+        let file = default_export_file(data, std::time::UNIX_EPOCH);
+
+        assert_eq!(file.parent().unwrap(), data.join(EXPORT_DIR));
+        assert_eq!(
+            file.file_name().unwrap(),
+            "fp-browser-config-19700101-000000.json"
+        );
+    }
+
+    #[test]
+    fn the_default_export_names_a_new_file_each_second() {
+        // This is what makes writing over an existing path safe: the default can
+        // only collide with itself within the same second, so an export that
+        // replaces a file is one the user pointed at deliberately.
+        let data = Path::new("/data");
+        let first = default_export_file(data, std::time::UNIX_EPOCH);
+        let second = default_export_file(
+            data,
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+        );
+
+        assert_ne!(first, second);
+        assert_eq!(
+            second.file_name().unwrap(),
+            "fp-browser-config-19700101-000001.json"
+        );
+    }
+
+    #[test]
+    fn a_default_export_name_holds_no_character_a_windows_path_cannot() {
+        let file = default_export_file(Path::new("/data"), std::time::UNIX_EPOCH);
+        let name = file.file_name().unwrap().to_string_lossy();
+
+        // The colon a clock time carries is the one that would have broken this,
+        // and it is the reason `log_file::file_stamp` exists at all.
+        for forbidden in [':', '*', '?', '"', '<', '>', '|', '/', '\\'] {
+            assert!(!name.contains(forbidden), "{name} holds {forbidden:?}");
+        }
     }
 }

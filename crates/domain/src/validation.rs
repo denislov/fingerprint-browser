@@ -283,6 +283,135 @@ mod tests {
         );
     }
 
+    /// Where "a stripped proxy is not a working proxy" holds, and where it does
+    /// not.
+    ///
+    /// It is true for the four protocols whose credentials are mandatory, and
+    /// it already follows from the checks above - nothing new had to be added
+    /// for a backup to be safe. It is false for SOCKS5 and HTTP, where
+    /// authenticating is optional: stripping those produces a *different*
+    /// proxy rather than a broken one, and whether it still works is a question
+    /// for the upstream. An import cannot tell those two apart from the outbound
+    /// alone, which is why an export records its own choice.
+    #[test]
+    fn a_stripped_proxy_is_refused_only_where_credentials_are_mandatory() {
+        let mandatory = [
+            ProxyOutbound::Shadowsocks(ShadowsocksOutbound {
+                host: "10.0.0.2".to_string(),
+                port: 8388,
+                password: "secret".to_string(),
+                method: "aes-256-gcm".to_string(),
+                stream: StreamSettings::default(),
+            }),
+            ProxyOutbound::Vmess(VmessOutbound {
+                host: "10.0.0.3".to_string(),
+                port: 443,
+                uuid: "5c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f".to_string(),
+                security: "auto".to_string(),
+                alter_id: 0,
+                stream: StreamSettings::default(),
+            }),
+            ProxyOutbound::Vless(VlessOutbound {
+                host: "10.0.0.4".to_string(),
+                port: 443,
+                uuid: "5c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f".to_string(),
+                flow: None,
+                encryption: "none".to_string(),
+                stream: StreamSettings::default(),
+            }),
+            ProxyOutbound::Trojan(TrojanOutbound {
+                host: "10.0.0.5".to_string(),
+                port: 443,
+                password: "secret".to_string(),
+                stream: StreamSettings::default(),
+            }),
+        ];
+
+        for outbound in &mandatory {
+            let kind = outbound.kind();
+            assert_eq!(
+                validate_proxy(&profile(outbound.clone())),
+                Ok(()),
+                "{kind} should be complete before it is stripped"
+            );
+            assert!(
+                matches!(
+                    validate_proxy(&profile(outbound.without_credentials())),
+                    Err(ValidationError::EmptyProxyField { .. })
+                ),
+                "{kind} should be refused once stripped rather than offered"
+            );
+        }
+
+        for outbound in [
+            ProxyOutbound::Socks5(Socks5Outbound {
+                host: "10.0.0.1".to_string(),
+                port: 1080,
+                username: Some("alice".to_string()),
+                password: Some("secret".to_string()),
+            }),
+            ProxyOutbound::Http(HttpOutbound {
+                host: "10.0.0.1".to_string(),
+                port: 3128,
+                username: Some("alice".to_string()),
+                password: Some("secret".to_string()),
+            }),
+        ] {
+            assert_eq!(
+                validate_proxy(&profile(outbound.without_credentials())),
+                Ok(()),
+                "{} should still validate once stripped",
+                outbound.kind()
+            );
+        }
+    }
+
+    /// REALITY's public key is load-bearing on its own, so losing it does not
+    /// leave a quietly degraded proxy.
+    ///
+    /// A whole-outbound strip trips a credential field first, so this strips the
+    /// stream by itself to show which check would have caught it.
+    #[test]
+    fn a_stripped_reality_stream_is_refused_for_the_missing_key() {
+        let proxy = profile(ProxyOutbound::Trojan(TrojanOutbound {
+            host: "10.0.0.5".to_string(),
+            port: 443,
+            password: "secret".to_string(),
+            stream: StreamSettings {
+                network: StreamNetwork::Tcp,
+                security: StreamSecurity::Reality,
+                reality: Some(RealitySettings {
+                    server_name: Some("www.example.com".to_string()),
+                    public_key: "the-public-key-xray-x25519-printed".to_string(),
+                    short_id: Some("0a1b2c3d".to_string()),
+                    ..RealitySettings::default()
+                }),
+                ..StreamSettings::default()
+            },
+        }));
+        assert_eq!(validate_proxy(&proxy), Ok(()));
+
+        let ProxyOutbound::Trojan(trojan) = &proxy.outbound else {
+            unreachable!("built as a trojan above");
+        };
+        let stripped = profile(ProxyOutbound::Trojan(TrojanOutbound {
+            stream: trojan.stream.without_credentials(),
+            ..trojan.clone()
+        }));
+
+        assert!(
+            matches!(
+                validate_proxy(&stripped),
+                Err(ValidationError::MissingStreamSetting {
+                    field: "reality.public_key",
+                    ..
+                })
+            ),
+            "{:?}",
+            validate_proxy(&stripped)
+        );
+    }
+
     #[test]
     fn a_stream_setting_nobody_would_read_is_refused() {
         let with_stream = |stream: StreamSettings| ProxyProfile {

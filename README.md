@@ -19,14 +19,94 @@ this repository does not bundle or fork them.
   Referenced proxies/cores cannot be deleted.
 - Run one Xray per proxied profile. Xray must be ready before Chromium starts;
   an Xray crash closes its browser instead of silently allowing direct traffic.
-- Read fingerprints back from a running browser and report discrepancies.
+- Test a proxy with one real request and report the address it left from, or the
+  class of failure: engine, configuration, authentication, name resolution,
+  unreachable, timeout, TLS, HTTP status or unreadable answer. A proxy that is
+  already carrying a profile's traffic is probed through that engine; otherwise a
+  temporary engine is started for the test alone.
+- Read fingerprints back from a running browser and report discrepancies, and read
+  back the address that browser's own traffic leaves from.
   Linux builds 142, 144 and 148 were measured; 145–147 remain inferred.
   See the [fingerprint matrix](docs/fingerprint-matrix.md).
 - Show runtime details, effective arguments, per-profile logs and notifications.
   Logs persist to logs/activity.log, rotating at 512 KiB to one backup. In-memory
   history is capped at 500 lines.
+- Filter the profiles list by name, seed, brand, platform, core or proxy. The
+  filter only narrows what is listed: a hidden profile keeps running and stays the
+  one the details panel answers for. There is deliberately no multi-select or batch
+  operation - see
+  [why](docs/implementation-plan.md#why-profile-search-stays-a-single-profile-feature).
+- Export the configuration - cores, proxies and profiles - to a JSON file, and
+  import one back, for another machine or for keeping. Proxy credentials are left
+  out unless asked for, the export says which file it wrote and whether it carried
+  any, and the import never overwrites: taken identifiers are kept, profiles whose
+  core is missing are skipped, and the report says which was which. Browser data
+  is not included. See [backup and restore](docs/backup-and-restore.md).
 - Configure data/Xray paths for the next start; Settings shows effective values,
   their sources and any environment overrides.
+
+## Proxy testing
+
+An open loopback port is not a working proxy. The launcher only ever learns that
+the engine bound its local inbound; a proxy that refuses the upstream
+credentials, cannot resolve the target name or simply carries nothing passes
+that check. The profile then presents one fingerprint and is seen from another
+address, which is the failure this project exists to prevent.
+
+Testing a proxy sends one real HTTP request through the engine and reports the
+address the endpoint saw. The endpoint is plain HTTP on purpose: over TLS a
+certificate problem would be reported as a proxy problem, and the first question
+is whether a byte left at all. An `https://` endpoint is refused rather than
+downgraded. The endpoint is configurable because it is the one part of this that
+sees the exit address.
+
+| Result | What it establishes |
+| --- | --- |
+| An address | A request left through this engine and reached the endpoint, from that address |
+| A fault | Where it stopped: engine, configuration, authentication, name resolution, unreachable, timeout, TLS, HTTP status, unreadable answer |
+| Neither | That a browser was pointed at this engine, or that a profile's remaining traffic takes the same path. Reading a fingerprint back is the neighbouring check, not a substitute |
+
+When a profile using the proxy is running, its engine is probed: that is the path
+the traffic is actually taking, and it is never stopped or restarted by a test -
+whoever started it stops it. Otherwise a temporary engine is started for the test
+alone and removed when the test ends, including when it fails; its config, which
+holds the upstream credentials, goes with it. The test runs only when the user
+starts it, and never in the background.
+
+### Where a browser's own traffic leaves from
+
+Testing a proxy establishes what the *proxy* does. It cannot establish that a
+*browser* was pointed at it, and the two come apart where it matters: a launch
+flag that was ignored, a profile with no proxy, another proxy in between. So
+verifying a profile that uses a proxy also asks the browser itself - in a tab of
+its own, which is closed again - to fetch the endpoint and report the address it
+saw.
+
+Four outcomes are kept apart, because they are fixed in different places:
+
+| Reading | What it means |
+| --- | --- |
+| An address | The browser reached the endpoint and left from there |
+| Never reached | The page never committed to the endpoint: nothing left by this route |
+| Not finished | The page was at the endpoint and had not loaded in time: slow, not blocked |
+| No address in the answer | The endpoint answered with something that is not an address |
+
+"Never reached" and "not finished" are read from the page rather than inferred
+from a timeout, so a failed navigation is reported at once instead of after a
+deadline. When the proxy has been tested, the reading is compared with the
+address the proxy was measured at, and a difference is reported as a claim the
+profile did not reproduce. Without a test there is nothing to disagree with, and
+the address is reported rather than judged. Only a profile with a proxy is asked:
+a direct profile claims nothing about an address, and the endpoint sees the
+address it is asked from.
+
+The address is recorded in the activity log. It is not claimed to be where pages
+you open in that browser go: this reads one document, in one tab, once.
+
+The read-back's own orchestration is covered in the gate without a browser: a stub
+CDP endpoint speaks both of the protocols a browser does on one port, so opening
+the page, polling the document, reading the answer and closing the page are all
+tested. Only the real browser's behaviour is left to the opt-in run below.
 
 ## Windows lifecycle
 
@@ -68,7 +148,8 @@ FP_BROWSER_CHROMIUM_BIN=/path/chrome FP_BROWSER_XRAY_BIN=/path/xray cargo run -p
 | --- | --- | --- |
 | FP_BROWSER_CHROMIUM_BIN | Initial core executable | Local bin candidates, then PATH |
 | FP_BROWSER_CHROMIUM_MAJOR | Override when version detection fails | Detected |
-| FP_BROWSER_DATA_DIR | Database, profiles, logs and runtime files | Platform application-data directory |
+| FP_BROWSER_DATA_DIR | Database, profiles, logs, runtime files and exports | Platform application-data directory |
+| FP_BROWSER_ECHO_URL | Address endpoint a proxy test asks | http://api.ipify.org |
 | FP_BROWSER_XRAY_BIN | Proxy executable | bin/xray.exe on Windows; bin/xray elsewhere |
 
 Data defaults to %LOCALAPPDATA%\FpBrowser on Windows, $XDG_DATA_HOME/FpBrowser
@@ -105,6 +186,12 @@ CHROMIUM_BIN=/path/chrome XRAY_BIN=/path/xray \
 CHROMIUM_BIN=/path/chrome \
   cargo test -p runtime --test fingerprint_real -- --ignored
 XRAY_BIN=/path/xray cargo test -p runtime --test xray_real -- --ignored
+# Reaches a real endpoint through a real Xray; needs a working proxy and network.
+XRAY_BIN=/path/xray PROXY_URI='socks5://host:port' \
+  cargo test -p runtime --test proxy_diag_real -- --ignored
+# Reads a real browser's own exit address back; needs a browser and network.
+CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
+  cargo test -p app real_chromium_reports_the_address -- --ignored
 ```
 
 ## Limits and next steps
@@ -120,11 +207,18 @@ XRAY_BIN=/path/xray cargo test -p runtime --test xray_real -- --ignored
   there is no X11 watchdog.
 - CDP/SOCKS ports are reserved until spawn, but external executables bind their own
   sockets. Release-to-bind is not atomic; readiness detects startup failure.
+  Readiness is still only about the local port, so what a launch proves is unchanged:
+  a proxy that carries nothing passes it, and testing the proxy is what tells the
+  two apart. Testing the proxy does not prove the browser was pointed at it, which
+  is why the exit address is read back out of the browser as well.
 - Runtime events are bounded and best-effort; snapshots are authoritative and the
   UI reconciles periodically. CDP is loopback-only, not an automation API.
 
-Next: proxy diagnostics, Windows fingerprint acceptance, profile search/batch
-operations, backup/restore and packaging. See the [current plan](docs/implementation-plan.md).
+Next: Windows fingerprint acceptance, backup/restore restore and browser-data
+copy - the rules are settled in [backup-and-restore.md](docs/backup-and-restore.md),
+and export and import are in - and packaging. See the [current plan](docs/implementation-plan.md). A
+profile filter is in; batch operations and multi-select are not planned, for the
+reasons recorded there.
 
 ## Design and evidence
 
@@ -132,4 +226,6 @@ operations, backup/restore and packaging. See the [current plan](docs/implementa
   [service contracts](docs/service-contracts.md), [lifecycle](docs/lifecycle.md)
 - [Linux acceptance](docs/chromium-acceptance.md), [Windows acceptance](docs/windows-acceptance.md),
   [fingerprint matrix](docs/fingerprint-matrix.md)
+- [Backup and restore](docs/backup-and-restore.md) - export and import are in;
+  restore and the browser-data copy are designed, not implemented
 - [Current plan](docs/implementation-plan.md), [historical batches](docs/implementation-history.md)

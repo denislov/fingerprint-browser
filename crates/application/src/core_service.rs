@@ -32,6 +32,17 @@ pub trait CoreService: Send + Sync {
     fn update(&self, core: BrowserCore) -> Result<BrowserCore, AppError>;
     /// Re-reads the version of a stored core's binary.
     fn redetect(&self, id: CoreId) -> Result<BrowserCore, AppError>;
+    /// Stores a core exactly as given, without probing its binary.
+    ///
+    /// For import. The file records the version that *its* machine read from the
+    /// binary at that path, so probing here would replace a real reading with
+    /// whatever is at the same path now - and refusing when there is nothing
+    /// there would drop a core the rest of the program already handles: a core
+    /// whose binary is absent is shown as one that is not present, and
+    /// [`CoreService::redetect`] is the existing way to read the version again.
+    /// A version that was never read is still refused at launch rather than
+    /// assumed, because `major` `0` has no capability table.
+    fn insert(&self, core: BrowserCore) -> Result<(), AppError>;
     fn delete(&self, id: CoreId) -> Result<(), AppError>;
     fn get(&self, id: CoreId) -> Result<Option<BrowserCore>, AppError>;
     fn list(&self) -> Result<Vec<BrowserCore>, AppError>;
@@ -202,6 +213,12 @@ impl CoreService for DefaultCoreService {
             )));
         }
         self.cores.delete(id)?;
+        Ok(())
+    }
+
+    fn insert(&self, core: BrowserCore) -> Result<(), AppError> {
+        validate_core(&core)?;
+        self.cores.save(&core)?;
         Ok(())
     }
 

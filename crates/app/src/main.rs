@@ -12,6 +12,7 @@ mod open_dir;
 mod paths;
 mod proxy_editor;
 mod proxy_import;
+mod proxy_tester;
 #[cfg(all(test, target_os = "linux"))]
 mod real_browser;
 mod reclaim;
@@ -28,6 +29,7 @@ use application::{
 };
 use gpui_kit::component::Root;
 use gpui_kit::*;
+use proxy_tester::{ProxyTester, XrayProxyTester};
 use runtime::{
     ChannelRuntimeFacade, RuntimeCommand, RuntimeFacade, RuntimeSupervisor,
     RuntimeSupervisorChannels, SupervisorComponents,
@@ -110,6 +112,15 @@ fn main() {
     let core_service: Arc<dyn CoreService> = Arc::new(DefaultCoreService::new(
         Arc::clone(&core_repo),
         Arc::clone(&profile_repo),
+    ));
+
+    // A proxy test starts its own engine rather than going through the
+    // supervisor: it has to be able to run before anything is launched, and it
+    // must never stop an engine a profile is using. Its temporary config lands
+    // in the same runtime directory, so a killed run leaves nothing new behind.
+    let proxy_tester: Arc<dyn ProxyTester> = Arc::new(XrayProxyTester::new(
+        settings.xray_executable().to_path_buf(),
+        settings.runtime_dir(),
     ));
 
     let mut app_state = AppState::new(
@@ -210,6 +221,7 @@ fn main() {
                             app_state,
                             event_rx,
                             Arc::new(CdpFingerprintVerifier::default()),
+                            proxy_tester,
                             Arc::new(open_dir::SystemDirectoryOpener),
                         );
                         view.boot(cx);

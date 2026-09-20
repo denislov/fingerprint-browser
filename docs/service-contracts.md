@@ -361,7 +361,24 @@ ProcessError
 JournalError
 CdpError
 RuntimeError
+BackupError
+ImportError
 AppError
+```
+
+三类拒绝要分得开，因为它们指向不同的下一步：
+
+```text
+UnknownFormat    这不是我们的文件
+UnknownVersion   是配置文件，但版本比本程序新，不能猜着读
+Malformed        是我们的文件，但内容坏了
+```
+
+ImportError 再分两类，因为它们指向不同的下一步：
+
+```text
+Read      路径上读不到文件 —— 是要改的路径
+Document  文件不是备份（或版本不对/内容坏了）—— 是换一个文件
 ```
 
 UI 边界再统一转换为用户可读文本。
@@ -386,3 +403,29 @@ View -> std::process::Command
 View -> Xray JSON builder
 View -> CDP HTTP request
 ```
+
+### 例外位置：注入的端口（app 层）
+
+上面四条禁止的是 **View 自己做**，不是禁止窗口发起这类动作。需要阻塞、需要
+等一个可能永远不回答的对端、或者需要拨号的操作，走注入的 trait 对象，由
+worker 线程执行、通过 channel 回传，View 只负责发起和呈现：
+
+```text
+AppView -> Arc<dyn DirectoryOpener>       (交给桌面环境打开数据目录)
+AppView -> Arc<dyn FingerprintVerifier>   (CDP：读回浏览器指纹与其出口地址)
+AppView -> Arc<dyn ProxyTester>           (SOCKS：一条真实请求穿过代理)
+```
+
+`FingerprintVerifier::verify` 接收整个 `VerificationJob`，而不是若干位置参数：
+任务是它唯一会长大的东西（出口地址这一问就是后加的），让签名跟着长会逼所有
+调用点与替身每次一起改。它返回 `VerificationReport`——两个问题的答案在一起：
+读回不支持的断言，以及流量从哪里出去。只有 `egress` 为 `Some`（即 Profile 有
+代理）时才会去问地址；没有代理的 Profile 不对地址做任何声明。
+
+这些适配器与 View 同处 `crates/app`，但不经过 `application`：它们不是业务
+规则，而是运行时能力的阻塞包装；测试注入假实现，因此不需要网络、浏览器或
+代理。
+
+`ProxyService` 因此**不**增加诊断方法：代理列表的业务规则（校验、删除保护）
+与"这个代理到底能不能转发"是两件事，混进同一个 trait 会让代理列表的测试
+替身也必须具备运行时。

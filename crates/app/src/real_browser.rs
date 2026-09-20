@@ -327,7 +327,7 @@ fn real_chromium_fingerprint_verification_through_the_verifier() {
         .len();
 
     let outcome = CdpFingerprintVerifier::default()
-        .verify(job.port, &job.profile, &job.capabilities)
+        .verify(&job)
         .expect("the fingerprint can be read out of a running profile");
     harness.state.finish_verification(id, Ok(outcome));
     println!("verification: {:?}", harness.state.verification(id));
@@ -360,4 +360,66 @@ fn real_chromium_fingerprint_verification_through_the_verifier() {
         .exists(),
         "the browser is still the same live process"
     );
+}
+
+/// The other half of a verification: where the browser's own traffic leaves
+/// from, asked of the browser rather than of a proxy.
+///
+/// ```sh
+/// CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
+///   cargo test -p app real_chromium_reports_the_address -- --ignored --nocapture
+/// ```
+///
+/// Needs a reachable endpoint and a machine that can route to it. A proxy is
+/// not involved: what this proves is that the browser's own network path can be
+/// read back at all, which is the part a pre-flight cannot reach.
+#[test]
+#[ignore = "requires CHROMIUM_BIN, a reachable ECHO_URL and a networked machine"]
+fn real_chromium_reports_the_address_its_own_traffic_leaves_from() {
+    use runtime::{CdpProbe as _, EgressOutcome, EgressProbe, HttpCdpProbe};
+
+    let echo_url =
+        std::env::var("ECHO_URL").unwrap_or_else(|_| runtime::DEFAULT_ECHO_URL.to_string());
+    let mut harness = Harness::new();
+    let id = harness.state.create_profile("Where from").expect("create");
+    harness.state.start(id).expect("start");
+    let row = harness.wait_for(id, RuntimeState::Running);
+    let port = row.cdp_port.expect("a running profile has a CDP port");
+
+    let pages_before = HttpCdpProbe
+        .page_targets(port, Duration::from_secs(3))
+        .expect("the browser lists its pages")
+        .len();
+
+    let outcome = EgressProbe::new(Duration::from_secs(15)).read(port, &echo_url);
+    println!("reading a browser's exit address: {outcome}");
+
+    match &outcome {
+        EgressOutcome::Read(reading) => {
+            assert!(
+                !reading.exit_ip.is_empty(),
+                "an address endpoint that answered named no address"
+            );
+            assert_eq!(
+                reading.url, echo_url,
+                "the reading came from what was asked"
+            );
+        }
+        // The endpoint is the user's choice, so a machine that cannot reach the
+        // default is a configuration problem and not a reading failure.
+        other => panic!("a networked machine should reach {echo_url}: {other}"),
+    }
+
+    // Reading back must not disturb the session it reads: no tab is stolen and
+    // none is left behind.
+    let pages_after = HttpCdpProbe
+        .page_targets(port, Duration::from_secs(3))
+        .expect("the browser still lists its pages")
+        .len();
+    assert_eq!(
+        pages_before, pages_after,
+        "the read-back opens its own tab and closes it again"
+    );
+
+    harness.state.stop(id).expect("stop");
 }

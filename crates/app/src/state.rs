@@ -6,20 +6,22 @@
 //! [`RuntimeService::snapshot`], which is the documented reconciliation path.
 
 use crate::log_file::LogFile;
+use crate::proxy_tester::ProxyTestJob;
 use crate::settings::{SettingKey, SettingRow, Settings};
+use crate::verifier::{EgressJob, VerificationJob, VerificationReport};
 use application::{
-    AppError, CoreService, DeleteMode, NewProfile, NewProxy, ProfileService, ProxyService,
-    RuntimeService,
+    AppError, CoreService, Credentials, DeleteMode, ExportOrigin, ExportReport, ImportReport,
+    NewProfile, NewProxy, ProfileService, ProxyService, RuntimeService,
 };
 use domain::{
-    BrowserCore, BrowserProfile, CoreCapabilities, CoreId, FingerprintProfile, ProfileId, ProxyId,
-    ProxyOutbound, ProxyProfile, RuntimeState,
+    BrowserCore, BrowserProfile, CoreId, ProfileId, ProxyId, ProxyOutbound, ProxyProfile,
+    RuntimeState,
 };
-use runtime::{Discrepancy, RuntimeComponent, RuntimeEvent, RuntimeSnapshot};
+use runtime::{Diagnosis, Discrepancy, Fault, RuntimeComponent, RuntimeEvent, RuntimeSnapshot};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// A user-facing message shown in the window banner.
 ///
@@ -299,15 +301,46 @@ impl ProfileRow {
     }
 }
 
+/// Whether a profile answers to a filter term.
+///
+/// The term is matched, case-insensitively, against everything the row shows
+/// plus the seed it carries. The seed is there because it is the one number
+/// that identifies a profile whose name no longer means anything, and the core
+/// and proxy are there because they are what someone scanning a list of
+/// similar-looking profiles is actually looking for.
+///
+/// A profile that has no proxy contributes an empty string, so a term can
+/// never match on the absence of one.
+fn answers_to(row: &ProfileRow, needle: &str) -> bool {
+    let needle = needle.to_lowercase();
+    let fingerprint = &row.profile.fingerprint;
+    let seed = fingerprint.seed.to_string();
+    [
+        row.profile.name.as_str(),
+        seed.as_str(),
+        fingerprint.brand.as_arg_value(),
+        fingerprint.platform.as_arg_value(),
+        row.core_name.as_str(),
+        row.proxy_name.as_deref().unwrap_or_default(),
+    ]
+    .iter()
+    .any(|field| field.to_lowercase().contains(&needle))
+}
+
 /// What a verification of one profile produced.
+///
+/// The terminal variants carry the whole report rather than only the findings,
+/// because a pass has something to say as well: the address the traffic left
+/// from, or why it could not be read. A finding is what the user must act on,
+/// but an address is what tells them the path is the one they intended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verification {
     /// A reading is in flight.
     Running,
     /// Every claim the profile makes was confirmed by the reading.
-    Confirmed,
+    Confirmed(VerificationReport),
     /// The reading disagreed with the profile.
-    Disagreements(Vec<Discrepancy>),
+    Disagreements(VerificationReport),
     /// No reading could be taken, so nothing was confirmed.
     Unreadable(String),
 }
@@ -321,8 +354,8 @@ impl Verification {
     pub fn label(&self) -> String {
         match self {
             Self::Running => "verifying...".to_string(),
-            Self::Confirmed => "fingerprint confirmed".to_string(),
-            Self::Disagreements(found) => match found.len() {
+            Self::Confirmed(_) => "fingerprint confirmed".to_string(),
+            Self::Disagreements(report) => match report.discrepancies.len() {
                 1 => "1 claim not confirmed".to_string(),
                 count => format!("{count} claims not confirmed"),
             },
@@ -330,11 +363,18 @@ impl Verification {
         }
     }
 
-    pub fn disagreements(&self) -> &[Discrepancy] {
+    /// The report, for the two outcomes that produced one.
+    pub fn report(&self) -> Option<&VerificationReport> {
         match self {
-            Self::Disagreements(found) => found,
-            _ => &[],
+            Self::Confirmed(report) | Self::Disagreements(report) => Some(report),
+            _ => None,
         }
+    }
+
+    pub fn disagreements(&self) -> &[Discrepancy] {
+        self.report()
+            .map(|report| report.discrepancies.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn failure(&self) -> Option<&str> {
@@ -345,13 +385,90 @@ impl Verification {
     }
 }
 
-/// Everything a worker needs to verify one profile without touching the view.
-#[derive(Debug, Clone)]
-pub struct VerificationJob {
-    pub profile_id: ProfileId,
-    pub port: u16,
-    pub profile: FingerprintProfile,
-    pub capabilities: CoreCapabilities,
+/// What a test of one proxy produced.
+///
+/// A success is the address the traffic left from, which is the whole point of
+/// asking. The launch path only ever learns that the engine's loopback inbound
+/// is open, and a port that accepts a connection but carries nothing looks
+/// exactly like a working proxy - so this is the only thing that tells the two
+/// apart, and the difference is whether the profile leaks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyTest {
+    /// A request is in flight.
+    Running,
+    /// Traffic left, and this is what the endpoint saw.
+    Passed(ProxyReading),
+    /// Nothing arrived, and this is where it stopped.
+    Failed(Fault),
+}
+
+/// A proxy test that reached the endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyReading {
+    pub exit_ip: String,
+    pub elapsed: Duration,
+    /// True when the engine was already up for a running profile, so this is
+    /// the path that profile's traffic is taking right now rather than a
+    /// rehearsal on a second engine.
+    pub live: bool,
+}
+
+impl ProxyTest {
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running)
+    }
+
+    /// Short label for the proxy row.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Running => "testing...".to_string(),
+            Self::Passed(reading) => format!("exit {}", reading.exit_ip),
+            Self::Failed(fault) => format!("no traffic ({})", fault.class.label()),
+        }
+    }
+
+    /// How to read the result: which engine was probed, and how it went.
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Self::Running => None,
+            Self::Passed(reading) => Some(format!(
+                "left from {} in {} ms, {}",
+                reading.exit_ip,
+                reading.elapsed.as_millis(),
+                if reading.live {
+                    "through the engine a running profile is using"
+                } else {
+                    "through a temporary engine"
+                }
+            )),
+            Self::Failed(fault) => Some(format!("no traffic reached the endpoint: {fault}")),
+        }
+    }
+
+    /// The address this test established, when it established one.
+    ///
+    /// This is what a *proxy* was measured at, and it is the only expectation
+    /// the product has for where a profile's traffic should leave from. Reading
+    /// a running browser back is what says whether the traffic took that path.
+    pub fn exit_ip(&self) -> Option<&str> {
+        self.reading().map(|reading| reading.exit_ip.as_str())
+    }
+
+    /// The reading, when traffic left. The window matches on the variant
+    /// instead, because it also wants the colour.
+    pub(crate) fn reading(&self) -> Option<&ProxyReading> {
+        match self {
+            Self::Passed(reading) => Some(reading),
+            _ => None,
+        }
+    }
+
+    pub fn fault(&self) -> Option<&Fault> {
+        match self {
+            Self::Failed(fault) => Some(fault),
+            _ => None,
+        }
+    }
 }
 
 /// Which page the sidebar has selected.
@@ -499,8 +616,12 @@ pub struct AppState {
     page: Page,
     rows: Vec<ProfileRow>,
     selected: Option<ProfileId>,
+    /// What the Profiles page is narrowing its list by. Empty means no filter.
+    profile_filter: String,
     notice: Option<Notice>,
     verifications: HashMap<ProfileId, Verification>,
+    /// What the last test of each proxy found.
+    proxy_tests: HashMap<ProxyId, ProxyTest>,
     /// Toasts the window has not shown yet.
     toasts: Vec<Toast>,
     /// What happened this session, oldest first.
@@ -513,6 +634,21 @@ pub struct AppState {
     log_file: Option<LogFile>,
     /// Why there is no file, or the first write that failed.
     log_file_error: Option<String>,
+    /// Where the next configuration export writes, as the user typed it.
+    ///
+    /// Empty means "wherever the default is", so the field can start empty and
+    /// the path is resolved when it is used. That is also what keeps the
+    /// default's timestamp current instead of frozen at the moment the window
+    /// opened.
+    export_path: String,
+    /// Whether the next export keeps the credentials it could leave out.
+    export_includes_credentials: bool,
+    /// Where the next configuration import reads from, as the user typed it.
+    ///
+    /// Empty means nowhere. An export has a sensible default because the program
+    /// chooses where its own output goes; an import does not, because a default
+    /// file to read from would be a file the user never named.
+    import_path: String,
 }
 
 impl AppState {
@@ -594,14 +730,22 @@ impl AppState {
             page: Page::Profiles,
             rows: Vec::new(),
             selected: None,
+            profile_filter: String::new(),
             notice: None,
             verifications: HashMap::new(),
+            proxy_tests: HashMap::new(),
             toasts: Vec::new(),
             log: Vec::new(),
             log_filter: LogFilter::default(),
             details_tab: DetailsTab::default(),
             log_file,
             log_file_error,
+            export_path: String::new(),
+            // Left out by default. A file that carries plain-text passwords is
+            // the one to reach for deliberately, not the one to get by not
+            // looking at a checkbox.
+            export_includes_credentials: false,
+            import_path: String::new(),
         }
     }
 
@@ -680,6 +824,37 @@ impl AppState {
 
     pub fn select(&mut self, id: ProfileId) {
         self.selected = Some(id);
+    }
+
+    /// What the Profiles page is narrowing its list by.
+    pub fn profile_filter(&self) -> &str {
+        &self.profile_filter
+    }
+
+    pub fn set_profile_filter(&mut self, filter: impl Into<String>) {
+        self.profile_filter = filter.into();
+    }
+
+    /// The rows the Profiles page lists.
+    ///
+    /// The filter narrows the list and nothing else. The focused profile stays
+    /// focused when it stops matching, because the details panel answers for
+    /// what was chosen rather than for what is currently on screen; and a
+    /// profile that is running keeps running. Both are why filtering can never
+    /// be the thing that changes a profile's state.
+    ///
+    /// Cloned rather than borrowed: the view builds its tree from owned
+    /// values, which is what the render path did before there was a filter.
+    pub fn visible_rows(&self) -> Vec<ProfileRow> {
+        let needle = self.profile_filter.trim();
+        if needle.is_empty() {
+            return self.rows.clone();
+        }
+        self.rows
+            .iter()
+            .filter(|row| answers_to(row, needle))
+            .cloned()
+            .collect()
     }
 
     pub fn notice(&self) -> Option<&Notice> {
@@ -1020,6 +1195,9 @@ impl AppState {
 
     pub fn update_proxy(&mut self, proxy: ProxyProfile) -> Result<(), AppError> {
         self.record(self.proxies.update(proxy.clone()))?;
+        // The old result was about the old upstream, and would read as a claim
+        // about the new one.
+        self.forget_proxy_test(proxy.id);
         self.set_notice(Notice::info(format!(
             "Saved {}. Running profiles keep the proxy they started with.",
             proxy.name
@@ -1035,6 +1213,9 @@ impl AppState {
             .map(|proxy| proxy.name)
             .unwrap_or_else(|| id.to_string());
         self.record(self.proxies.delete(id))?;
+        // Nothing points at this id any more, so a result kept for it could
+        // only ever be shown against a different proxy.
+        self.forget_proxy_test(id);
         self.set_notice(Notice::info(format!("Deleted proxy {name}")));
         Ok(())
     }
@@ -1046,20 +1227,175 @@ impl AppState {
 
     /// Stores an editable setting for the next start.
     ///
-    /// The value is not live: it decides what the next process does, and the
-    /// window says so on the row.
+    /// The value is not always live: the ones that decide what a process does
+    /// are read when it starts, and the window says so on the row. The one that
+    /// is live says that instead, because a saved value that looks like it
+    /// applies and does not is the trap this page exists to avoid.
     pub fn update_setting(&mut self, key: SettingKey, value: &str) -> Result<(), AppError> {
         let result = self.settings.set(key, value).map_err(AppError::Conflict);
         match &result {
             Ok(()) => {
+                let when = match key.effect() {
+                    "now" => "now".to_string(),
+                    other => format!("at the {other}"),
+                };
                 self.set_notice(Notice::info(format!(
-                    "Saved {}. It takes effect at the next start.",
+                    "Saved {}. It takes effect {when}.",
                     key.label()
                 )));
             }
             Err(error) => {
                 self.set_notice(Notice::error(error.to_string()));
             }
+        }
+        result
+    }
+
+    /// Where an export writes with no path typed.
+    ///
+    /// Recomputed on every call rather than stored, so a window left open
+    /// overnight still proposes the current second - and so two exports in a row
+    /// do not both aim at the same file.
+    pub fn export_default_path(&self) -> PathBuf {
+        crate::paths::default_export_file(self.settings.data_dir(), SystemTime::now())
+    }
+
+    /// The export path field's contents. Empty means the default.
+    ///
+    /// Only the tests read this back. The window keeps the text in the field
+    /// itself and hands it over when the button is pressed, so nothing in the
+    /// program asks what was typed without also being the thing that typed it -
+    /// and an ungated method would be dead code in the binary build, which
+    /// `clippy --all-targets -D warnings` refuses.
+    #[cfg(test)]
+    pub fn export_path(&self) -> &str {
+        &self.export_path
+    }
+
+    pub fn set_export_path(&mut self, path: impl Into<String>) {
+        self.export_path = path.into();
+    }
+
+    /// Where an export would write now, typed or defaulted.
+    pub fn export_destination(&self) -> PathBuf {
+        let typed = self.export_path.trim();
+        if typed.is_empty() {
+            self.export_default_path()
+        } else {
+            PathBuf::from(typed)
+        }
+    }
+
+    /// Whether the next export keeps the proxy credentials it could leave out.
+    pub fn export_includes_credentials(&self) -> bool {
+        self.export_includes_credentials
+    }
+
+    pub fn set_export_includes_credentials(&mut self, include: bool) {
+        self.export_includes_credentials = include;
+    }
+
+    /// Writes a configuration backup and says what it did.
+    ///
+    /// Reading the three lists and writing one small file are both local and
+    /// quick, so this runs on the calling thread - the same reason
+    /// [`AppState::start`] does, and unlike a proxy test, which waits on a far
+    /// end.
+    ///
+    /// Nothing here checks whether the destination is already taken. The default
+    /// names a new file each second, so it cannot land on an older backup by
+    /// accident; a path typed on purpose is meant, and refusing it would break
+    /// updating a backup kept at one path.
+    pub fn export_configuration(&mut self) -> Result<ExportReport, String> {
+        let credentials = if self.export_includes_credentials {
+            Credentials::Included
+        } else {
+            Credentials::Excluded
+        };
+        let origin = ExportOrigin {
+            exported_at: crate::log_file::timestamp(SystemTime::now()),
+            source_data_dir: self.settings.data_dir().display().to_string(),
+        };
+        let destination = self.export_destination();
+
+        let result = application::read_configuration(&*self.profiles, &*self.cores, &*self.proxies)
+            .map_err(|error| format!("The configuration could not be read. {error}"))
+            .and_then(|snapshot| {
+                application::write_config_backup(snapshot, credentials, origin, &destination)
+                    .map_err(|error| format!("The backup could not be written. {error}"))
+            });
+
+        match &result {
+            Ok(report) => self.set_notice(Notice::info(export_summary(report))),
+            Err(message) => self.set_notice(Notice::error(message.clone())),
+        }
+        result
+    }
+
+    pub fn set_import_path(&mut self, path: impl Into<String>) {
+        self.import_path = path.into();
+    }
+
+    /// Where an import would read from, or `None` when nothing was typed.
+    pub fn import_source(&self) -> Option<PathBuf> {
+        let typed = self.import_path.trim();
+        (!typed.is_empty()).then(|| PathBuf::from(typed))
+    }
+
+    /// Reads a configuration backup into this installation and says what it did.
+    ///
+    /// Nothing is confirmed first, and that is the point of import being a
+    /// separate verb from restore. Import never overwrites: the worst a mistaken
+    /// one can do is add records the user did not want, which the sentence below
+    /// says and which is undone one row at a time. Restore replaces, so restore
+    /// is the one that will ask.
+    ///
+    /// Runs on the calling thread for the same reason an export does: one small
+    /// file and a handful of rows are local and quick, and nothing here waits on
+    /// a far end.
+    ///
+    /// The rows are reloaded afterwards, because a Profiles page still showing
+    /// the list from before the import would contradict the sentence above it.
+    pub fn import_configuration(&mut self) -> Result<ImportReport, String> {
+        let Some(source) = self.import_source() else {
+            let message = "Type the path of a configuration backup to import.".to_string();
+            self.set_notice(Notice::error(message.clone()));
+            return Err(message);
+        };
+        let data_dir = self.settings.data_dir().to_path_buf();
+
+        let result = application::read_config_backup(&source)
+            .map_err(|error| format!("The file could not be read. {error}"))
+            .and_then(|document| {
+                application::read_configuration(&*self.profiles, &*self.cores, &*self.proxies)
+                    .map_err(|error| format!("The configuration could not be read. {error}"))
+                    .and_then(|present| {
+                        let plan = application::plan_import(&document, &present, &data_dir);
+                        application::apply_import(
+                            plan,
+                            &*self.cores,
+                            &*self.proxies,
+                            &*self.profiles,
+                        )
+                        .map_err(|error| format!("The configuration could not be written. {error}"))
+                    })
+            });
+
+        match &result {
+            Ok(report) => {
+                let summary = import_summary(report, &source);
+                // An import that did less than the file asked for gets the
+                // banner, which stays until it is dismissed; one that did
+                // exactly what it asked gets a toast. That is what makes the
+                // banner mean something when it appears.
+                self.set_notice(if report.needs_attention() {
+                    Notice::error(summary)
+                } else {
+                    Notice::info(summary)
+                });
+                let _ = self.load();
+            }
+            Err(message) => self.set_notice(Notice::error(message.clone())),
         }
         result
     }
@@ -1290,34 +1626,30 @@ impl AppState {
     pub fn finish_verification(
         &mut self,
         id: ProfileId,
-        outcome: Result<Vec<Discrepancy>, String>,
+        outcome: Result<VerificationReport, String>,
     ) {
         let verification = match outcome {
-            Ok(found) if found.is_empty() => Verification::Confirmed,
-            Ok(found) => Verification::Disagreements(found),
+            Ok(report) if report.discrepancies.is_empty() => Verification::Confirmed(report),
+            Ok(report) => Verification::Disagreements(report),
             Err(reason) => Verification::Unreadable(reason),
         };
         // A reading is the answer to a question the user asked, so it belongs
         // in the history as well as on the row.
         match &verification {
-            Verification::Confirmed => {
-                self.append_log(
-                    LogLevel::Info,
-                    Some(id),
-                    "fingerprint confirmed by reading the running browser",
-                );
+            Verification::Confirmed(report) => {
+                self.append_log(LogLevel::Info, Some(id), confirmed_line(report));
                 self.toast(ToastKind::Success, "Fingerprint confirmed.");
             }
-            Verification::Disagreements(found) => {
+            Verification::Disagreements(report) => {
                 let message = format!(
                     "fingerprint read back with {} claim(s) not confirmed",
-                    found.len()
+                    report.discrepancies.len()
                 );
                 self.toast(
                     ToastKind::Warning,
                     format!(
                         "{} claim(s) the browser did not reproduce; see Runtime Details",
-                        found.len()
+                        report.discrepancies.len()
                     ),
                 );
                 self.append_log(LogLevel::Warning, Some(id), message);
@@ -1376,7 +1708,141 @@ impl AppState {
             port,
             profile: row.profile.fingerprint.clone(),
             capabilities,
+            egress: self.egress_job(row.profile.proxy_id),
         })
+    }
+
+    /// The address question for a profile, when it has one to be asked.
+    ///
+    /// A profile with no proxy claims nothing about an address, so it is not
+    /// asked: the endpoint learns the address it was asked from, and there is
+    /// no reason to spend that on a browser that was never meant to leave by
+    /// anywhere else.
+    ///
+    /// The expectation is the address the proxy was *tested* at, and it is
+    /// absent until a test has run. An untested proxy leaves nothing to
+    /// disagree with, and a reading is still worth having: it says where the
+    /// traffic went, which is the first thing anyone wants to know.
+    fn egress_job(&self, proxy_id: Option<ProxyId>) -> Option<EgressJob> {
+        let proxy_id = proxy_id?;
+        Some(EgressJob {
+            echo_url: self.settings.echo_url().to_string(),
+            expected: self
+                .proxy_tests
+                .get(&proxy_id)
+                .and_then(ProxyTest::exit_ip)
+                .map(str::to_string),
+        })
+    }
+
+    /// Claims the test slot for a proxy and assembles the job.
+    ///
+    /// A proxy can be tested whether or not anything is running, which is the
+    /// point: a proxy has to be judged before a profile is launched with it.
+    /// Refused only while another test of the same proxy is in flight, which
+    /// would start a second engine for an answer already on its way.
+    pub fn begin_proxy_test(&mut self, id: ProxyId) -> Result<ProxyTestJob, AppError> {
+        if self.proxy_tests.get(&id).is_some_and(ProxyTest::is_running) {
+            return Err(AppError::Other(format!(
+                "proxy {id} is already being tested"
+            )));
+        }
+        let proxy = self
+            .proxies
+            .get(id)?
+            .ok_or_else(|| AppError::NotFound(format!("proxy {id}")))?;
+        let job = ProxyTestJob {
+            proxy_id: id,
+            proxy,
+            echo_url: self.settings.echo_url().to_string(),
+            live_port: self.live_port_for(id),
+        };
+        self.proxy_tests.insert(id, ProxyTest::Running);
+        Ok(job)
+    }
+
+    /// Records the outcome of a test the view ran on a worker.
+    ///
+    /// `live` says whether the request went through an engine that was already
+    /// up, because the two answers mean different things: one is a rehearsal,
+    /// the other is what is happening to a profile's traffic right now.
+    pub fn finish_proxy_test(
+        &mut self,
+        id: ProxyId,
+        live: bool,
+        outcome: Result<Diagnosis, Fault>,
+    ) {
+        let test = match outcome {
+            Ok(diagnosis) => ProxyTest::Passed(ProxyReading {
+                exit_ip: diagnosis.exit_ip,
+                elapsed: diagnosis.elapsed,
+                live,
+            }),
+            Err(fault) => ProxyTest::Failed(fault),
+        };
+        let name = self
+            .proxy(id)
+            .map(|proxy| proxy.name)
+            .unwrap_or_else(|| id.to_string());
+
+        match &test {
+            ProxyTest::Passed(reading) => {
+                self.toast(
+                    ToastKind::Success,
+                    format!("{name}: traffic leaves from {}", reading.exit_ip),
+                );
+            }
+            ProxyTest::Failed(fault) => {
+                // The class is what to act on, so it goes first; the evidence
+                // follows, because a dashboard line is too short to hold it and
+                // this is the one moment the user is thinking about this proxy.
+                self.toast(
+                    ToastKind::Error,
+                    format!("{name}: no traffic reached the endpoint. {fault}"),
+                );
+            }
+            ProxyTest::Running => {}
+        }
+        // The path is the half of the answer the row cannot show, and the class
+        // is what to act on. Both go in the record, which outlives the row.
+        if let Some(detail) = test.detail() {
+            let level = if test.fault().is_some() {
+                LogLevel::Error
+            } else {
+                LogLevel::Info
+            };
+            self.append_log(level, None, format!("proxy test: {name} - {detail}"));
+        }
+        self.proxy_tests.insert(id, test);
+    }
+
+    /// Clears a test result. Editing a proxy is enough: a different upstream is
+    /// a different answer, and the old one would read as a claim about the new.
+    pub fn forget_proxy_test(&mut self, id: ProxyId) {
+        self.proxy_tests.remove(&id);
+    }
+
+    /// What the last test of this proxy found, if there was one.
+    pub fn proxy_test(&self, id: ProxyId) -> Option<&ProxyTest> {
+        self.proxy_tests.get(&id)
+    }
+
+    /// The SOCKS port of an engine already up for a profile using this proxy.
+    ///
+    /// An engine that is up is the one that would have to forward, so probing
+    /// it asks about the live path instead of a rehearsal.
+    ///
+    /// The port is only considered when the profile says it is running. The
+    /// supervisor clears the port when a profile stops, but this decision is
+    /// worth its own gate: probing a port nothing is listening on would report
+    /// a timeout, and a timeout here reads as "this proxy is broken" when the
+    /// truth is that nothing was asked in the first place.
+    fn live_port_for(&self, id: ProxyId) -> Option<u16> {
+        self.rows
+            .iter()
+            .filter(|row| row.profile.proxy_id == Some(id))
+            .filter(|row| matches!(row.state(), RuntimeState::Running))
+            .find_map(|row| row.socks_port())
     }
 
     #[cfg(test)]
@@ -1395,6 +1861,23 @@ impl AppState {
             }
         }
     }
+}
+
+/// The log line for a verification that found nothing wrong.
+///
+/// The address belongs here rather than on the row: the row has no space for
+/// it, and this is the half of the answer that says the traffic took the path
+/// the user intended. A reading that was not taken says so, because "confirmed"
+/// on its own would read as though the address had been checked too.
+fn confirmed_line(report: &VerificationReport) -> String {
+    let mut line = "fingerprint confirmed by reading the running browser".to_string();
+    if let Some(exit_ip) = &report.exit_ip {
+        line.push_str(&format!("; traffic left from {exit_ip}"));
+    }
+    if let Some(reason) = &report.exit_unreadable {
+        line.push_str(&format!("; the exit address was not read: {reason}"));
+    }
+    line
 }
 
 /// How a crashed component is named in the log.
@@ -1443,6 +1926,15 @@ pub(crate) mod testing {
                 .entry(id)
                 .or_insert_with(|| snapshot(id, RuntimeState::Stopped));
             snapshot.cdp_port = Some(port);
+        }
+
+        /// Publishes the loopback SOCKS port a running engine listens on.
+        pub fn set_socks_port(&self, id: ProfileId, port: u16) {
+            let mut snapshots = self.snapshots.write().expect("snapshot lock");
+            let snapshot = snapshots
+                .entry(id)
+                .or_insert_with(|| snapshot(id, RuntimeState::Stopped));
+            snapshot.socks_port = Some(port);
         }
 
         /// Publishes the launch line a running browser was started with.
@@ -1613,12 +2105,149 @@ pub(crate) mod testing {
     }
 }
 
+/// What an export did, in one sentence.
+///
+/// The three cases are kept apart on purpose. "Credentials were left out" and
+/// "there were none to leave out" are different sentences, and only one of them
+/// tells the reader that the file is not the whole configuration. Saying which
+/// file and how many of each is the difference between a backup someone trusts
+/// and a backup someone assumes.
+fn export_summary(report: &ExportReport) -> String {
+    let counts = format!(
+        "{} core{}, {} prox{} and {} profile{}",
+        report.cores,
+        plural(report.cores, "", "s"),
+        report.proxies,
+        plural(report.proxies, "y", "ies"),
+        report.profiles,
+        plural(report.profiles, "", "s"),
+    );
+    let where_it_went = format!("Wrote {counts} to {}.", report.path.display());
+
+    match (report.credentials, report.credentials_removed) {
+        (Credentials::Included, _) => {
+            format!("{where_it_went} The file carries the proxy credentials in plain text.")
+        }
+        (Credentials::Excluded, 0) => {
+            format!("{where_it_went} It had no proxy credentials to leave out.")
+        }
+        (Credentials::Excluded, removed) => format!(
+            "{where_it_went} {} prox{} had credentials, which were left out.",
+            removed,
+            plural(removed, "y", "ies"),
+        ),
+    }
+}
+
+fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {
+    if count == 1 { one } else { many }
+}
+
+/// What an import did, in one sentence.
+///
+/// Five things can be true at once and every one of them is something the reader
+/// has to hear: what arrived, what was left alone because the identifier was
+/// taken, what was skipped, what came in without its proxy, and whose browser
+/// data is about to start from this machine's directory instead of the recorded
+/// one. They are clauses of one sentence rather than separate sentences because
+/// they all describe the same event, and any one of them alone would be a
+/// misleading account of the rest.
+///
+/// Names are capped by [`listed`]: this is a line in a toast and a line in the
+/// activity log, not the place for a list of twenty profiles. Naming every one
+/// of them is the presentation question the design leaves open.
+fn import_summary(report: &ImportReport, source: &std::path::Path) -> String {
+    let base = if report.added.total() == 0 {
+        format!("Read {}: nothing was added.", source.display())
+    } else {
+        format!(
+            "Read {}: {} core{}, {} prox{} and {} profile{} were added.",
+            source.display(),
+            report.added.cores,
+            plural(report.added.cores, "", "s"),
+            report.added.proxies,
+            plural(report.added.proxies, "y", "ies"),
+            report.added.profiles,
+            plural(report.added.profiles, "", "s"),
+        )
+    };
+
+    let notes = &report.notes;
+    let mut clauses: Vec<String> = Vec::new();
+
+    if !notes.differing.is_empty() {
+        clauses.push(format!(
+            "These were already here and differ from the file, so nothing was overwritten: {}.",
+            listed(&notes.differing)
+        ));
+    }
+    if !notes.missing_core.is_empty() {
+        clauses.push(format!(
+            "Skipped, because the core they name is not here: {}.",
+            listed(&notes.missing_core)
+        ));
+    }
+    if !notes.missing_proxy.is_empty() {
+        clauses.push(format!(
+            "Imported with no proxy, because the proxy they name is not here: {}.",
+            listed(&notes.missing_proxy)
+        ));
+    }
+    if !notes.repointed.is_empty() {
+        let moved: Vec<String> = notes
+            .repointed
+            .iter()
+            .map(|moved| moved.profile.clone())
+            .collect();
+        clauses.push(format!(
+            "Their browser data will use this machine's data directory, because the recorded one is not here: {}.",
+            listed(&moved)
+        ));
+    }
+    if !report.failed.is_empty() {
+        clauses.push(format!(
+            "Refused, and not stored: {}.",
+            listed(&report.failed)
+        ));
+    }
+    if notes.credentials_excluded && report.added.proxies + notes.kept.proxies > 0 {
+        clauses.push(
+            "The file was written without proxy credentials, so a proxy it restored may need them typed in again."
+                .to_string(),
+        );
+    }
+
+    if clauses.is_empty() {
+        base
+    } else {
+        format!("{base} {}", clauses.join(" "))
+    }
+}
+
+/// Up to three names, then how many were left off.
+///
+/// A count rather than silence, so a reader knows the sentence is a summary
+/// rather than the whole of it.
+fn listed(names: &[String]) -> String {
+    const SHOWN: usize = 3;
+    if names.len() <= SHOWN {
+        names.join(", ")
+    } else {
+        format!(
+            "{}, and {} more",
+            names[..SHOWN].join(", "),
+            names.len() - SHOWN
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::testing::{CoreBinary, FakeRuntime, core, core_service};
     use application::{DefaultProfileService, DefaultProxyService};
     use domain::CoreId;
+    use runtime::FaultClass;
     use std::path::PathBuf;
     use storage::{
         CoreRepository as _, MemCoreRepository, MemProfileRepository, MemProxyRepository,
@@ -1643,7 +2272,23 @@ mod tests {
 
     /// The same fixture, with the settings file somewhere the test can read.
     fn fixture_with_config(config: &std::path::Path) -> Fixture {
-        fixture_full(config, None, None)
+        fixture_full(config, None, None, None)
+    }
+
+    /// The same fixture, with its data directory somewhere the test can name.
+    ///
+    /// An import re-points a profile's browser data at the local default under
+    /// the data directory, so a test of that has to know which directory the
+    /// settings believe in.
+    fn fixture_with_data_dir(data_dir: &std::path::Path) -> Fixture {
+        fixture_full(
+            &std::env::temp_dir()
+                .join("fp-app-settings-fixture")
+                .join("config.json"),
+            Some(data_dir),
+            None,
+            None,
+        )
     }
 
     /// The same fixture, with an activity log on disk in `log_dir`.
@@ -1653,6 +2298,7 @@ mod tests {
             &std::env::temp_dir()
                 .join("fp-app-settings-fixture")
                 .join("config.json"),
+            None,
             Some(file),
             None,
         )
@@ -1660,6 +2306,7 @@ mod tests {
 
     fn fixture_full(
         config: &std::path::Path,
+        data_dir: Option<&std::path::Path>,
         log_file: Option<crate::log_file::LogFile>,
         log_file_error: Option<String>,
     ) -> Fixture {
@@ -1687,6 +2334,7 @@ mod tests {
         let core_service = core_service(core_repo.clone(), profile_repo.clone());
         let (settings, _) = Settings::load(crate::settings::Environment {
             config: Some(config.to_string_lossy().to_string()),
+            data_dir: data_dir.map(|dir| dir.to_string_lossy().to_string()),
             ..crate::settings::Environment::default()
         });
         let state = AppState::with_log(
@@ -1787,7 +2435,9 @@ mod tests {
     fn deleting_a_profile_removes_it_and_forgets_its_reading() {
         let mut fixture = fixture();
         let id = running_profile(&mut fixture);
-        fixture.state.finish_verification(id, Ok(Vec::new()));
+        fixture
+            .state
+            .finish_verification(id, Ok(VerificationReport::default()));
 
         fixture.state.delete_profile(id).expect("delete");
 
@@ -1798,6 +2448,160 @@ mod tests {
             "a deleted profile keeps no verification result"
         );
         assert_eq!(fixture.state.selected_id(), None);
+    }
+
+    /// A loaded profile with a name and a seed the test chose, so a filter has
+    /// something predictable to match on.
+    fn named_profile(fixture: &mut Fixture, name: &str, seed: u32) -> ProfileId {
+        let id = fixture.state.create_profile(name).expect("create");
+        let mut profile = fixture.state.profile(id).expect("loaded");
+        profile.fingerprint.seed = seed;
+        fixture.state.update_profile(profile).expect("save");
+        id
+    }
+
+    /// A fixture with a core and three profiles to filter between.
+    fn filtered_fixture() -> (Fixture, ProfileId, ProfileId, ProfileId) {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let work = named_profile(&mut fixture, "Work laptop", 4242);
+        let shopping = named_profile(&mut fixture, "Shopping", 7777);
+        let staging = named_profile(&mut fixture, "Staging box", 1234);
+        (fixture, work, shopping, staging)
+    }
+
+    #[test]
+    fn an_empty_filter_lists_every_profile() {
+        let (mut fixture, _, _, _) = filtered_fixture();
+
+        assert_eq!(fixture.state.visible_rows().len(), 3);
+
+        // Whitespace is not a filter: it is a field someone tabbed through.
+        fixture.state.set_profile_filter("   ");
+        assert_eq!(fixture.state.visible_rows().len(), 3);
+    }
+
+    #[test]
+    fn a_filter_narrows_the_list_to_the_profiles_that_match() {
+        let (mut fixture, work, _, _) = filtered_fixture();
+
+        fixture.state.set_profile_filter("work");
+
+        let visible = fixture.state.visible_rows();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].profile.id, work);
+        assert_eq!(
+            fixture.state.profile_filter(),
+            "work",
+            "the field holds what was typed, filter or not"
+        );
+    }
+
+    #[test]
+    fn a_filter_ignores_case_and_the_space_around_it() {
+        let (mut fixture, work, _, _) = filtered_fixture();
+
+        fixture.state.set_profile_filter("  WORK  ");
+
+        let visible = fixture.state.visible_rows();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].profile.id, work);
+    }
+
+    #[test]
+    fn a_filter_matches_the_seed_as_well_as_the_name() {
+        let (mut fixture, _, _, staging) = filtered_fixture();
+
+        fixture.state.set_profile_filter("1234");
+
+        let visible = fixture.state.visible_rows();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].profile.id, staging);
+    }
+
+    #[test]
+    fn a_filter_matches_the_core_and_the_proxy_a_profile_runs_on() {
+        let (mut fixture, _, shopping, _) = filtered_fixture();
+        let zurich = fixture
+            .state
+            .create_proxy("Zurich exit", socks5("127.0.0.1", 1080))
+            .expect("create a proxy");
+        let mut with_proxy = fixture.state.profile(shopping).expect("loaded");
+        with_proxy.proxy_id = Some(zurich);
+        fixture.state.update_profile(with_proxy).expect("save");
+
+        // The core is shared, so a term only it carries matches all three.
+        fixture.state.set_profile_filter("test core");
+        assert_eq!(fixture.state.visible_rows().len(), 3);
+
+        // The proxy belongs to one profile and is in none of their names.
+        fixture.state.set_profile_filter("zurich");
+        let visible = fixture.state.visible_rows();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].profile.id, shopping);
+
+        // The label the row prints is not a field the filter reads, so a
+        // profile with no proxy cannot answer to the word for having none.
+        fixture.state.set_profile_filter("direct");
+        assert!(
+            fixture.state.visible_rows().is_empty(),
+            "the filter matches what is stored, not what the row renders"
+        );
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_hides_the_list_without_touching_a_profile() {
+        let (mut fixture, _, _, _) = filtered_fixture();
+
+        fixture.state.set_profile_filter("nothing is called this");
+
+        assert!(fixture.state.visible_rows().is_empty());
+        assert_eq!(
+            fixture.state.rows().len(),
+            3,
+            "a filter is a view of the list, not a way to lose profiles"
+        );
+    }
+
+    #[test]
+    fn a_filtered_out_profile_keeps_its_focus_and_keeps_running() {
+        let (mut fixture, work, _, _) = filtered_fixture();
+        fixture.state.select(work);
+        fixture.state.start(work).expect("start");
+        let started = fixture
+            .state
+            .rows()
+            .iter()
+            .find(|row| row.profile.id == work)
+            .expect("the row is listed")
+            .state();
+        assert!(
+            matches!(started, RuntimeState::Running),
+            "the fixture really starts it"
+        );
+
+        fixture.state.set_profile_filter("shopping");
+
+        assert_eq!(
+            fixture.state.selected_id(),
+            Some(work),
+            "the panel answers for what was chosen, not for what is listed"
+        );
+        let visible = fixture.state.visible_rows();
+        assert_eq!(visible.len(), 1);
+        assert_ne!(visible[0].profile.id, work);
+        let after = fixture
+            .state
+            .rows()
+            .iter()
+            .find(|row| row.profile.id == work)
+            .expect("still listed")
+            .state();
+        assert!(
+            matches!(after, RuntimeState::Running),
+            "hiding a row cannot stop the browser behind it"
+        );
     }
 
     fn socks5(host: &str, port: u16) -> ProxyOutbound {
@@ -2144,7 +2948,11 @@ mod tests {
         let fixture = fixture();
         let rows = fixture.state.setting_rows();
 
-        assert_eq!(rows.len(), 6, "every setting is listed");
+        assert_eq!(
+            rows.len(),
+            SettingKey::ALL.len(),
+            "every setting is listed, whatever the list grows to"
+        );
         let data_dir = rows
             .iter()
             .find(|row| row.key == SettingKey::DataDir)
@@ -2161,6 +2969,24 @@ mod tests {
         assert!(
             !chromium.key.editable(),
             "the binary is chosen by the environment and shown on the cores page"
+        );
+
+        let endpoint = rows
+            .iter()
+            .find(|row| row.key == SettingKey::EchoUrl)
+            .expect("the proxy test endpoint row");
+        assert!(
+            endpoint.key.editable(),
+            "the endpoint a proxy test asks is the user's to choose"
+        );
+        assert_eq!(
+            endpoint.key.effect(),
+            "now",
+            "a test asks whatever the endpoint is at the time, not what it was at startup"
+        );
+        assert!(
+            endpoint.source == crate::settings::Source::Default,
+            "the fixture sets no endpoint, so the built-in one is shown"
         );
     }
 
@@ -2253,6 +3079,170 @@ mod tests {
         id
     }
 
+    /// A running profile whose traffic is meant to leave by a proxy.
+    fn proxied_profile(fixture: &mut Fixture) -> (ProfileId, ProxyId) {
+        let id = running_profile(fixture);
+        let proxy_id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        let mut profile = fixture.state.profile(id).expect("the profile is loaded");
+        profile.proxy_id = Some(proxy_id);
+        fixture.state.update_profile(profile).expect("assign");
+        (id, proxy_id)
+    }
+
+    /// The address question is only put to a profile that makes a claim about
+    /// one, and the expectation behind it is what the proxy was *measured* at.
+    #[test]
+    fn a_proxied_profile_is_asked_about_the_address_its_proxy_was_tested_at() {
+        let mut fixture = fixture();
+        let (id, proxy_id) = proxied_profile(&mut fixture);
+        fixture.state.finish_proxy_test(
+            proxy_id,
+            false,
+            Ok(Diagnosis {
+                exit_ip: "203.0.113.7".to_string(),
+                elapsed: Duration::from_millis(120),
+            }),
+        );
+
+        let job = fixture.state.begin_verification(id).expect("begin");
+
+        let egress = job.egress.expect("a proxied profile is asked");
+        // The endpoint is the one the Settings page shows, so the reading can
+        // never be taken against something the user cannot see.
+        let shown = fixture
+            .state
+            .setting_rows()
+            .iter()
+            .find(|row| row.key == SettingKey::EchoUrl)
+            .map(|row| row.value.clone())
+            .expect("the endpoint row");
+        assert_eq!(egress.echo_url, shown);
+        assert_eq!(
+            egress.expected.as_deref(),
+            Some("203.0.113.7"),
+            "the expectation is the address the proxy was tested at"
+        );
+    }
+
+    /// A profile that was never meant to leave by a proxy claims nothing about
+    /// an address, and the endpoint learns the address it is asked from: there
+    /// is no reason to spend that on a browser with nothing to check.
+    #[test]
+    fn a_profile_without_a_proxy_is_not_asked_about_an_address() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+
+        let job = fixture.state.begin_verification(id).expect("begin");
+
+        assert!(job.egress.is_none());
+    }
+
+    /// A reading is still worth having before the proxy has been tested - it is
+    /// the first thing anyone wants to know - but with nothing measured there
+    /// is no claim for it to contradict.
+    #[test]
+    fn an_untested_proxy_leaves_nothing_to_disagree_with() {
+        let mut fixture = fixture();
+        let (id, _) = proxied_profile(&mut fixture);
+
+        let job = fixture.state.begin_verification(id).expect("begin");
+
+        let egress = job.egress.expect("a proxied profile is asked");
+        assert_eq!(egress.expected, None);
+    }
+
+    /// The half of the answer the row cannot show: the row says the fingerprint
+    /// was confirmed, and this is where the traffic went.
+    #[test]
+    fn a_confirmed_reading_is_logged_with_the_address_it_left_from() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+        fixture.state.finish_verification(
+            id,
+            Ok(VerificationReport {
+                exit_ip: Some("203.0.113.7".to_string()),
+                ..VerificationReport::default()
+            }),
+        );
+
+        let line = confirmed_line_in(&fixture);
+
+        assert!(line.contains("203.0.113.7"), "{line}");
+    }
+
+    /// "Confirmed" on its own would read as though the address had been checked
+    /// too, so a reading that was not taken says so in the same line.
+    #[test]
+    fn a_confirmed_reading_that_could_not_read_an_address_says_so() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+        fixture.state.finish_verification(
+            id,
+            Ok(VerificationReport {
+                exit_unreadable: Some("the browser's page never committed".to_string()),
+                ..VerificationReport::default()
+            }),
+        );
+
+        let line = confirmed_line_in(&fixture);
+
+        assert!(line.contains("exit address was not read"), "{line}");
+        assert!(line.contains("never committed"), "{line}");
+    }
+
+    /// The log line for a verification that found nothing wrong.
+    fn confirmed_line_in(fixture: &Fixture) -> String {
+        fixture
+            .state
+            .log_entries()
+            .iter()
+            .map(|entry| entry.message.clone())
+            .find(|message| message.starts_with("fingerprint confirmed"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no record of a confirmed reading: {:?}",
+                    fixture
+                        .state
+                        .log_entries()
+                        .iter()
+                        .map(|entry| entry.message.clone())
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+
+    /// A wrong address is a finding, not a footnote: the profile claims to
+    /// leave by a proxy that was measured somewhere else.
+    #[test]
+    fn a_profile_that_leaves_from_elsewhere_is_not_confirmed() {
+        let mut fixture = fixture();
+        let id = running_profile(&mut fixture);
+        fixture.state.finish_verification(
+            id,
+            Ok(VerificationReport {
+                discrepancies: vec![Discrepancy {
+                    claim: "exit address",
+                    expected: "203.0.113.7 (where the proxy was tested)".to_string(),
+                    observed: "198.51.100.9".to_string(),
+                }],
+                exit_ip: Some("198.51.100.9".to_string()),
+                exit_unreadable: None,
+            }),
+        );
+
+        let verification = fixture.state.verification(id).expect("recorded");
+
+        assert_eq!(verification.label(), "1 claim not confirmed");
+        assert_eq!(
+            verification.report().and_then(|report| report.exit_label()),
+            Some("traffic left from 198.51.100.9".to_string()),
+            "the address is still worth showing: it is where the traffic went"
+        );
+    }
+
     #[test]
     fn a_verification_needs_a_running_browser_with_a_debug_port() {
         let mut fixture = fixture();
@@ -2306,20 +3296,25 @@ mod tests {
         let mut fixture = fixture();
         let id = running_profile(&mut fixture);
 
-        fixture.state.finish_verification(id, Ok(Vec::new()));
-        assert_eq!(
+        fixture
+            .state
+            .finish_verification(id, Ok(VerificationReport::default()));
+        assert!(matches!(
             fixture.state.verification(id),
-            Some(&Verification::Confirmed)
-        );
+            Some(Verification::Confirmed(_))
+        ));
 
         let disagreement = Discrepancy {
             claim: "platform",
             expected: "Win32".to_string(),
             observed: "Linux x86_64".to_string(),
         };
-        fixture
-            .state
-            .finish_verification(id, Ok(vec![disagreement.clone()]));
+        fixture.state.finish_verification(
+            id,
+            Ok(VerificationReport::from_discrepancies(vec![
+                disagreement.clone(),
+            ])),
+        );
         let recorded = fixture.state.verification(id).expect("recorded");
         assert_eq!(
             recorded.disagreements(),
@@ -2342,7 +3337,9 @@ mod tests {
     fn stopping_or_restarting_a_profile_drops_a_stale_reading() {
         let mut fixture = fixture();
         let id = running_profile(&mut fixture);
-        fixture.state.finish_verification(id, Ok(Vec::new()));
+        fixture
+            .state
+            .finish_verification(id, Ok(VerificationReport::default()));
         assert!(fixture.state.verification(id).is_some());
 
         fixture.state.restart(id).expect("restart");
@@ -2351,9 +3348,373 @@ mod tests {
             "a restarted browser has a new fingerprint"
         );
 
-        fixture.state.finish_verification(id, Ok(Vec::new()));
+        fixture
+            .state
+            .finish_verification(id, Ok(VerificationReport::default()));
         fixture.state.stop(id).expect("stop");
         assert!(fixture.state.verification(id).is_none());
+    }
+
+    /// A proxy has to be judgeable before anything is launched with it, so a
+    /// test needs no running profile - it starts an engine of its own.
+    #[test]
+    fn a_proxy_can_be_tested_with_nothing_running() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+
+        let job = fixture.state.begin_proxy_test(id).expect("begin");
+
+        assert_eq!(job.proxy_id, id);
+        assert_eq!(job.proxy.name, "Office");
+        assert_eq!(
+            job.live_port, None,
+            "nothing is running, so the test starts its own engine"
+        );
+        assert!(!job.is_live());
+        assert_eq!(
+            job.echo_url,
+            fixture.state.setting_rows()[2].value,
+            "the endpoint is the configured one"
+        );
+        assert!(
+            fixture
+                .state
+                .proxy_test(id)
+                .is_some_and(ProxyTest::is_running)
+        );
+    }
+
+    /// A test of a proxy that is not stored is a mistake, not a job.
+    #[test]
+    fn testing_a_proxy_that_is_not_there_is_refused() {
+        let mut fixture = fixture();
+        assert!(fixture.state.begin_proxy_test(ProxyId::new()).is_err());
+    }
+
+    #[test]
+    fn a_second_test_of_the_same_proxy_is_refused() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+
+        fixture.state.begin_proxy_test(id).expect("first");
+        assert!(
+            fixture.state.begin_proxy_test(id).is_err(),
+            "a second engine for an answer already on its way"
+        );
+
+        fixture.state.finish_proxy_test(
+            id,
+            false,
+            Err(Fault::new(FaultClass::Unreachable, "no route")),
+        );
+        assert!(
+            fixture.state.begin_proxy_test(id).is_ok(),
+            "the slot is free once the answer is in"
+        );
+    }
+
+    /// When a profile is already up, its engine is the one that would have to
+    /// forward, so the test asks that engine instead of starting a second one.
+    #[test]
+    fn a_running_profile_makes_the_test_probe_its_engine() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let proxy_id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        let profile_id = fixture.state.create_profile("Proxied").expect("create");
+        let mut profile = fixture.state.profile(profile_id).expect("loaded");
+        profile.proxy_id = Some(proxy_id);
+        fixture.state.update_profile(profile).expect("assign");
+        fixture.runtime.set_state(profile_id, RuntimeState::Running);
+        fixture.runtime.set_socks_port(profile_id, 51234);
+        fixture.state.refresh_runtime();
+
+        let job = fixture.state.begin_proxy_test(proxy_id).expect("begin");
+
+        assert_eq!(
+            job.live_port,
+            Some(51234),
+            "the engine a profile is using is the one that has to carry the request"
+        );
+        assert!(job.is_live());
+    }
+
+    /// The port is cleared when a profile stops, so a test cannot probe a port
+    /// that nothing is listening on and call the answer a proxy failure.
+    #[test]
+    fn a_stopped_profile_leaves_no_port_to_probe() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let proxy_id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        let profile_id = fixture.state.create_profile("Proxied").expect("create");
+        let mut profile = fixture.state.profile(profile_id).expect("loaded");
+        profile.proxy_id = Some(proxy_id);
+        fixture.state.update_profile(profile).expect("assign");
+        fixture.runtime.set_state(profile_id, RuntimeState::Running);
+        fixture.runtime.set_socks_port(profile_id, 51234);
+        fixture.state.refresh_runtime();
+
+        fixture.runtime.set_state(profile_id, RuntimeState::Stopped);
+        fixture.state.refresh_runtime();
+
+        // The snapshot still holds the port, which is exactly the trap: it is
+        // the profile's own state that decides, so a stale port is never
+        // dialled and a dead socket is never reported as a broken proxy.
+        assert_eq!(
+            fixture
+                .runtime
+                .snapshot_of(profile_id)
+                .expect("snapshot")
+                .socks_port,
+            Some(51234),
+            "the port outlives the profile in the snapshot"
+        );
+
+        let job = fixture.state.begin_proxy_test(proxy_id).expect("begin");
+        assert_eq!(job.live_port, None);
+    }
+
+    #[test]
+    fn an_outcome_records_the_address_and_the_path_it_left_by() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        fixture.state.begin_proxy_test(id).expect("begin");
+
+        fixture.state.finish_proxy_test(
+            id,
+            true,
+            Ok(Diagnosis {
+                exit_ip: "198.51.100.9".to_string(),
+                elapsed: Duration::from_millis(431),
+            }),
+        );
+
+        let test = fixture.state.proxy_test(id).expect("a result");
+        let reading = test.reading().expect("a reading, not a fault");
+        assert_eq!(reading.exit_ip, "198.51.100.9");
+        assert_eq!(reading.elapsed, Duration::from_millis(431));
+        assert!(reading.live, "the request went through the running engine");
+        assert_eq!(test.label(), "exit 198.51.100.9");
+        assert!(test.fault().is_none());
+    }
+
+    /// A fault is not a reading with an empty address: it says where the
+    /// request stopped, because that is what decides the fix.
+    #[test]
+    fn a_failed_test_keeps_the_class_and_the_evidence() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        fixture.state.begin_proxy_test(id).expect("begin");
+
+        fixture.state.finish_proxy_test(
+            id,
+            false,
+            Err(Fault::new(
+                FaultClass::Auth,
+                "upstream refused the credentials it was offered",
+            )),
+        );
+
+        let test = fixture.state.proxy_test(id).expect("a result");
+        assert!(
+            test.reading().is_none(),
+            "nothing left, so nothing was read"
+        );
+        let fault = test.fault().expect("the fault");
+        assert_eq!(fault.class, FaultClass::Auth);
+        assert!(fault.detail.contains("credentials"), "{fault}");
+        assert_eq!(test.label(), "no traffic (authentication)");
+        assert!(
+            test.detail()
+                .expect("a detail line")
+                .contains("no traffic reached the endpoint"),
+            "the row and the log both have to say nothing arrived"
+        );
+    }
+
+    /// The address and the path are the record: a row is replaced by the next
+    /// test, and the log is not.
+    #[test]
+    fn the_activity_log_keeps_the_address_the_path_and_the_class() {
+        let dir = std::env::temp_dir().join(format!("fp-proxy-test-log-{}", CoreId::new()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut fixture = fixture_with_log(&dir);
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let ok = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        let bad = fixture
+            .state
+            .create_proxy("Home", socks5("10.0.0.2", 1080))
+            .expect("create proxy");
+
+        fixture.state.begin_proxy_test(ok).expect("begin");
+        fixture.state.finish_proxy_test(
+            ok,
+            false,
+            Ok(Diagnosis {
+                exit_ip: "198.51.100.9".to_string(),
+                elapsed: Duration::from_millis(90),
+            }),
+        );
+        fixture.state.begin_proxy_test(bad).expect("begin");
+        fixture.state.finish_proxy_test(
+            bad,
+            false,
+            Err(Fault::new(
+                FaultClass::Unreachable,
+                "no route to the upstream",
+            )),
+        );
+
+        let lines: Vec<String> = fixture
+            .state
+            .log_entries()
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect();
+        // `Created proxy Office` is also a line about Office, so the search is
+        // for the test's own record rather than for the name.
+        let mention = |name: &str| {
+            lines
+                .iter()
+                .find(|line| line.starts_with("proxy test:") && line.contains(name))
+                .unwrap_or_else(|| panic!("no record of testing {name}: {lines:?}"))
+        };
+        let passed = mention("Office");
+        assert!(passed.contains("198.51.100.9"), "{passed}");
+        assert!(
+            passed.contains("temporary engine"),
+            "the path is the half of the answer the row cannot keep: {passed}"
+        );
+        let failed = mention("Home");
+        assert!(failed.contains("unreachable"), "{failed}");
+        assert!(failed.contains("no route"), "{failed}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The class is the whole point of keeping them apart, so it is what the
+    /// immediate feedback leads with.
+    #[test]
+    fn a_failure_toasts_the_class_and_a_success_the_address() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+
+        fixture.state.begin_proxy_test(id).expect("begin");
+        fixture.state.finish_proxy_test(
+            id,
+            false,
+            Err(Fault::new(
+                FaultClass::Timeout,
+                "the request ran out of time",
+            )),
+        );
+        let toast = fixture.state.toasts().last().expect("a toast").clone();
+        assert_eq!(toast.kind, ToastKind::Error);
+        assert!(toast.message.contains("timeout"), "{}", toast.message);
+
+        fixture.state.begin_proxy_test(id).expect("begin again");
+        fixture.state.finish_proxy_test(
+            id,
+            false,
+            Ok(Diagnosis {
+                exit_ip: "198.51.100.9".to_string(),
+                elapsed: Duration::from_millis(90),
+            }),
+        );
+        let toast = fixture.state.toasts().last().expect("a toast").clone();
+        assert_eq!(toast.kind, ToastKind::Success);
+        assert!(toast.message.contains("198.51.100.9"), "{}", toast.message);
+    }
+
+    /// A result is about one upstream. Editing it leaves the old answer sitting
+    /// under a new address, which reads as a claim about the new one.
+    #[test]
+    fn editing_a_proxy_forgets_what_the_old_one_answered() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        fixture.state.begin_proxy_test(id).expect("begin");
+        fixture.state.finish_proxy_test(
+            id,
+            false,
+            Ok(Diagnosis {
+                exit_ip: "198.51.100.9".to_string(),
+                elapsed: Duration::from_millis(90),
+            }),
+        );
+        assert!(fixture.state.proxy_test(id).is_some());
+
+        let mut proxy = fixture.state.proxy(id).expect("stored");
+        proxy.outbound = socks5("10.0.0.2", 1080);
+        fixture.state.update_proxy(proxy).expect("edit");
+
+        assert!(
+            fixture.state.proxy_test(id).is_none(),
+            "the address it left from was the old upstream's"
+        );
+    }
+
+    #[test]
+    fn deleting_a_proxy_forgets_its_result() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        fixture.state.begin_proxy_test(id).expect("begin");
+        fixture.state.finish_proxy_test(
+            id,
+            false,
+            Ok(Diagnosis {
+                exit_ip: "198.51.100.9".to_string(),
+                elapsed: Duration::from_millis(90),
+            }),
+        );
+
+        fixture.state.delete_proxy(id).expect("delete");
+        assert!(fixture.state.proxy_test(id).is_none());
     }
 
     #[test]
@@ -2867,6 +4228,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fp-app-log-bad-{}", CoreId::new()));
         let mut fixture = fixture_full(
             &dir.join("config.json"),
+            None,
             Some(crate::log_file::LogFile::at(
                 dir.join("missing").join("activity.log"),
             )),
@@ -2898,5 +4260,425 @@ mod tests {
             "the in-memory log is unaffected"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory of the test's own to export into, removed when it ends.
+    ///
+    /// An export writes a file, and the export tests are the one place in this
+    /// module that must, so they write here rather than anywhere the machine
+    /// keeps its own data.
+    struct Scratch {
+        dir: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("fp-app-export-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self { dir }
+        }
+
+        fn join(&self, name: &str) -> PathBuf {
+            self.dir.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    const EXPORT_SECRET: &str = "correct horse battery staple";
+
+    /// The last thing the window was told.
+    ///
+    /// A success is a toast and a log line, not the banner: the banner is for
+    /// problems, which stay until they are dismissed. A failed export therefore
+    /// has to be read from `notice` and a successful one from here, and the
+    /// tests below do exactly that.
+    fn last_message(fixture: &Fixture) -> String {
+        fixture
+            .state
+            .toasts()
+            .last()
+            .map(|toast| toast.message.clone())
+            .expect("the window was told something")
+    }
+
+    fn seed_proxy_holding_a_password(fixture: &mut Fixture) -> ProxyId {
+        fixture
+            .state
+            .create_proxy(
+                "Zurich exit",
+                ProxyOutbound::Socks5(domain::Socks5Outbound {
+                    host: "203.0.113.10".to_string(),
+                    port: 1080,
+                    username: Some("alice".to_string()),
+                    password: Some(EXPORT_SECRET.to_string()),
+                }),
+            )
+            .expect("create proxy")
+    }
+
+    #[test]
+    fn an_export_leaves_the_passwords_out_unless_asked_otherwise() {
+        let scratch = Scratch::new("default-choice");
+        let mut fixture = fixture();
+        let core = seed_core(&fixture);
+        let proxy = seed_proxy_holding_a_password(&mut fixture);
+        fixture.state.load().expect("load");
+        let profile = fixture.state.create_profile("Work laptop").expect("create");
+        let mut draft = fixture.state.profile(profile).expect("the profile");
+        draft.proxy_id = Some(proxy);
+        draft.core_id = core;
+        fixture
+            .state
+            .update_profile(draft)
+            .expect("assign the proxy");
+
+        let path = scratch.join("config.json");
+        fixture
+            .state
+            .set_export_path(path.to_string_lossy().to_string());
+
+        // The default is the safe one: a file carrying plain-text passwords is
+        // the thing to reach for on purpose, not the thing to get by not reading
+        // a checkbox.
+        assert!(!fixture.state.export_includes_credentials());
+        let report = fixture.state.export_configuration().expect("export");
+
+        assert_eq!(report.profiles, 1);
+        assert_eq!(report.credentials, Credentials::Excluded);
+        assert_eq!(report.credentials_removed, 1);
+
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(!text.contains(EXPORT_SECRET), "{text}");
+        // And the profile's references still point at what travelled with it.
+        let document = application::ConfigBackup::from_json(&text).expect("parse");
+        assert_eq!(document.profiles[0].core_id, document.cores[0].id);
+        assert_eq!(document.profiles[0].proxy_id, Some(document.proxies[0].id));
+    }
+
+    #[test]
+    fn asking_for_the_credentials_writes_them_and_says_so() {
+        let scratch = Scratch::new("asked-for");
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        seed_proxy_holding_a_password(&mut fixture);
+        fixture.state.load().expect("load");
+
+        let path = scratch.join("config.json");
+        fixture
+            .state
+            .set_export_path(path.to_string_lossy().to_string());
+        fixture.state.set_export_includes_credentials(true);
+        let report = fixture.state.export_configuration().expect("export");
+
+        assert_eq!(report.credentials, Credentials::Included);
+        assert_eq!(report.credentials_removed, 0);
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(text.contains(EXPORT_SECRET));
+
+        // The warning is part of the answer, not decoration: a file holding
+        // passwords in plain text has to say so where the user is looking.
+        let message = last_message(&fixture);
+        assert!(message.contains("plain text"), "{message}");
+        assert!(message.contains("config.json"), "{message}");
+    }
+
+    #[test]
+    fn an_export_with_nothing_to_leave_out_says_that_instead() {
+        // The opposite sentence, and the reason the count is reported: "left
+        // out" over a configuration that had nothing to leave out would describe
+        // a file that is missing something it is not.
+        let scratch = Scratch::new("nothing-to-leave-out");
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+
+        let path = scratch.join("config.json");
+        fixture
+            .state
+            .set_export_path(path.to_string_lossy().to_string());
+        let report = fixture.state.export_configuration().expect("export");
+
+        assert_eq!(report.credentials, Credentials::Excluded);
+        assert_eq!(report.credentials_removed, 0);
+        assert_eq!(report.proxies, 0);
+
+        let message = last_message(&fixture);
+        assert!(
+            message.contains("no proxy credentials to leave out"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_failed_export_is_reported_as_an_error_and_writes_nothing() {
+        let scratch = Scratch::new("failed");
+        let blocker = scratch.join("not-a-directory");
+        std::fs::write(&blocker, b"").expect("write the blocker");
+        let mut fixture = fixture();
+        fixture.state.load().expect("load");
+
+        fixture
+            .state
+            .set_export_path(blocker.join("config.json").to_string_lossy().to_string());
+        let error = fixture
+            .state
+            .export_configuration()
+            .expect_err("cannot write");
+
+        assert!(error.contains("could not be written"), "{error}");
+        assert!(error.contains("not-a-directory"), "{error}");
+        let notice = fixture.state.notice().expect("a banner");
+        assert!(notice.error, "{}", notice.message);
+    }
+
+    #[test]
+    fn an_empty_export_field_means_the_default_and_a_typed_one_means_itself() {
+        let mut fixture = fixture();
+
+        // Empty, and whitespace, both mean "the default": a field someone has
+        // cleared is not a request to write a file called nothing.
+        assert_eq!(
+            fixture.state.export_destination(),
+            fixture.state.export_default_path()
+        );
+        fixture.state.set_export_path("   ");
+        assert_eq!(
+            fixture.state.export_destination(),
+            fixture.state.export_default_path()
+        );
+
+        fixture.state.set_export_path("  /tmp/my-backup.json  ");
+        assert_eq!(
+            fixture.state.export_destination(),
+            PathBuf::from("/tmp/my-backup.json")
+        );
+    }
+
+    #[test]
+    fn the_default_export_lands_under_the_data_directory_and_names_a_new_file() {
+        // Nothing is written here - the default is somewhere the machine keeps
+        // real data, and this test only reads what it would be.
+        let fixture = fixture();
+        let data_dir = fixture.state.export_default_path();
+        let parent = data_dir.parent().expect("a parent").to_path_buf();
+
+        assert_eq!(
+            parent.file_name().unwrap(),
+            crate::paths::EXPORT_DIR,
+            "{}",
+            parent.display()
+        );
+        assert!(
+            data_dir
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("fp-browser-config-"),
+            "{}",
+            data_dir.display()
+        );
+        assert_eq!(
+            data_dir.extension().unwrap(),
+            "json",
+            "{}",
+            data_dir.display()
+        );
+    }
+
+    #[test]
+    fn the_export_path_field_survives_a_trip_to_another_page() {
+        // The field itself lives in the view, which is not what is tested here;
+        // what is testable without a window is that the state behind it keeps
+        // what was typed rather than forgetting it between renders.
+        let mut fixture = fixture();
+        fixture.state.set_export_path("/tmp/kept.json");
+        fixture.state.set_page(crate::state::Page::Proxies);
+        assert_eq!(fixture.state.export_path(), "/tmp/kept.json");
+        fixture.state.set_page(crate::state::Page::Settings);
+        assert_eq!(fixture.state.export_path(), "/tmp/kept.json");
+    }
+
+    /// A configuration file to import, produced the honest way: by exporting
+    /// from a populated installation. Building one by hand here would quietly
+    /// decide what a real file looks like, and the export is the authority on
+    /// that.
+    fn write_backup_from(fixture: &mut Fixture, path: &std::path::Path) {
+        fixture.state.load().expect("load");
+        fixture
+            .state
+            .set_export_path(path.to_string_lossy().to_string());
+        fixture.state.export_configuration().expect("export");
+    }
+
+    #[test]
+    fn an_export_imports_back_into_an_empty_installation() {
+        let scratch = Scratch::new("import-round-trip");
+        let mut source = fixture();
+        let core = seed_core(&source);
+        let proxy = seed_proxy_holding_a_password(&mut source);
+        let profile = source.state.create_profile("Work laptop").expect("create");
+        let mut draft = source.state.profile(profile).expect("the profile");
+        draft.proxy_id = Some(proxy);
+        draft.core_id = core;
+        source
+            .state
+            .update_profile(draft)
+            .expect("assign the proxy");
+
+        let backup = scratch.join("config.json");
+        write_backup_from(&mut source, &backup);
+
+        let data_dir = scratch.join("data");
+        let mut arriving = fixture_with_data_dir(&data_dir);
+        arriving
+            .state
+            .set_import_path(backup.to_string_lossy().to_string());
+        let report = arriving.state.import_configuration().expect("import");
+
+        assert_eq!(report.added.cores, 1);
+        assert_eq!(report.added.proxies, 1);
+        assert_eq!(report.added.profiles, 1);
+        assert!(!report.needs_attention(), "{:?}", report.notes);
+
+        // The message names the file and says what arrived.
+        let message = last_message(&arriving);
+        assert!(message.contains("config.json"), "{message}");
+        assert!(message.contains("were added"), "{message}");
+
+        // The rows are reloaded, so the page shows what just arrived.
+        assert_eq!(arriving.state.rows().len(), 1);
+
+        // The profile's directory moved to this machine's data directory:
+        // the one the file recorded is not here, and a directory that is not
+        // on this machine was never going to be right.
+        let stored = arriving
+            .profiles
+            .get(profile)
+            .expect("stored")
+            .expect("the profile arrived");
+        assert_eq!(
+            stored.user_data_dir,
+            data_dir.join("profiles").join(profile.to_string())
+        );
+
+        // And the proxy arrived without the password the export left out.
+        let stored_proxy = arriving
+            .proxies
+            .get(proxy)
+            .expect("stored")
+            .expect("the proxy arrived");
+        match &stored_proxy.outbound {
+            ProxyOutbound::Socks5(socks5) => {
+                assert_eq!(socks5.password, None, "{:?}", stored_proxy.outbound);
+            }
+            other => panic!("expected the socks5 proxy back, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn importing_the_same_file_twice_adds_nothing_the_second_time() {
+        // The ordinary result of importing a file twice, and the reason the
+        // report distinguishes "nothing was added" from a refusal: the second
+        // import succeeded, it just had nothing to do.
+        let scratch = Scratch::new("import-twice");
+        let mut source = fixture();
+        seed_core(&source);
+        source.state.load().expect("load");
+        source.state.create_profile("Work laptop").expect("create");
+
+        let backup = scratch.join("config.json");
+        write_backup_from(&mut source, &backup);
+
+        let mut arriving = fixture();
+        arriving
+            .state
+            .set_import_path(backup.to_string_lossy().to_string());
+        let first = arriving.state.import_configuration().expect("first import");
+        assert_eq!(first.added.total(), 2);
+
+        let second = arriving
+            .state
+            .import_configuration()
+            .expect("second import");
+        assert_eq!(second.added.total(), 0);
+        assert!(!second.needs_attention(), "{:?}", second.notes);
+        let message = last_message(&arriving);
+        assert!(message.contains("nothing was added"), "{message}");
+        assert_eq!(arriving.state.rows().len(), 1);
+    }
+
+    #[test]
+    fn an_import_whose_core_is_not_in_the_file_skips_its_profiles() {
+        // A hand-edited file: the export always pairs a profile with its core,
+        // but a file is a file a person can edit, and the rule has to hold
+        // when the pairing is broken.
+        let scratch = Scratch::new("import-missing-core");
+        let mut source = fixture();
+        seed_core(&source);
+        source.state.load().expect("load");
+        source.state.create_profile("Work laptop").expect("create");
+
+        let backup = scratch.join("config.json");
+        write_backup_from(&mut source, &backup);
+
+        let mut document = application::ConfigBackup::from_json(
+            &std::fs::read_to_string(&backup).expect("read the backup"),
+        )
+        .expect("parse");
+        document.cores.clear();
+        let edited = scratch.join("edited.json");
+        std::fs::write(&edited, document.to_json().expect("serialise")).expect("write");
+
+        let mut arriving = fixture();
+        arriving
+            .state
+            .set_import_path(edited.to_string_lossy().to_string());
+        let report = arriving.state.import_configuration().expect("import");
+
+        assert_eq!(report.added.profiles, 0);
+        assert_eq!(report.notes.missing_core, vec!["Work laptop".to_string()]);
+        assert!(report.needs_attention());
+        // A partial import is a problem the reader has to dismiss, not a
+        // toast that drifts away: what was skipped is the thing they came to
+        // find out.
+        assert!(
+            arriving.state.notice().is_some_and(|notice| notice.error),
+            "the shortfall is in the banner"
+        );
+        assert_eq!(arriving.state.rows().len(), 0);
+    }
+
+    #[test]
+    fn an_import_without_a_path_is_refused_where_the_field_is() {
+        let mut arriving = fixture();
+        let result = arriving.state.import_configuration();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Type the path"));
+        assert!(arriving.state.notice().is_some_and(|notice| notice.error));
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_backup_is_said_so() {
+        let scratch = Scratch::new("import-foreign");
+        let elsewhere = scratch.join("notes.txt");
+        std::fs::write(&elsewhere, "not a configuration backup").expect("write");
+
+        let mut arriving = fixture();
+        arriving
+            .state
+            .set_import_path(elsewhere.to_string_lossy().to_string());
+        let result = arriving.state.import_configuration();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("could not be read"));
+        assert_eq!(arriving.state.rows().len(), 0);
     }
 }

@@ -73,6 +73,94 @@ fn connect(websocket_url: &str, timeout: Duration) -> Result<WebSocket<TcpStream
     Ok(socket)
 }
 
+/// Evaluates to `readyState|protocol|document?` for the session's document.
+///
+/// The scheme is read as well as the readiness because a brand new target
+/// reports `complete` for the empty document it starts with, before the
+/// navigation that opened it has committed.
+const DOCUMENT_STATE_EXPRESSION: &str =
+    "(document.readyState+'|'+location.protocol+'|'+(document.documentElement?'document':'empty'))";
+
+/// What a session's page currently holds.
+///
+/// Read from the page itself rather than inferred from a timeout, so a caller
+/// can tell a document that has not committed yet from one that committed
+/// somewhere other than the address it was sent to. A page that never arrives
+/// and a page that arrives slowly need different answers, and a bare
+/// "timed out" cannot tell them apart.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DocumentState {
+    /// `loading`, `interactive` or `complete`.
+    pub ready_state: String,
+    /// The scheme of the committed document, e.g. `http:`. Empty when the page
+    /// reported nothing, which is not a scheme.
+    pub protocol: String,
+    /// Whether the document has an element tree yet.
+    pub has_document: bool,
+}
+
+impl DocumentState {
+    /// Parses the probe's `readyState|protocol|document?` answer.
+    ///
+    /// An answer that is not that shape yields a state that is not loaded.
+    /// Nothing about an unreadable answer says the page arrived, and reading it
+    /// as arrived would turn a failure to ask into a success.
+    pub fn parse(answer: &str) -> Self {
+        let mut parts = answer.split('|');
+        let ready_state = parts.next().unwrap_or_default().to_string();
+        if ready_state.is_empty() {
+            return Self::default();
+        }
+        Self {
+            ready_state,
+            protocol: parts.next().unwrap_or_default().to_string(),
+            has_document: parts.next() == Some("document"),
+        }
+    }
+
+    /// Whether the page holds a loaded document of `scheme`.
+    pub fn is_loaded(&self, scheme: &str) -> bool {
+        self.ready_state == "complete" && self.protocol == scheme && self.has_document
+    }
+
+    /// Whether the page has committed to a document other than the empty one.
+    ///
+    /// A page still on `about:blank`, or one whose document has not started, has
+    /// not committed anywhere; the two are the same answer to "did it get
+    /// there", and neither is an arrival.
+    pub fn has_committed(&self) -> bool {
+        !self.is_blank()
+    }
+
+    /// Whether the page is still on the empty document it started with, or has
+    /// not reported a scheme at all.
+    pub fn is_blank(&self) -> bool {
+        self.protocol.is_empty() || self.protocol == "about:"
+    }
+}
+
+impl std::fmt::Display for DocumentState {
+    /// The probe's own answer, so a log line carries what was seen rather than
+    /// someone's paraphrase of it.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}|{}|{}",
+            if self.ready_state.is_empty() {
+                "unknown"
+            } else {
+                &self.ready_state
+            },
+            self.protocol,
+            if self.has_document {
+                "document"
+            } else {
+                "empty"
+            }
+        )
+    }
+}
+
 /// A live CDP connection to one page target.
 ///
 /// Used to read the fingerprint back out of a running browser: the supervisor
@@ -144,12 +232,9 @@ impl CdpSession {
     /// it has committed. Waiting for the scheme as well means the answer is
     /// about the document the caller asked for, not the placeholder.
     pub fn wait_for_document(&mut self, scheme: &str, timeout: Duration) -> Result<(), CdpError> {
-        let expression = "(document.readyState+'|'+location.protocol+'|'+             (document.documentElement?'document':'empty'))";
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            let observed = self.evaluate(expression, timeout)?;
-            let observed = observed.as_str().unwrap_or_default();
-            if observed == format!("complete|{scheme}|document") {
+            if self.document_state(timeout)?.is_loaded(scheme) {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
@@ -159,6 +244,16 @@ impl CdpSession {
             }
             std::thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    /// One reading of what the session's page holds.
+    ///
+    /// Unlike [`Self::wait_for_document`] this does not loop, so a caller that
+    /// has to tell "has not arrived" from "has not finished arriving" gets the
+    /// state itself instead of a deadline's worth of waiting and a timeout.
+    pub fn document_state(&mut self, timeout: Duration) -> Result<DocumentState, CdpError> {
+        let value = self.evaluate(DOCUMENT_STATE_EXPRESSION, timeout)?;
+        Ok(DocumentState::parse(value.as_str().unwrap_or_default()))
     }
 
     /// Evaluate an expression in the page and return its value.
@@ -502,6 +597,96 @@ mod tests {
             .expect("evaluation succeeds");
 
         assert_eq!(value.as_str(), Some("{\"platform\":\"Win32\"}"));
+    }
+
+    #[test]
+    fn a_page_that_did_not_arrive_is_not_the_document_asked_for() {
+        // The empty document every target starts with: complete, and not an
+        // arrival anywhere. `location.protocol` reports `about:` for it, not
+        // the whole `about:blank` name.
+        let blank = DocumentState::parse("complete|about:|document");
+        assert!(!blank.is_loaded("http:"));
+        assert!(blank.is_blank());
+        assert!(
+            !blank.has_committed(),
+            "the placeholder document is not an arrival"
+        );
+
+        // A page whose document has not started reports no scheme at all, which
+        // is the same answer as the placeholder.
+        assert!(DocumentState::parse("loading||empty").is_blank());
+
+        // Committed somewhere, just not where it was sent. Reading this as
+        // "unreachable" is what lets the caller say which of the two happened.
+        let elsewhere = DocumentState::parse("complete|chrome-error:|document");
+        assert!(!elsewhere.is_loaded("http:"));
+        assert!(elsewhere.has_committed());
+
+        assert!(DocumentState::parse("complete|http:|document").is_loaded("http:"));
+    }
+
+    #[test]
+    fn an_answer_the_probe_did_not_make_is_not_a_loaded_document() {
+        for answer in [
+            "",
+            "garbage",
+            "complete",
+            "complete|http:",
+            "loading|http:|empty",
+        ] {
+            let state = DocumentState::parse(answer);
+            assert!(!state.is_loaded("http:"), "{answer:?} is not an arrival");
+        }
+    }
+
+    #[test]
+    fn the_state_is_reported_in_the_probes_own_words() {
+        assert_eq!(
+            DocumentState::parse("loading|http:|empty").to_string(),
+            "loading|http:|empty",
+            "a log line should carry what was seen, not a paraphrase"
+        );
+        assert_eq!(DocumentState::parse("").to_string(), "unknown||empty");
+    }
+
+    #[test]
+    fn waiting_for_a_document_waits_for_the_scheme_not_just_readiness() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A brand new target answers `complete` for the empty document it starts
+        // with; only a later reading is the document that was asked for.
+        let answers = Arc::new(AtomicUsize::new(0));
+        let counter = answers.clone();
+        let port = fake_cdp_server(move |request| {
+            let id = serde_json::from_str::<serde_json::Value>(request).unwrap()["id"].clone();
+            let state = if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                "complete|about:|document"
+            } else {
+                "complete|file:|document"
+            };
+            vec![
+                serde_json::json!({
+                    "id": id,
+                    "result": {"result": {"type": "string", "value": state}}
+                })
+                .to_string(),
+            ]
+        });
+
+        let mut session = CdpSession::connect(
+            &format!("ws://127.0.0.1:{port}/devtools/page/1"),
+            Duration::from_secs(5),
+        )
+        .expect("the handshake completes");
+        session
+            .wait_for_document("file:", Duration::from_secs(5))
+            .expect("the placeholder is not the document asked for");
+
+        assert!(
+            answers.load(Ordering::SeqCst) >= 2,
+            "the placeholder reading must not end the wait"
+        );
     }
 
     #[test]

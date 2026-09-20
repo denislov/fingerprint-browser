@@ -31,5 +31,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 crossbeam-channel = "0.5"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# The proxy diagnostic writes its own SOCKS5 conversation rather than borrowing
+# a `socks-proxy` feature: no timeout in that client survived a peer that
+# accepts the connection and then says nothing. See runtime::diagnostic.
 ureq = "3.4"
 gpui-kit = "0.6.4"

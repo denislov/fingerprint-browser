@@ -1,12 +1,23 @@
+pub mod config_backup;
 pub mod core_service;
 pub mod error;
+pub mod export;
+pub mod import;
 pub mod profile_service;
 pub mod proxy_service;
 pub mod runtime_service;
 
+pub use config_backup::{BackupError, ConfigBackup, ConfigSnapshot, Credentials, ExportOrigin};
 pub use core_service::{CoreService, DefaultCoreService, VersionProbe};
 pub use error::AppError;
-pub use profile_service::{DefaultProfileService, DeleteMode, NewProfile, ProfileService};
+pub use export::{ExportError, ExportReport, read_configuration, write_config_backup};
+pub use import::{
+    Counts, ImportError, ImportNotes, ImportPlan, ImportReport, Repointed, apply_import,
+    plan_import, read_config_backup,
+};
+pub use profile_service::{
+    DefaultProfileService, DeleteMode, NewProfile, ProfileService, default_user_data_dir,
+};
 pub use proxy_service::{DefaultProxyService, NewProxy, ProxyService};
 pub use runtime_service::RuntimeService;
 
@@ -65,6 +76,34 @@ mod tests {
         let remaining = service.list().expect("list profiles");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, dup.id);
+    }
+
+    #[test]
+    fn a_created_profile_lives_where_an_imported_one_would() {
+        // Two places compute this path - `create` for a new profile, and the
+        // import for one whose recorded directory is not on this machine - and
+        // they have to agree, or one identifier would name two directories and
+        // the browser data would be split between them.
+        let repo = Arc::new(MemProfileRepository::new());
+        let base = PathBuf::from("data");
+        let service = DefaultProfileService::new(repo, base.clone());
+
+        let profile = service
+            .create(NewProfile {
+                name: "Primary Profile".to_string(),
+                core_id: CoreId::new(),
+                user_data_dir: None,
+                fingerprint: None,
+                proxy_id: None,
+                window: None,
+                start_target: None,
+            })
+            .expect("create profile");
+
+        assert_eq!(
+            profile.user_data_dir,
+            default_user_data_dir(&base, profile.id)
+        );
     }
 
     #[test]
