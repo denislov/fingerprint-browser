@@ -23,6 +23,21 @@ pub enum ValidationError {
     #[error("proxy {field} cannot be empty")]
     EmptyProxyField { field: &'static str },
 
+    #[error("stream setting {field} is set, but {selected} never reads it")]
+    UnusedStreamSetting {
+        field: &'static str,
+        selected: &'static str,
+    },
+
+    #[error("stream setting {field} is required when {selected}")]
+    MissingStreamSetting {
+        field: &'static str,
+        selected: &'static str,
+    },
+
+    #[error("{detail}")]
+    UnsupportedStreamCombination { detail: String },
+
     #[error("core name cannot be empty")]
     EmptyCoreName,
 

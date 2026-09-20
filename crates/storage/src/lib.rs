@@ -18,8 +18,8 @@ mod tests {
     use domain::{
         BrowserBrand, BrowserCore, BrowserProfile, CoreId, FingerprintProfile, HttpOutbound,
         Platform, ProfileId, ProxyId, ProxyOutbound, ProxyProfile, ShadowsocksOutbound,
-        Socks5Outbound, SpoofingFeature, StartTarget, TrojanOutbound, VlessOutbound, VmessOutbound,
-        WebRtcPolicy, WindowProfile,
+        Socks5Outbound, SpoofingFeature, StartTarget, StreamSettings, TrojanOutbound,
+        VlessOutbound, VmessOutbound, WebRtcPolicy, WindowProfile,
     };
     use std::path::PathBuf;
 
@@ -103,6 +103,7 @@ mod tests {
                     port: 8388,
                     password: "secret_password".to_string(),
                     method: "aes-256-gcm".to_string(),
+                    stream: StreamSettings::plain(),
                 }),
             },
             ProxyProfile {
@@ -113,6 +114,7 @@ mod tests {
                     port: 443,
                     uuid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
                     security: "auto".to_string(),
+                    stream: StreamSettings::plain(),
                 }),
             },
             ProxyProfile {
@@ -124,6 +126,7 @@ mod tests {
                     uuid: "550e8400-e29b-41d4-a716-446655440001".to_string(),
                     flow: Some("xtls-rprx-vision".to_string()),
                     encryption: "none".to_string(),
+                    stream: StreamSettings::plain(),
                 }),
             },
             ProxyProfile {
@@ -133,6 +136,7 @@ mod tests {
                     host: "trojan.node.com".to_string(),
                     port: 443,
                     password: "trojan_pass".to_string(),
+                    stream: StreamSettings::plain(),
                 }),
             },
         ];

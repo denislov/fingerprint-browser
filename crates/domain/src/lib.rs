@@ -17,8 +17,9 @@ pub use id::{CoreId, ProfileId, ProxyId};
 pub use plan::{LaunchPlan, XrayLaunchPlan};
 pub use profile::BrowserProfile;
 pub use proxy::{
-    HttpOutbound, ProxyOutbound, ProxyProfile, ShadowsocksOutbound, Socks5Outbound, TrojanOutbound,
-    VlessOutbound, VmessOutbound,
+    GrpcSettings, HttpOutbound, ProxyOutbound, ProxyProfile, RealitySettings, ShadowsocksOutbound,
+    Socks5Outbound, StreamNetwork, StreamSecurity, StreamSettings, TlsSettings, TrojanOutbound,
+    VlessOutbound, VmessOutbound, WsSettings,
 };
 pub use runtime::{RuntimeSession, RuntimeState};
 pub use start_target::StartTarget;

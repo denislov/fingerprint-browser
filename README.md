@@ -35,8 +35,18 @@ runtime implementation for SOCKS5/HTTP upstream proxies:
 - Stop, startup rollback and detected component crashes reclaim both processes
   and remove the temporary proxy configuration. Xray crashes close Chromium.
 - Runtime snapshots include the Xray PID and clear process/port fields on stop.
-- Other outbound variants remain stored domain types but are rejected at launch
-  until their transport/TLS configuration is implemented and tested.
+- Shadowsocks, VMess, VLESS and Trojan outbounds have a config builder too, with
+  the transport and TLS settings they need: `StreamSettings` carries
+  tcp/ws/grpc, none/tls/REALITY, and the websocket path, `Host` header and gRPC
+  service name. Every name in there is checked against the engine's own
+  validator, `xray run -test`, which parses a config without opening a socket -
+  the opt-in `xray_real` suite emits ten shapes and all ten are accepted, an
+  unknown cipher is refused, and a hand-written `allowInsecure` is refused by
+  name. `allowInsecure` is not modelled at all, because Xray 26.2.6 removed it
+  (the replacement is a certificate pin). The editor still offers only SOCKS5
+  and HTTP, and the proxy service refuses to store the other four: the form
+  cannot fill in their stream settings yet, so the model and the builder handle
+  all six while the window does not.
 
 Configure `SupervisorComponents.xray_executable`, `runtime_dir` and
 `xray_ready_timeout` when constructing the supervisor. Defaults are `bin/xray`

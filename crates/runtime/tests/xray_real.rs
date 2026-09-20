@@ -1,5 +1,9 @@
 //! Opt-in integration: XRAY_BIN=/absolute/path/xray cargo test -p runtime --test xray_real -- --ignored
-use domain::{HttpOutbound, ProxyId, ProxyOutbound, ProxyProfile, Socks5Outbound};
+use domain::{
+    GrpcSettings, HttpOutbound, ProxyId, ProxyOutbound, ProxyProfile, RealitySettings,
+    ShadowsocksOutbound, Socks5Outbound, StreamNetwork, StreamSecurity, StreamSettings,
+    TlsSettings, TrojanOutbound, VlessOutbound, VmessOutbound, WsSettings,
+};
 use runtime::{DefaultXrayConfigBuilder, XrayConfigBuilder};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -164,4 +168,259 @@ fn authenticated_socks_and_http_upstreams_forward_payload() {
         assert_eq!(read_bytes(&mut client, 4), b"pong");
         server.join().unwrap();
     }
+}
+
+fn proxy(name: &str, outbound: ProxyOutbound) -> ProxyProfile {
+    ProxyProfile {
+        id: ProxyId::new(),
+        name: name.to_string(),
+        outbound,
+    }
+}
+
+/// What the engine says about a config this builder wrote.
+///
+/// `xray run -test` parses the file and builds every handler without opening a
+/// socket, so the answer costs no server and no network - which is what makes it
+/// the right authority for names the engine defines (cipher methods, transport
+/// names, whether a block is read at all).
+fn engine_verdict(executable: &std::ffi::OsStr, proxy: &ProxyProfile) -> Result<(), String> {
+    let path = std::env::temp_dir().join(format!("fp-xray-verdict-{}.json", proxy.id));
+    DefaultXrayConfigBuilder
+        .build(proxy, 10800, &path)
+        .map_err(|error| error.to_string())?;
+    let verdict = test_config(executable, &path);
+    let _ = std::fs::remove_file(&path);
+    verdict
+}
+
+fn test_config(executable: &std::ffi::OsStr, path: &std::path::Path) -> Result<(), String> {
+    let output = Command::new(executable)
+        .args(["run", "-test", "-c"])
+        .arg(path)
+        .output()
+        .expect("run xray -test");
+    if output.status.success() {
+        Ok(())
+    } else {
+        // The engine writes its refusal to stdout, not to stderr: taking only
+        // stderr reads as "refused, reason unknown", which is what the first
+        // version of this did.
+        let detail = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Err(detail.trim().to_string())
+    }
+}
+
+/// Every shape the config builder can make, held up against the engine's own
+/// validator.
+///
+/// The negative cases are what make it worth running. One shows the validator
+/// can refuse at all (a config the builder wrote, with the switch this engine
+/// removed put back by hand); the other shows a name we do *not* check
+/// ourselves - the cipher - being refused by the engine instead. Without them,
+/// "exit 0" would not be evidence of anything.
+///
+/// REALITY over a websocket is not here: that one never reaches the engine,
+/// because domain validation refuses it first (see `validate_proxy`).
+#[test]
+#[ignore = "requires XRAY_BIN pointing to a real Xray executable"]
+fn every_shape_the_builder_makes_is_accepted_by_the_engine() {
+    let executable = std::env::var_os("XRAY_BIN").expect("set XRAY_BIN");
+
+    let tls_over_ws = StreamSettings {
+        network: StreamNetwork::Ws,
+        security: StreamSecurity::Tls,
+        tls: Some(TlsSettings {
+            server_name: Some("front.example".into()),
+            fingerprint: Some("chrome".into()),
+            alpn: vec!["h2".into(), "http/1.1".into()],
+        }),
+        ws: Some(WsSettings {
+            path: Some("/ws".into()),
+            host: Some("front.example".into()),
+        }),
+        ..Default::default()
+    };
+    // Produced by `xray x25519` (the line it prints as `Password`).
+    let reality_stream = StreamSettings {
+        security: StreamSecurity::Reality,
+        reality: Some(RealitySettings {
+            server_name: Some("front.example".into()),
+            public_key: "LOLTG162EtSegCnMAofVY3oKrbrCvH8zOTZEPd1GRQU".into(),
+            short_id: Some("ab12".into()),
+            fingerprint: Some("chrome".into()),
+            spider_x: None,
+        }),
+        ..Default::default()
+    };
+    let accepted = vec![
+        proxy(
+            "socks5",
+            ProxyOutbound::Socks5(Socks5Outbound {
+                host: "127.0.0.1".into(),
+                port: 1080,
+                username: Some("alice".into()),
+                password: Some("secret".into()),
+            }),
+        ),
+        proxy(
+            "http",
+            ProxyOutbound::Http(HttpOutbound {
+                host: "127.0.0.1".into(),
+                port: 8080,
+                username: Some("alice".into()),
+                password: Some("secret".into()),
+            }),
+        ),
+        proxy(
+            "shadowsocks aes-256-gcm",
+            ProxyOutbound::Shadowsocks(ShadowsocksOutbound {
+                host: "127.0.0.1".into(),
+                port: 8388,
+                password: "secret".into(),
+                method: "aes-256-gcm".into(),
+                stream: StreamSettings::plain(),
+            }),
+        ),
+        proxy(
+            "shadowsocks 2022 with a base64 key",
+            ProxyOutbound::Shadowsocks(ShadowsocksOutbound {
+                host: "127.0.0.1".into(),
+                port: 8388,
+                // 32 bytes, base64: what a 2022 cipher requires of `password`.
+                password: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+                method: "2022-blake3-aes-256-gcm".into(),
+                stream: StreamSettings::plain(),
+            }),
+        ),
+        proxy(
+            "vmess plain",
+            ProxyOutbound::Vmess(VmessOutbound {
+                host: "127.0.0.1".into(),
+                port: 10086,
+                uuid: "b831381d-6324-4d53-ad4f-8cda48b30811".into(),
+                security: "auto".into(),
+                stream: StreamSettings::plain(),
+            }),
+        ),
+        proxy(
+            "vmess tls over ws",
+            ProxyOutbound::Vmess(VmessOutbound {
+                host: "127.0.0.1".into(),
+                port: 443,
+                uuid: "b831381d-6324-4d53-ad4f-8cda48b30811".into(),
+                security: "auto".into(),
+                stream: tls_over_ws.clone(),
+            }),
+        ),
+        proxy(
+            "vless tls over grpc",
+            ProxyOutbound::Vless(VlessOutbound {
+                host: "127.0.0.1".into(),
+                port: 443,
+                uuid: "b831381d-6324-4d53-ad4f-8cda48b30811".into(),
+                flow: None,
+                encryption: "none".into(),
+                stream: StreamSettings {
+                    network: StreamNetwork::Grpc,
+                    security: StreamSecurity::Tls,
+                    grpc: Some(GrpcSettings {
+                        service_name: "svc".into(),
+                    }),
+                    ..Default::default()
+                },
+            }),
+        ),
+        proxy(
+            "vless reality",
+            ProxyOutbound::Vless(VlessOutbound {
+                host: "127.0.0.1".into(),
+                port: 443,
+                uuid: "b831381d-6324-4d53-ad4f-8cda48b30811".into(),
+                flow: Some("xtls-rprx-vision".into()),
+                encryption: "none".into(),
+                stream: reality_stream,
+            }),
+        ),
+        proxy(
+            "trojan tls",
+            ProxyOutbound::Trojan(TrojanOutbound {
+                host: "127.0.0.1".into(),
+                port: 443,
+                password: "secret".into(),
+                stream: StreamSettings {
+                    security: StreamSecurity::Tls,
+                    ..Default::default()
+                },
+            }),
+        ),
+        // The engine honours trojan without TLS rather than ignoring the
+        // setting, so it is a config it accepts, and this records that.
+        proxy(
+            "trojan without tls",
+            ProxyOutbound::Trojan(TrojanOutbound {
+                host: "127.0.0.1".into(),
+                port: 443,
+                password: "secret".into(),
+                stream: StreamSettings::plain(),
+            }),
+        ),
+    ];
+
+    for proxy in &accepted {
+        if let Err(reason) = engine_verdict(&executable, proxy) {
+            panic!("the engine refused {}: {reason}", proxy.name);
+        }
+    }
+
+    // A cipher this project does not enumerate: the engine is the list.
+    let unknown_cipher = proxy(
+        "shadowsocks with an unknown cipher",
+        ProxyOutbound::Shadowsocks(ShadowsocksOutbound {
+            host: "127.0.0.1".into(),
+            port: 8388,
+            password: "secret".into(),
+            method: "definitely-not-a-cipher".into(),
+            stream: StreamSettings::plain(),
+        }),
+    );
+    assert!(
+        engine_verdict(&executable, &unknown_cipher).is_err(),
+        "the engine accepted a cipher it does not know"
+    );
+
+    // The switch Xray 26.2.6 removed, put back into a config this builder wrote.
+    // It is added as text because there is no profile field that could produce
+    // it - which is the point.
+    let trojan_tls = accepted
+        .iter()
+        .find(|candidate| candidate.name == "trojan tls")
+        .expect("the trojan case above");
+    let path = std::env::temp_dir().join(format!("fp-xray-removed-{}.json", trojan_tls.id));
+    DefaultXrayConfigBuilder
+        .build(trojan_tls, 10800, &path)
+        .expect("build");
+    let with_the_removed_switch = std::fs::read_to_string(&path).expect("read").replace(
+        "\"security\": \"tls\"",
+        "\"security\": \"tls\", \"tlsSettings\": { \"allowInsecure\": true }",
+    );
+    // Without this, a config that never held the switch would be "accepted" and
+    // the case would read as a pass while testing nothing.
+    assert_ne!(
+        std::fs::read_to_string(&path).expect("read"),
+        with_the_removed_switch,
+        "nothing was injected, so the engine was never asked about the removed switch"
+    );
+    std::fs::write(&path, with_the_removed_switch).expect("write");
+    let verdict = test_config(&executable, &path);
+    let _ = std::fs::remove_file(&path);
+    let reason = verdict.expect_err("the engine accepted a switch it removed");
+    assert!(
+        reason.contains("allowInsecure"),
+        "the refusal should name the switch: {reason}"
+    );
 }

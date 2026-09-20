@@ -215,17 +215,37 @@ pub enum ProxyOutbound {
 }
 ```
 
+四种协议型 outbound（Shadowsocks / VMess / VLESS / Trojan）各自带一份 stream 设置：
+SOCKS5 与 HTTP 没有，所以“配置了一个永远不会被读的 stream”在这个模型里写不出来。
+
+```rust
+#[derive(Debug, Clone)]
+pub struct StreamSettings {
+    pub network: StreamNetwork,   // tcp | ws | grpc
+    pub security: StreamSecurity, // none | tls | reality
+    pub tls: Option<TlsSettings>,         // serverName / fingerprint / alpn
+    pub reality: Option<RealitySettings>, // publicKey / shortId / spiderX
+    pub ws: Option<WsSettings>,           // path / Host
+    pub grpc: Option<GrpcSettings>,       // serviceName
+}
+```
+
+哪一块会被读，取决于另两个选择：`tls` 块只在 `security: tls` 下有意义、`ws` 块只在
+`network: ws` 下有意义。引擎对“写了但没人读”的块完全沉默（`xray run -test` 也接受），
+所以这类矛盾由 `validate_proxy` 拒绝，见 [service-contracts](service-contracts.md) 第 5 节。
+没有 `allowInsecure` 字段：Xray 26.2.6 已移除它，模型里就没有能变成它的东西。
+
 v1 实现顺序建议：
 
 ```text
-1. Socks5
-2. Http
-3. Shadowsocks
-4. Vless
-5. Vmess / Trojan
+1. Socks5          配置 + 表单（已完成）
+2. Http            配置 + 表单（已完成）
+3. Shadowsocks     配置已实现；表单待做
+4. Vless           配置已实现；表单待做
+5. Vmess / Trojan  配置已实现；表单待做
 ```
 
-不是一次把所有 Xray 协议 UI 做完。
+不是一次把所有 Xray 协议 UI 做完；“配置先行、表单随后”就是按这个顺序落的。
 
 ---
 

@@ -226,6 +226,40 @@ Phase 4 的剩余项在第十二批结清，结论与证据见 [fingerprint-matr
   README 里“Phase 3 要再用 fingerprint-chromium 重做一次验收”这条**已经成立**，不再是待办。
 - 二进制仍然解在仓库之外、不入库（沿用既有约定）。
 
+### 第十六批：其余四种 outbound 的配置（以及一个被引擎删掉的开关）
+
+进度（2026-09-20）：已完成。**把“模型能存六种、配置只能建两种”补成六种，并且用引擎自己当裁判。**
+
+- domain 新增 `StreamSettings`（`network`: tcp/ws/grpc，`security`: none/tls/reality，外加
+  `tls`/`reality`/`ws`/`grpc` 四个可选块），挂在 Shadowsocks/VMess/VLESS/Trojan 四种 outbound
+  上；SOCKS5/HTTP 不带，所以“配了一个永远不会被读的 stream”在**类型层面**就写不出来。
+  `#[serde(default)]` 让已存的代理（旧 JSON 没有这个字段）照常读出。
+- `validate_proxy` 新增 stream 规则，分两类：引擎自己也拒绝的（REALITY 只能走 tcp），
+  以及**引擎完全不吽声的**——`security: none` 旁边的 `tls` 块、`network: tcp` 旁边的 `ws` 块。
+  实测 `xray run -test` 对后者是 exit 0：没人读，也没人说。这正是本批加校验的理由——
+  “写了但会被静默丢掉”必须被点名拒绝。
+- `DefaultXrayConfigBuilder` 覆盖六种协议并写出 `streamSettings`；生成前先过
+  `domain::validate_proxy`，于是“能存的”和“能生成的”永远同一套规则，不再有两份校验。
+- **判据不是我们写的字段名，是引擎。** 新增 opt-in 测试
+  `every_shape_the_builder_makes_is_accepted_by_the_engine`：把每种形状用真构建器写成文件，
+  交给 `xray run -test`（只解析、不开 socket，所以不需要服务器与网络）。十个正例全部被接受；
+  反例必须被拒绝——未知 cipher（cipher 名单由引擎定义，不由我们枚举），以及把 `allowInsecure`
+  手工注回构建器写出的配置（证明这个探针不是空转）。
+- **两个由实测改变的方案**：
+  1. `allowInsecure` 在 26.2.6 已被**移除**（exit 23，提示改用 `pinnedPeerCertSha256`）。
+     兄弟项目 Go 版靠“内部标记 + 运行时抓对端证书算 pin”绕开它。本仓库因此不建模这个开关：
+     模型里没有能变成它的字段。
+  2. SS（无 FS）/ Trojan / WebSocket / gRPC 在 26.2.6 都带 deprecation warning（仍可用），
+     xhttp 是新的推荐传输；`x25519` 现在把公钥打印为 `Password:`，而 REALITY 的 `publicKey`
+     与新的 `password` 两种写法都被接受（本仓库发 `publicKey`，与分享链接里的 `pbk` 一致）。
+- 测试自己踩的两个坑（都修了，值得记）：注入 `allowInsecure` 那一步一开始替换的是
+  `"serverName"`，而该用例根本没生成 `tlsSettings`，于是“引擎接受了它”其实是什么都没注入
+  —— 现在注入前后断言文本必须变化；另外 `-test` 的拒绝信息走 **stdout**，只收 stderr 会拿到
+  一条空理由。
+- 表单仍是两页：四种新协议的编辑器，以及“粘贴 `vless://` `vmess://` `trojan://` `ss://`
+  导入”，是下一批。`runtime::is_supported` 现在的含义是“表单能不能填”，不是“配置能不能建”。
+- 真实远端出口的验收仍需真服务器：本批证明的是“生成的配置引擎接受”，不是“这个服务器能通”。
+
 ### 第二批：开关词汇的实测与回读验证
 
 进度（2026-09-19）：已完成。方法与全部实测数据见 [fingerprint-matrix.md](fingerprint-matrix.md)。
@@ -285,8 +319,8 @@ Phase 4 的剩余项在第十二批结清，结论与证据见 [fingerprint-matr
   主机为空/含空格或 scheme、端口为 0、用户名密码只给一半、各协议自己的必填字段
   （ss 的 password/method、vmess 的 uuid/security、vless 的 uuid/encryption、trojan 的 password）。
 - `application::ProxyService`（新）：`create`/`update`/`delete`/`get`/`list`/`usage`。
-  两层闸门：先过 domain 校验，再过 `runtime::outbound_is_supported`（配置构建器只支持
-  SOCKS5 与 HTTP）。**存不下的代理不如早点拒绝**：四个构建不了的协议在表单里被列出来并说明原因，
+  两层闸门：先过 domain 校验，再过 `runtime::is_supported`（当时配置构建器只支持
+  SOCKS5 与 HTTP；第十六批后构建器六种都支持，这道闸门变成“表单能不能填”，见第十六批）。**存不下的代理不如早点拒绝**：四个构建不了的协议在表单里被列出来并说明原因，
   不允许选中，而不是存下来到启动时才失败。
 - **在用代理不可删**：`profiles.proxy_id` 有 `ON DELETE SET NULL`，直接删会让那个 profile
   静默变成 direct（流量泄漏）。所以 `delete` 先查引用，拒绝并点名持有它的 profile，
@@ -701,7 +735,7 @@ the per protocol secrets are required
 the endpoint names the protocol and the host
 a created proxy can be read back
 a broken proxy is refused before it is stored
-a protocol the runtime cannot build is refused
+a protocol the editor cannot fill in is refused
 updating a proxy that is gone is not found
 an edit is stored and re-checked
 a proxy still assigned to a profile cannot be deleted

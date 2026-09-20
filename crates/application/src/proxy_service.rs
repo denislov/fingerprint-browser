@@ -134,7 +134,7 @@ mod tests {
     use super::*;
     use domain::{
         BrowserProfile, CoreId, FingerprintProfile, ProfileId, ShadowsocksOutbound, Socks5Outbound,
-        StartTarget, WindowProfile,
+        StartTarget, StreamSettings, WindowProfile,
     };
     use storage::{MemProfileRepository, MemProxyRepository};
 
@@ -205,9 +205,11 @@ mod tests {
         assert!(proxies.list().expect("list").is_empty());
     }
 
-    /// The model can store six protocols; the config builder can build two.
+    /// The form cannot fill in the stream settings these protocols carry, so
+    /// neither the editor nor the service offers them yet. The config builder
+    /// itself builds all six (see `runtime::DefaultXrayConfigBuilder`).
     #[test]
-    fn a_protocol_the_runtime_cannot_build_is_refused() {
+    fn a_protocol_the_editor_cannot_fill_in_is_refused() {
         let (service, proxies, _) = service();
         let draft = NewProxy {
             name: "Shadowsocks".to_string(),
@@ -216,6 +218,7 @@ mod tests {
                 port: 8388,
                 password: "secret".to_string(),
                 method: "aes-256-gcm".to_string(),
+                stream: StreamSettings::plain(),
             }),
         };
         let error = service.create(draft).unwrap_err();

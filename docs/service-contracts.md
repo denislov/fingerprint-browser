@@ -128,6 +128,14 @@ protocol = socks
 
 作为 Chromium 的 local inbound。
 
+六种协议都要能生成 outbound：SOCKS5 / HTTP 用 `servers`（username/password 可选），
+Shadowsocks 用 `servers`（`method` + `password`），VMess / VLESS 用 `vnext[].users`，
+Trojan 用 `servers`（`password`）；带 `StreamSettings` 的四种再按选择写出 `streamSettings`。
+生成前先跑 `domain::validate_proxy`，所以“能存下来的”和“能生成的”是同一套规则。
+
+开关名与字段名不在本契约里断言：它们由真引擎回答（`xray run -test`，见
+`crates/runtime/tests/xray_real.rs`）。本文档只定形状，引擎定名字。
+
 ---
 
 ## 6. RuntimeFacade
