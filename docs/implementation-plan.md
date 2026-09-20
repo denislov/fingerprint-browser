@@ -141,11 +141,15 @@ English and Chinese, and the switch between them, on the Settings page.
   the language they are in can only find the way out through an endonym.
 - What stays English, at its call site: product and protocol names (`SOCKS5`,
   `Chrome`, `Windows`, `FP_BROWSER_*`), the JavaScript property names on the
-  Runtime Details panel, and the **fault descriptions raised by `runtime`,
-  `domain` and `storage`**. The window frames those errors and the frame is
-  translated; it does not re-write the engine's account of what went wrong. The
-  one exception is `FaultClass`, a closed enum, which the window does translate.
-  See `docs/i18n.md`.
+  Runtime Details panel, and the **innermost text of a fault** - what `runtime`,
+  `domain` and `storage` said, a parse error, an `io::Error`, the exit status of
+  `xdg-open`. The window translates the frame and leaves the evidence as it came,
+  so that a bug report matches the log. The one exception is `FaultClass`, a
+  closed enum, which the window does translate. See `docs/i18n.md`.
+- The app's own non-view modules are covered too: `core_detect`, `paths`,
+  `reclaim`, `verifier`, `open_dir` and `settings` take `t: &Text` for the
+  sentences they hand over, and `main.rs` resolves the table once, after the
+  config file is read, so startup notices already speak the chosen language.
 - The catalog is held to its own tests: a message that is identical in both
   languages fails unless it is on an explicit allowlist of names that are the
   same on purpose (`Xray PID`, `CDP port`, `WebSocket`), and the catalog's size is

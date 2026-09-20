@@ -3622,7 +3622,9 @@ mod tests {
 
         assert_eq!(verification.label(en()), "1 claim not confirmed");
         assert_eq!(
-            verification.report().and_then(|report| report.exit_label()),
+            verification
+                .report()
+                .and_then(|report| report.exit_label(en())),
             Some("traffic left from 198.51.100.9".to_string()),
             "the address is still worth showing: it is where the traffic went"
         );

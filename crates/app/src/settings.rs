@@ -289,7 +289,7 @@ impl Settings {
             .map(PathBuf::from)
             .unwrap_or_else(|| default_config_path(&env.host));
 
-        let (stored, config_error) = match read_config(&config_path) {
+        let (stored, config_error) = match read_config(&config_path, text(Lang::En)) {
             Ok(stored) => (stored, None),
             Err(error) => (Stored::default(), Some(error)),
         };
@@ -365,7 +365,7 @@ impl Settings {
         }
         let mut stored = self.stored.clone();
         stored.theme = Some(choice.code().to_string());
-        write_config(&self.config_path, &stored)?;
+        write_config(&self.config_path, &stored, self.text())?;
         self.stored = stored;
         self.theme = choice;
         Ok(())
@@ -393,7 +393,7 @@ impl Settings {
         }
         let mut stored = self.stored.clone();
         stored.lang = Some(lang.code().to_string());
-        write_config(&self.config_path, &stored)?;
+        write_config(&self.config_path, &stored, self.text())?;
         self.stored = stored;
         self.lang = lang;
         Ok(())
@@ -539,7 +539,7 @@ impl Settings {
             _ => return Err(t.setting_not_editable(key.label(t))),
         }
 
-        write_config(&self.config_path, &stored)?;
+        write_config(&self.config_path, &stored, self.text())?;
         self.stored = stored;
         // Re-resolve, so the page shows the new value without a restart even
         // though the process keeps using the old one until it starts again.
@@ -586,26 +586,29 @@ fn shadowed(stored: &Option<String>, from_env: bool) -> Option<String> {
     if from_env { stored.clone() } else { None }
 }
 
-fn read_config(path: &Path) -> Result<Stored, String> {
+fn read_config(path: &Path, t: &Text) -> Result<Stored, String> {
+    let display = path.display().to_string();
+    let failed = |error: &dyn std::fmt::Display| t.config_read_failed(&display, &error.to_string());
     match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map_err(|error| format!("could not read {}: {error}", path.display())),
+        Ok(text) => serde_json::from_str(&text).map_err(|error| failed(&error)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Stored::default()),
-        Err(error) => Err(format!("could not read {}: {error}", path.display())),
+        Err(error) => Err(failed(&error)),
     }
 }
 
-fn write_config(path: &Path, stored: &Stored) -> Result<(), String> {
+fn write_config(path: &Path, stored: &Stored, t: &Text) -> Result<(), String> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            t.config_create_failed(&parent.display().to_string(), &error.to_string())
+        })?;
     }
     let text = serde_json::to_string_pretty(stored)
-        .map_err(|error| format!("could not encode the settings: {error}"))?;
-    std::fs::write(path, format!("{text}\n"))
-        .map_err(|error| format!("could not write {}: {error}", path.display()))
+        .map_err(|error| t.config_encode_failed(&error.to_string()))?;
+    std::fs::write(path, format!("{text}\n")).map_err(|error| {
+        t.config_file_write_failed(&path.display().to_string(), &error.to_string())
+    })
 }
 
 #[cfg(test)]

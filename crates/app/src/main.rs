@@ -57,18 +57,25 @@ fn main() {
     let (settings, settings_notice) =
         settings::Settings::load(settings::Environment::from_process());
     let data_dir = settings.data_dir().to_path_buf();
+    // The table is 'static and the language is already resolved, so the notices
+    // below are built in the language the config file asked for - including the
+    // ones produced before the window exists.
+    let t = settings.text();
 
     // Checked before storage opens, because opening it is what creates the
     // database in the new place and ends the question this asks.
-    let moved_notice =
-        paths::moved_data_dir_notice(&data_dir, std::path::Path::new(paths::FALLBACK_DATA_DIR));
+    let moved_notice = paths::moved_data_dir_notice(
+        &data_dir,
+        std::path::Path::new(paths::FALLBACK_DATA_DIR),
+        settings.text(),
+    );
 
     let storage = SqliteStorage::open(data_dir.join("app.db")).expect("open sqlite storage");
     let profile_repo: Arc<dyn ProfileRepository> = Arc::new(storage.profiles());
     let core_repo: Arc<dyn CoreRepository> = Arc::new(storage.cores());
     let proxy_repo: Arc<dyn ProxyRepository> = Arc::new(storage.proxies());
 
-    let core_notice = core_detect::maintain(core_repo.as_ref());
+    let core_notice = core_detect::maintain(core_repo.as_ref(), t);
 
     let channels = RuntimeSupervisorChannels::new(EVENT_CAPACITY);
     let event_rx = channels.event_rx.clone();
@@ -149,13 +156,17 @@ fn main() {
     // Last, so that a problem found here is the one the banner shows: a settings
     // or core problem is still on its own page afterwards, while a browser that
     // was stopped at startup is reported nowhere else.
-    if let Some((message, error)) = reclaim::reclaim_notice(&reclaim, |profile_id| {
-        profile_repo
-            .get(profile_id)
-            .ok()
-            .flatten()
-            .map(|profile| profile.name)
-    }) {
+    if let Some((message, error)) = reclaim::reclaim_notice(
+        &reclaim,
+        |profile_id| {
+            profile_repo
+                .get(profile_id)
+                .ok()
+                .flatten()
+                .map(|profile| profile.name)
+        },
+        t,
+    ) {
         // The banner is one line; the log is what a headless run has.
         if error {
             tracing::warn!("{message}");

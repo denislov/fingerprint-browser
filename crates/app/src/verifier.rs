@@ -16,6 +16,7 @@
 //! channel the view drains, and the trait exists so the view can be tested
 //! without a browser.
 
+use crate::text::Text;
 use domain::{CoreCapabilities, FingerprintProfile, ProfileId};
 use runtime::{
     Discrepancy, EgressOutcome, EgressProbe, FingerprintProbe, verify_egress, verify_fingerprint,
@@ -79,13 +80,13 @@ impl VerificationReport {
     }
 
     /// How the address question reads, when it was asked at all.
-    pub fn exit_label(&self) -> Option<String> {
+    pub fn exit_label(&self, t: &Text) -> Option<String> {
         if let Some(exit_ip) = &self.exit_ip {
-            return Some(format!("traffic left from {exit_ip}"));
+            return Some(t.traffic_left_from(exit_ip));
         }
         self.exit_unreadable
             .as_ref()
-            .map(|reason| format!("exit address not read: {reason}"))
+            .map(|reason| t.exit_address_not_read(reason))
     }
 }
 

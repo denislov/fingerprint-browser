@@ -410,7 +410,7 @@ impl AppView {
         let opener = Arc::clone(&self.opener);
         let sender = self.open_tx.clone();
         std::thread::spawn(move || {
-            let result = opener.open(&path);
+            let result = opener.open(&path, t);
             let _ = sender.send((path, result));
         });
         cx.notify();
@@ -1470,6 +1470,7 @@ impl Render for AppView {
                                         filter: filter.clone(),
                                         total,
                                         visible: visible.len(),
+                                        has_core,
                                     },
                                     cx,
                                     t,
@@ -1646,6 +1647,9 @@ struct ProfilesHeader {
     /// Every profile, and how many of them the filter left.
     total: usize,
     visible: usize,
+    /// Whether any core is registered at all: a profile needs one to launch, so
+    /// the button that makes one is disabled until there is one.
+    has_core: bool,
 }
 
 fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>, t: &Text) -> Div {
@@ -1702,6 +1706,10 @@ fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>, t: &Text)
                     Button::new("new-profile")
                         .label(t.new_profile)
                         .primary()
+                        // A profile needs a core to launch, and the empty state
+                        // below says where to get one. The button is disabled
+                        // rather than opening a dialog the service would refuse.
+                        .disabled(!header.has_core)
                         .on_click(
                             cx.listener(|this, _, window, cx| this.on_new_profile(window, cx)),
                         ),
@@ -2393,59 +2401,21 @@ fn chip(id: String, label: &str, active: bool, p: Palette) -> Stateful<Div> {
 fn export_card(export: &SettingsExport, cx: &mut Context<AppView>, t: &Text) -> impl IntoElement {
     let p = palette(cx);
     let view = cx.entity().downgrade();
-    div()
+    settings_card(p)
         .id("export-configuration")
         .test_support()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .px_4()
-        .py_4()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(p.border))
+        .child(settings_card_heading(t.export_title, t.export_body, p))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(t.export_title),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(p.muted))
-                        .child(t.export_body),
-                ),
+            path_row(&export.path, "export-path", t.export_path_label, p).child(
+                Button::new("export-run")
+                    .label(t.export)
+                    .on_click(cx.listener(|this, _, _, cx| this.on_export_configuration(cx))),
+            ),
         )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(&export.path)
-                            .id("export-path")
-                            .aria_label(t.export_path_label),
-                    ),
-                )
-                .child(
-                    Button::new("export-run")
-                        .label(t.export)
-                        .on_click(cx.listener(|this, _, _, cx| this.on_export_configuration(cx))),
-                ),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(p.dim))
-                .child(t.export_empty_writes(&export.destination.display().to_string())),
-        )
+        .child(card_note(
+            t.export_empty_writes(&export.destination.display().to_string()),
+            p,
+        ))
         .child(
             div()
                 .flex()
@@ -2463,13 +2433,10 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>, t: &Text) -> 
                             }
                         }),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(p.muted))
-                        .child(t.export_credentials_note),
-                ),
+                .child(card_hint(t.export_credentials_note, p)),
         )
+        // The one sentence on this page that is a warning rather than a
+        // description: the file is about to hold passwords in the clear.
         .child(
             div()
                 .text_xs()
@@ -2490,54 +2457,18 @@ fn import_card(
     t: &Text,
 ) -> impl IntoElement {
     let p = palette(cx);
-    div()
+    settings_card(p)
         .id("import-configuration")
         .test_support()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .px_4()
-        .py_4()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(p.border))
+        .child(settings_card_heading(t.import_title, t.import_body, p))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(t.import_title),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(p.muted))
-                        .child(t.import_body),
-                ),
+            path_row(input, "import-path", t.import_path_label, p).child(
+                Button::new("import-run")
+                    .label(t.import)
+                    .on_click(cx.listener(|this, _, _, cx| this.on_import_configuration(cx))),
+            ),
         )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(input)
-                            .id("import-path")
-                            .aria_label(t.import_path_label),
-                    ),
-                )
-                .child(
-                    Button::new("import-run")
-                        .label(t.import)
-                        .on_click(cx.listener(|this, _, _, cx| this.on_import_configuration(cx))),
-                ),
-        )
-        .child(div().text_xs().text_color(rgb(p.dim)).child(t.import_note))
+        .child(card_note(t.import_note.to_string(), p))
 }
 
 /// The restore card, under the import one.
@@ -2553,52 +2484,18 @@ fn restore_card(
     t: &Text,
 ) -> impl IntoElement {
     let p = palette(cx);
-    div()
+    settings_card(p)
         .id("restore-configuration")
         .test_support()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .px_4()
-        .py_4()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(p.border))
+        .child(settings_card_heading(t.restore_title, t.restore_body, p))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(t.restore_title),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(p.muted))
-                        .child(t.restore_body),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(input)
-                            .id("restore-path")
-                            .aria_label(t.restore_path_label),
-                    ),
-                )
-                .child(Button::new("restore-run").label(t.restore).on_click(
+            path_row(input, "restore-path", t.restore_path_label, p).child(
+                Button::new("restore-run").label(t.restore).on_click(
                     cx.listener(|this, _, window, cx| this.on_restore_configuration(window, cx)),
-                )),
+                ),
+            ),
         )
-        .child(div().text_xs().text_color(rgb(p.dim)).child(t.restore_note))
+        .child(card_note(t.restore_note.to_string(), p))
 }
 
 /// The browser-data card, below the configuration ones.
@@ -2613,47 +2510,16 @@ fn browser_data_card(
     t: &Text,
 ) -> impl IntoElement {
     let p = palette(cx);
-    div()
+    settings_card(p)
         .id("browser-data")
         .test_support()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .px_4()
-        .py_4()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(p.border))
+        .child(settings_card_heading(
+            t.browser_data_title,
+            t.browser_data_body,
+            p,
+        ))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(t.browser_data_title),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(p.muted))
-                        .child(t.browser_data_body),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div().flex_1().min_w_0().child(
-                        Input::new(input)
-                            .id("browser-data-path")
-                            .aria_label(t.browser_data_path_label),
-                    ),
-                )
+            path_row(input, "browser-data-path", t.browser_data_path_label, p)
                 .child(Button::new("browser-data-out").label(t.copy_out).on_click(
                     cx.listener(|this, _, _, cx| this.on_browser_data(Direction::ToBackup, cx)),
                 ))
@@ -2666,12 +2532,35 @@ fn browser_data_card(
                         })),
                 ),
         )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(p.dim))
-                .child(t.browser_data_note),
-        )
+        .child(card_note(t.browser_data_note.to_string(), p))
+}
+
+/// A card's path field with room for the buttons beside it.
+///
+/// The field takes what is left rather than a fixed width, so a narrow window
+/// narrows the path instead of pushing the button off the card.
+fn path_row(input: &Entity<InputState>, id: &str, label: &str, p: Palette) -> Div {
+    let _ = p;
+    div().flex().items_center().gap_2().child(
+        div().flex_1().min_w_0().child(
+            Input::new(input)
+                .id(id.to_string())
+                .aria_label(label.to_string()),
+        ),
+    )
+}
+
+/// The dim line under a card's controls: what would happen, or what did.
+fn card_note(text: String, p: Palette) -> Div {
+    div().text_xs().text_color(rgb(p.dim)).child(text)
+}
+
+/// The muted sentence beside a checkbox, saying what the box does.
+fn card_hint(text: &str, p: Palette) -> Div {
+    div()
+        .text_xs()
+        .text_color(rgb(p.muted))
+        .child(text.to_string())
 }
 
 fn logs_header(
@@ -2916,7 +2805,7 @@ fn empty_hint(
     cx: &mut Context<AppView>,
     p: Palette,
     t: &Text,
-) -> Option<Div> {
+) -> Option<impl IntoElement> {
     // Two kinds of empty look the same in a list and mean different things:
     // there are no profiles, or a filter is hiding the ones there are. Only the
     // second can be undone from here, so only it offers to.
@@ -2930,13 +2819,14 @@ fn empty_hint(
     } else if has_core {
         t.empty_no_profiles.to_string()
     } else {
-        "No browser core found. Set FP_BROWSER_CHROMIUM_BIN to a fingerprint-chromium \
-         (or Chromium) executable and restart."
-            .to_string()
+        t.no_core_found.to_string()
     };
 
     Some(
         div()
+            .id("empty-hint")
+            .test_support()
+            .aria_label(message.clone())
             .p_4()
             .rounded_md()
             .border_1()
@@ -2952,6 +2842,20 @@ fn empty_hint(
                     Button::new("clear-filter").label(t.clear_filter).on_click(
                         cx.listener(|this, _, window, cx| this.on_clear_filter(window, cx)),
                     ),
+                )
+            })
+            // An empty list with no core to launch is the one empty state that
+            // cannot be acted on where it is read: the sentence names an
+            // environment variable and the page that matters is another one. So
+            // it carries the way there instead of leaving the reader to find it.
+            .when(!has_core && !filtering, |this| {
+                this.child(
+                    Button::new("empty-add-core")
+                        .label(t.add_browser_core)
+                        .primary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.on_page(Page::Cores, cx);
+                        })),
                 )
             }),
     )
@@ -3473,7 +3377,7 @@ fn verification_block(verification: Option<Verification>, p: Palette, t: &Text) 
     // reason to trust a proxy at all: an address that matches the one the proxy
     // was tested at is worth seeing without having to open the log.
     if let Some(report) = verification.report()
-        && let Some(label) = report.exit_label()
+        && let Some(label) = report.exit_label(t)
     {
         let colour = if report.exit_ip.is_some() {
             p.info
@@ -5748,7 +5652,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn starting_without_a_core_surfaces_the_error_in_the_banner(cx: &mut TestAppContext) {
+    fn starting_without_a_core_says_so_and_offers_the_way_there(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let profile_repo: Arc<MemProfileRepository> = Arc::new(MemProfileRepository::new());
         let core_repo: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
@@ -5790,18 +5694,40 @@ mod tests {
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("new-profile", cx);
 
-            let notice = view.read_with(cx, |view, _| {
-                view.state()
-                    .notice()
-                    .expect("recorded notice")
-                    .message
-                    .clone()
-            });
-            assert!(notice.contains("no browser core"));
+            // The situation is legible where it matters, without a click: the
+            // list says there is no core, and the button that would open a form
+            // the service refuses is disabled rather than describing the refusal
+            // after it happens.
+            let hint = window
+                .find("empty-hint")
+                .label()
+                .map(str::to_string)
+                .expect("the empty state says what is missing");
+            assert!(hint.contains("No browser core found"), "{hint}");
+            window.click("new-profile", cx);
+            assert!(
+                window.try_find("editor-name").is_none(),
+                "a profile needs a core to launch, so the form does not open"
+            );
+
+            // And the one thing the reader can do about it is one click away,
+            // on a page that is not the one they are looking at.
+            assert!(
+                window.try_find("empty-add-core").is_some(),
+                "the empty state carries the way to the fix"
+            );
         })
         .unwrap();
+
+        // The button is wired to the page switch; the state is what says it
+        // worked, because a click on a button inside a scrolled container is a
+        // question about the harness rather than about this program.
+        view.update(cx, |view, cx| view.on_page(crate::state::Page::Cores, cx));
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().page()),
+            crate::state::Page::Cores
+        );
     }
 
     #[gpui_kit::test]

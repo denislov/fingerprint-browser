@@ -6,6 +6,7 @@
 //! verifier does: a test must be able to click the button without a file manager
 //! appearing on the machine running it.
 
+use crate::text::Text;
 use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -44,8 +45,9 @@ pub trait DirectoryOpener: Send + Sync {
     /// that it will not; callers run it off the UI thread. Returns an error
     /// message to show when nothing was opened. The directory is not created: a
     /// profile that has never run has no browser data yet, and saying so is more
-    /// useful than an empty folder.
-    fn open(&self, path: &Path) -> Result<(), String>;
+    /// useful than an empty folder. The table is passed in because the message
+    /// for that case is the window's, not the desktop's.
+    fn open(&self, path: &Path, t: &Text) -> Result<(), String>;
 }
 
 /// The real opener: runs the platform command and waits, so the window can say
@@ -54,7 +56,7 @@ pub trait DirectoryOpener: Send + Sync {
 pub struct SystemDirectoryOpener;
 
 impl DirectoryOpener for SystemDirectoryOpener {
-    fn open(&self, path: &Path) -> Result<(), String> {
+    fn open(&self, path: &Path, t: &Text) -> Result<(), String> {
         // The opener is a foreign process and may not share this one's working
         // directory, so a relative data directory is resolved here, the same
         // way the Settings page shows it.
@@ -65,10 +67,7 @@ impl DirectoryOpener for SystemDirectoryOpener {
                 .unwrap_or_else(|_| path.to_path_buf()),
         };
         if !path.is_dir() {
-            return Err(format!(
-                "{} is not a directory yet; start the profile once and the browser will create it",
-                path.display()
-            ));
+            return Err(t.directory_not_created_yet(&path.display().to_string()));
         }
         let (program, args) = opener(&path, CURRENT_OS);
         let mut child = Command::new(&program)
@@ -143,7 +142,7 @@ pub(crate) mod testing {
     }
 
     impl DirectoryOpener for FakeOpener {
-        fn open(&self, path: &Path) -> Result<(), String> {
+        fn open(&self, path: &Path, _t: &Text) -> Result<(), String> {
             self.opened
                 .lock()
                 .expect("opened lock")
@@ -156,6 +155,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::en;
     use std::path::PathBuf;
 
     #[test]
@@ -180,7 +180,7 @@ mod tests {
     fn a_directory_that_does_not_exist_is_refused_with_its_path() {
         let missing = std::env::temp_dir().join(format!("fp-open-{}", std::process::id()));
         let error = SystemDirectoryOpener
-            .open(&missing)
+            .open(&missing, en())
             .expect_err("nothing to open");
         assert!(error.contains(&missing.display().to_string()), "{error}");
         assert!(error.contains("not a directory"), "{error}");
@@ -192,7 +192,7 @@ mod tests {
     fn a_relative_directory_is_named_against_the_working_directory() {
         let relative = PathBuf::from(format!("definitely-not-a-fp-dir-{}", std::process::id()));
         let error = SystemDirectoryOpener
-            .open(&relative)
+            .open(&relative, en())
             .expect_err("nothing to open");
         let cwd = std::env::current_dir().expect("a working directory");
         assert!(

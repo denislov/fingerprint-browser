@@ -5,6 +5,7 @@
 //! This module owns the product decisions around it: where to look for a core,
 //! what to name it, and how a replaced binary is noticed.
 
+use crate::text::Text;
 use domain::{BrowserCore, CoreId, suggested_name};
 use runtime::version::{DEFAULT_TIMEOUT as VERSION_TIMEOUT, VersionReport};
 use std::ffi::OsString;
@@ -51,8 +52,8 @@ pub fn discover() -> Option<PathBuf> {
 /// Registers one core when the catalogue is empty, and otherwise re-probes the
 /// registered cores so a replaced binary cannot keep a stale major (and with it
 /// a stale capability table).
-pub fn maintain(cores: &dyn CoreRepository) -> Option<Notice> {
-    maintain_with(cores, discover(), env_major(), &|path| {
+pub fn maintain(cores: &dyn CoreRepository, t: &Text) -> Option<Notice> {
+    maintain_with(cores, discover(), env_major(), t, &|path| {
         VersionReport::probe(path, VERSION_TIMEOUT)
     })
 }
@@ -61,33 +62,31 @@ fn maintain_with(
     cores: &dyn CoreRepository,
     discovered: Option<PathBuf>,
     major_override: Option<u32>,
+    t: &Text,
     probe: Probe<'_>,
 ) -> Option<Notice> {
     let existing = match cores.list() {
         Ok(existing) => existing,
-        Err(error) => return Some((format!("could not read browser cores: {error}"), true)),
+        Err(error) => {
+            return Some((t.core_list_failed_frame(&error.to_string()), true));
+        }
     };
 
     if existing.is_empty() {
         let Some(executable) = discovered else {
-            return Some((
-                format!(
-                    "no browser core found; set {} to a fingerprint-chromium executable and restart",
-                    BIN_ENV
-                ),
-                true,
-            ));
+            return Some((t.no_core_found_notice(BIN_ENV), true));
         };
-        return register(cores, &executable, major_override, probe);
+        return register(cores, &executable, major_override, t, probe);
     }
 
-    refresh(cores, &existing, probe)
+    refresh(cores, &existing, t, probe)
 }
 
 fn register(
     cores: &dyn CoreRepository,
     executable: &Path,
     major_override: Option<u32>,
+    t: &Text,
     probe: Probe<'_>,
 ) -> Option<Notice> {
     let report = probe(executable);
@@ -106,7 +105,7 @@ fn register(
     };
 
     if let Err(error) = cores.save(&core) {
-        return Some((format!("could not store browser core: {error}"), true));
+        return Some((t.core_save_failed_frame(&error.to_string()), true));
     }
 
     tracing::info!(
@@ -117,11 +116,7 @@ fn register(
 
     (major == 0).then(|| {
         (
-            format!(
-                "{} did not report a usable version; set {} so fingerprint switches can be checked",
-                core.executable.display(),
-                MAJOR_ENV
-            ),
+            t.core_no_usable_version_notice(&core.executable.display().to_string(), MAJOR_ENV),
             false,
         )
     })
@@ -135,6 +130,7 @@ fn register(
 fn refresh(
     cores: &dyn CoreRepository,
     existing: &[BrowserCore],
+    t: &Text,
     probe: Probe<'_>,
 ) -> Option<Notice> {
     let mut updated: Vec<String> = Vec::new();
@@ -164,7 +160,7 @@ fn refresh(
             ..core.clone()
         };
         if let Err(error) = cores.save(&refreshed) {
-            return Some((format!("could not update browser core: {error}"), true));
+            return Some((t.core_update_failed_frame(&error.to_string()), true));
         }
 
         tracing::info!(
@@ -173,29 +169,17 @@ fn refresh(
             core.major,
             major
         );
-        updated.push(format!(
-            "{} is now {} (major {})",
-            core.name, refreshed.version, refreshed.major
-        ));
+        updated.push(t.core_refreshed(&core.name, &refreshed.version, refreshed.major));
     }
 
     if !missing.is_empty() {
         return Some((
-            format!(
-                "browser core executable missing: {}; set {} and restart",
-                missing.join(", "),
-                BIN_ENV
-            ),
+            t.core_executable_missing_notice(&missing.join(", "), BIN_ENV),
             true,
         ));
     }
 
-    (!updated.is_empty()).then(|| {
-        (
-            format!("browser core updated: {}", updated.join("; ")),
-            false,
-        )
-    })
+    (!updated.is_empty()).then(|| (t.core_updated_notice(&updated.join("; ")), false))
 }
 
 /// Keeps an auto-generated name in step with the detected major, but never
@@ -245,6 +229,7 @@ fn executable_names() -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::en;
     use std::sync::Arc;
     use storage::MemCoreRepository;
 
@@ -299,6 +284,7 @@ mod tests {
             cores.as_ref(),
             Some(executable.path()),
             None,
+            en(),
             &probe_returning(Some("Chromium 148.0.7778.215")),
         );
 
@@ -320,6 +306,7 @@ mod tests {
             cores.as_ref(),
             Some(executable.path()),
             Some(144),
+            en(),
             &probe_returning(None),
         );
 
@@ -337,6 +324,7 @@ mod tests {
             cores.as_ref(),
             Some(executable.path()),
             None,
+            en(),
             &probe_returning(None),
         );
 
@@ -350,7 +338,7 @@ mod tests {
     fn no_discovered_core_is_an_error_not_an_empty_catalogue() {
         let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
 
-        let notice = maintain_with(cores.as_ref(), None, None, &probe_returning(None));
+        let notice = maintain_with(cores.as_ref(), None, None, en(), &probe_returning(None));
 
         let (message, is_error) = notice.expect("notice");
         assert!(is_error);
@@ -367,6 +355,7 @@ mod tests {
             cores.as_ref(),
             Some(executable.path()),
             None,
+            en(),
             &probe_returning(Some("Chromium 148.0.7778.215")),
         );
 
@@ -374,6 +363,7 @@ mod tests {
             cores.as_ref(),
             None,
             None,
+            en(),
             &probe_returning(Some("Chromium 150.0.1234.5")),
         );
 
@@ -394,6 +384,7 @@ mod tests {
             cores.as_ref(),
             Some(executable.path()),
             None,
+            en(),
             &probe_returning(Some("Chromium 148.0.7778.215")),
         );
         let mut renamed = cores.list().expect("list")[0].clone();
@@ -404,6 +395,7 @@ mod tests {
             cores.as_ref(),
             None,
             None,
+            en(),
             &probe_returning(Some("Chromium 150.0.1234.5")),
         );
 
@@ -420,10 +412,11 @@ mod tests {
             cores.as_ref(),
             Some(executable.path()),
             None,
+            en(),
             &probe_returning(Some("Chromium 148.0.7778.215")),
         );
 
-        let notice = maintain_with(cores.as_ref(), None, None, &probe_returning(None));
+        let notice = maintain_with(cores.as_ref(), None, None, en(), &probe_returning(None));
 
         assert_eq!(notice, None, "an unreadable probe is not news");
         assert_eq!(cores.list().expect("list")[0].major, 148);
@@ -437,11 +430,12 @@ mod tests {
             cores.as_ref(),
             Some(executable.path()),
             None,
+            en(),
             &probe_returning(Some("Chromium 148.0.7778.215")),
         );
         executable.uninstall();
 
-        let notice = maintain_with(cores.as_ref(), None, None, &probe_returning(None));
+        let notice = maintain_with(cores.as_ref(), None, None, en(), &probe_returning(None));
 
         let (message, is_error) = notice.expect("notice");
         assert!(is_error);

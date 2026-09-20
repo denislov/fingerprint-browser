@@ -10,6 +10,7 @@
 //! no home directory at all; a host that has one gets the place its platform
 //! keeps application data in.
 
+use crate::text::Text;
 use std::path::{Path, PathBuf};
 
 /// The directory this program's data lives in, on every platform.
@@ -129,15 +130,14 @@ pub fn default_export_file(data_dir: &Path, at: std::time::SystemTime) -> PathBu
 /// empty list and no explanation; the old directory is one field away on the
 /// Settings page, so all this does is name it. Said once: the next start creates
 /// a database in the new place, and then the first check below holds.
-pub fn moved_data_dir_notice(data_dir: &Path, legacy: &Path) -> Option<(String, bool)> {
+pub fn moved_data_dir_notice(data_dir: &Path, legacy: &Path, t: &Text) -> Option<(String, bool)> {
     if data_dir.join("app.db").exists() || !legacy.join("app.db").exists() {
         return None;
     }
     Some((
-        format!(
-            "the data directory moved to {}; the database in {} is still there, and the Settings page points at it in one field",
-            data_dir.display(),
-            legacy.display()
+        t.data_dir_moved_notice(
+            &data_dir.display().to_string(),
+            &legacy.display().to_string(),
         ),
         // Not an error: nothing is broken, and nothing was moved.
         false,
@@ -154,6 +154,7 @@ fn absolute(value: &Option<PathBuf>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::en;
 
     fn windows_with_local_app_data() -> Host {
         Host {
@@ -336,7 +337,7 @@ mod tests {
         std::fs::write(legacy.join("app.db"), b"").expect("write");
 
         // An old database and a new directory with none: say where it is.
-        let (message, error) = moved_data_dir_notice(&data, &legacy).expect("a notice");
+        let (message, error) = moved_data_dir_notice(&data, &legacy, en()).expect("a notice");
         assert!(!error, "nothing is broken");
         assert!(message.contains("data"), "{message}");
         assert!(message.contains("Settings"), "{message}");
@@ -344,12 +345,12 @@ mod tests {
         // Once the new place has a database, there is nothing to say.
         std::fs::create_dir_all(&data).expect("data");
         std::fs::write(data.join("app.db"), b"").expect("write");
-        assert_eq!(moved_data_dir_notice(&data, &legacy), None);
+        assert_eq!(moved_data_dir_notice(&data, &legacy, en()), None);
 
         // And a checkout with nothing in it is not worth a word either.
         std::fs::remove_file(data.join("app.db")).expect("remove");
         std::fs::remove_file(legacy.join("app.db")).expect("remove");
-        assert_eq!(moved_data_dir_notice(&data, &legacy), None);
+        assert_eq!(moved_data_dir_notice(&data, &legacy, en()), None);
 
         std::fs::remove_dir_all(&dir).expect("clean up");
     }

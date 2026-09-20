@@ -370,6 +370,10 @@ catalog! {
     no_activity_log => "no activity log is being kept" => "没有保存活动日志";
     no_core_registered => "no browser core is registered yet; add one on the Browser Cores page before creating a profile"
         => "还没有注册浏览器内核；请先到「浏览器内核」页添加一个，然后再新建档案";
+    no_core_found => "No browser core found. Set FP_BROWSER_CHROMIUM_BIN to a fingerprint-chromium (or Chromium) executable and restart."
+        => "没有找到浏览器内核。请把 FP_BROWSER_CHROMIUM_BIN 指向 fingerprint-chromium（或 Chromium）可执行文件，然后重启。";
+    add_browser_core => "Add a browser core" => "添加浏览器内核";
+
     a_removed_profile => "a removed profile" => "已删除的档案";
     proxy_not_assigned => "not assigned" => "未分配";
     proxy_not_used => "not used" => "未使用";
@@ -1273,6 +1277,14 @@ impl Text {
         }
     }
 
+    /// The word between the last two items of a two-item list.
+    pub fn list_conjunction(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "and",
+            Lang::Zh => "和",
+        }
+    }
+
     /// A list, capped: a toast is not the place for twenty names.
     pub fn listed_more(&self, shown: &str, more: usize) -> String {
         match self.lang {
@@ -1434,6 +1446,211 @@ impl Text {
         match self.lang {
             Lang::En => format!("No browser data yet for: {names}."),
             Lang::Zh => format!("以下档案还没有浏览器数据：{names}。"),
+        }
+    }
+
+    /// The address question, as the details panel reads it back.
+    pub fn traffic_left_from(&self, exit_ip: &str) -> String {
+        match self.lang {
+            Lang::En => format!("traffic left from {exit_ip}"),
+            Lang::Zh => format!("流量从 {exit_ip} 出去"),
+        }
+    }
+
+    pub fn exit_address_not_read(&self, reason: &str) -> String {
+        match self.lang {
+            Lang::En => format!("exit address not read: {reason}"),
+            Lang::Zh => format!("未能读回出口地址：{reason}"),
+        }
+    }
+
+    pub fn core_list_failed_frame(&self, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not read browser cores: {error}"),
+            Lang::Zh => format!("无法读取浏览器内核：{error}"),
+        }
+    }
+
+    pub fn core_save_failed_frame(&self, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not store browser core: {error}"),
+            Lang::Zh => format!("无法保存浏览器内核：{error}"),
+        }
+    }
+
+    pub fn core_update_failed_frame(&self, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not update browser core: {error}"),
+            Lang::Zh => format!("无法更新浏览器内核：{error}"),
+        }
+    }
+
+    /// A core whose binary answers nothing about its version.
+    pub fn core_no_usable_version_notice(&self, executable: &str, env: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "{executable} did not report a usable version; set {env} so fingerprint switches can be checked"
+            ),
+            Lang::Zh => {
+                format!("{executable} 没有报告可用的版本；请设置 {env}，否则无法核对指纹开关")
+            }
+        }
+    }
+
+    /// Cores whose executable is no longer on disk, named in one line.
+    pub fn core_executable_missing_notice(&self, cores: &str, env: &str) -> String {
+        match self.lang {
+            Lang::En => format!("browser core executable missing: {cores}; set {env} and restart"),
+            Lang::Zh => format!("浏览器内核的可执行文件已缺失：{cores}；请设置 {env} 后重启"),
+        }
+    }
+
+    pub fn core_updated_notice(&self, cores: &str) -> String {
+        match self.lang {
+            Lang::En => format!("browser core updated: {cores}"),
+            Lang::Zh => format!("浏览器内核已更新：{cores}"),
+        }
+    }
+
+    /// Once, when the database is still in the directory this build no longer
+    /// uses.
+    pub fn data_dir_moved_notice(&self, data_dir: &str, legacy: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "the data directory moved to {data_dir}; the database in {legacy} is still there, and the Settings page points at it in one field"
+            ),
+            Lang::Zh => format!(
+                "数据目录已移到 {data_dir}；{legacy} 里的数据库仍然存在，设置页会用一项指向它"
+            ),
+        }
+    }
+
+    pub fn directory_not_created_yet(&self, path: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "{path} is not a directory yet; start the profile once and the browser will create it"
+            ),
+            Lang::Zh => format!("{path} 还不是目录；先启动一次该档案，浏览器就会创建它"),
+        }
+    }
+
+    /// The startup notice when nothing on this machine can launch a browser.
+    pub fn no_core_found_notice(&self, env: &str) -> String {
+        match self.lang {
+            Lang::En => {
+                format!(
+                    "no browser core found; set {env} to a fingerprint-chromium executable and restart"
+                )
+            }
+            Lang::Zh => format!(
+                "没有找到浏览器内核；请把 {env} 指向 fingerprint-chromium 可执行文件，然后重启"
+            ),
+        }
+    }
+
+    /// What a previous run left behind, in one line: the banner does not wrap.
+    pub fn reclaim_left_running(&self, sessions: usize, names: &str) -> String {
+        match self.lang {
+            Lang::En => {
+                let noun = if sessions == 1 {
+                    "browser session"
+                } else {
+                    "browser sessions"
+                };
+                format!("a previous run left {sessions} {noun} running; {names}")
+            }
+            Lang::Zh => format!("上次运行留下了 {sessions} 个浏览器会话仍在运行：{names}"),
+        }
+    }
+
+    pub fn reclaim_forced(&self) -> String {
+        match self.lang {
+            Lang::En => "had to be killed after ignoring the request to exit".to_string(),
+            Lang::Zh => "在忽略退出请求后被强制结束".to_string(),
+        }
+    }
+
+    pub fn reclaim_unnamed(&self) -> String {
+        match self.lang {
+            Lang::En => "an unnamed profile".to_string(),
+            Lang::Zh => "未命名的档案".to_string(),
+        }
+    }
+
+    pub fn reclaim_unresolved(&self, records: usize, names: &str) -> String {
+        match self.lang {
+            Lang::En => {
+                let noun = if records == 1 {
+                    "session record"
+                } else {
+                    "session records"
+                };
+                format!("{records} {noun} could not be reclaimed ({names})")
+            }
+            Lang::Zh => format!("{records} 条会话记录无法回收（{names}）"),
+        }
+    }
+
+    pub fn reclaim_stale(&self, records: usize) -> String {
+        match self.lang {
+            Lang::En => {
+                let noun = if records == 1 {
+                    "stale session record"
+                } else {
+                    "stale session records"
+                };
+                format!("removed {records} {noun} whose processes had already exited")
+            }
+            Lang::Zh => format!("清除了 {records} 条进程已退出的过期会话记录"),
+        }
+    }
+
+    /// One reclaimed session, named with the processes it had.
+    pub fn reclaim_session(&self, who: &str, browser_pid: u32, xray_pid: Option<u32>) -> String {
+        match (self.lang, xray_pid) {
+            (Lang::En, Some(xray)) => {
+                format!("{who} (browser pid {browser_pid}, xray pid {xray})")
+            }
+            (Lang::En, None) => format!("{who} (browser pid {browser_pid})"),
+            (Lang::Zh, Some(xray)) => {
+                format!("{who}（浏览器 pid {browser_pid}，Xray pid {xray}）")
+            }
+            (Lang::Zh, None) => format!("{who}（浏览器 pid {browser_pid}）"),
+        }
+    }
+
+    pub fn reclaim_reason(&self, who: &str, reason: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{who}: {reason}"),
+            Lang::Zh => format!("{who}：{reason}"),
+        }
+    }
+
+    pub fn config_read_failed(&self, path: &str, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not read {path}: {error}"),
+            Lang::Zh => format!("无法读取 {path}：{error}"),
+        }
+    }
+
+    pub fn config_create_failed(&self, path: &str, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not create {path}: {error}"),
+            Lang::Zh => format!("无法创建 {path}：{error}"),
+        }
+    }
+
+    pub fn config_encode_failed(&self, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not encode the settings: {error}"),
+            Lang::Zh => format!("无法序列化设置：{error}"),
+        }
+    }
+
+    pub fn config_file_write_failed(&self, path: &str, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not write {path}: {error}"),
+            Lang::Zh => format!("无法写入 {path}：{error}"),
         }
     }
 

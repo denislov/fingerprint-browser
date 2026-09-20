@@ -3,6 +3,7 @@
 //! The banner shows one line and does not wrap, so this produces one sentence
 //! naming the profiles by name where the caller can resolve them.
 
+use crate::text::Text;
 use domain::ProfileId;
 use runtime::{ReclaimReport, Reclaimed};
 
@@ -13,6 +14,7 @@ use runtime::{ReclaimReport, Reclaimed};
 pub fn reclaim_notice(
     report: &ReclaimReport,
     name_of: impl Fn(ProfileId) -> Option<String>,
+    t: &Text,
 ) -> Option<(String, bool)> {
     if report.is_empty() {
         return None;
@@ -23,15 +25,11 @@ pub fn reclaim_notice(
         let sessions: Vec<String> = report
             .reclaimed
             .iter()
-            .map(|session| describe(session, &name_of))
+            .map(|session| describe(session, &name_of, t))
             .collect();
-        parts.push(format!(
-            "a previous run left {} running; {}",
-            plural(sessions.len(), "browser session"),
-            list(&sessions)
-        ));
+        parts.push(t.reclaim_left_running(sessions.len(), &list(&sessions, t)));
         if report.reclaimed.iter().any(|session| session.forced) {
-            parts.push("had to be killed after ignoring the request to exit".to_string());
+            parts.push(t.reclaim_forced());
         }
     }
     if !report.unresolved.is_empty() {
@@ -42,58 +40,42 @@ pub fn reclaim_notice(
                 let who = unresolved
                     .profile_id
                     .and_then(&name_of)
-                    .unwrap_or_else(|| "an unnamed profile".to_string());
-                format!("{who}: {}", unresolved.reason)
+                    .unwrap_or_else(|| t.reclaim_unnamed());
+                t.reclaim_reason(&who, &unresolved.reason)
             })
             .collect();
-        parts.push(format!(
-            "{} could not be reclaimed ({})",
-            plural(reasons.len(), "session record"),
-            list(&reasons)
-        ));
+        parts.push(t.reclaim_unresolved(reasons.len(), &list(&reasons, t)));
     }
     if !report.stale.is_empty() {
-        parts.push(format!(
-            "removed {} whose processes had already exited",
-            plural(report.stale.len(), "stale session record")
-        ));
+        parts.push(t.reclaim_stale(report.stale.len()));
     }
 
     Some((parts.join("; "), !report.unresolved.is_empty()))
 }
 
-fn describe(session: &Reclaimed, name_of: &impl Fn(ProfileId) -> Option<String>) -> String {
+fn describe(
+    session: &Reclaimed,
+    name_of: &impl Fn(ProfileId) -> Option<String>,
+    t: &Text,
+) -> String {
     let who = name_of(session.profile_id).unwrap_or_else(|| session.profile_id.to_string());
-    match session.xray_pid {
-        Some(xray_pid) => format!(
-            "{who} (browser pid {}, xray pid {xray_pid})",
-            session.browser_pid
-        ),
-        None => format!("{who} (browser pid {})", session.browser_pid),
-    }
-}
-
-fn plural(count: usize, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
-    }
+    t.reclaim_session(&who, session.browser_pid, session.xray_pid)
 }
 
 /// Names up to two entries, then counts the rest: the banner is one line.
-fn list(entries: &[String]) -> String {
+fn list(entries: &[String], t: &Text) -> String {
     match entries {
         [] => String::new(),
         [only] => only.clone(),
-        [first, second] => format!("{first} and {second}"),
-        [first, rest @ ..] => format!("{first} and {} more", rest.len()),
+        [first, second] => format!("{first} {} {second}", t.list_conjunction()),
+        [first, rest @ ..] => t.listed_more(first, rest.len()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::en;
     use runtime::{Reclaimed, UnresolvedSession};
     use std::path::PathBuf;
 
@@ -108,7 +90,7 @@ mod tests {
 
     #[test]
     fn nothing_to_report_is_no_notice() {
-        assert!(reclaim_notice(&ReclaimReport::default(), |_| None).is_none());
+        assert!(reclaim_notice(&ReclaimReport::default(), |_| None, en()).is_none());
     }
 
     #[test]
@@ -117,7 +99,7 @@ mod tests {
             reclaimed: vec![reclaimed(false, Some(4322))],
             ..Default::default()
         };
-        let (message, error) = reclaim_notice(&report, |_| Some("Profile 1".into())).unwrap();
+        let (message, error) = reclaim_notice(&report, |_| Some("Profile 1".into()), en()).unwrap();
         assert_eq!(
             message,
             "a previous run left 1 browser session running; Profile 1 (browser pid 4321, xray pid 4322)"
@@ -131,7 +113,7 @@ mod tests {
             reclaimed: vec![reclaimed(true, None)],
             ..Default::default()
         };
-        let (message, error) = reclaim_notice(&report, |_| Some("Profile 1".into())).unwrap();
+        let (message, error) = reclaim_notice(&report, |_| Some("Profile 1".into()), en()).unwrap();
         assert!(message.contains("had to be killed"), "{message}");
         assert!(!error, "{message}");
     }
@@ -143,7 +125,7 @@ mod tests {
             reclaimed: vec![session],
             ..Default::default()
         };
-        let (message, _) = reclaim_notice(&report, |_| None).unwrap();
+        let (message, _) = reclaim_notice(&report, |_| None, en()).unwrap();
         assert!(message.contains(&report.reclaimed[0].profile_id.to_string()));
     }
 
@@ -157,7 +139,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (message, error) = reclaim_notice(&report, |_| Some("Profile 2".into())).unwrap();
+        let (message, error) = reclaim_notice(&report, |_| Some("Profile 2".into()), en()).unwrap();
         assert!(
             message.contains("1 session record could not be reclaimed"),
             "{message}"
@@ -180,7 +162,7 @@ mod tests {
             stale: vec![PathBuf::from("a"), PathBuf::from("b")],
             ..Default::default()
         };
-        let (message, _) = reclaim_notice(&report, |_| Some("Profile".into())).unwrap();
+        let (message, _) = reclaim_notice(&report, |_| Some("Profile".into()), en()).unwrap();
         assert!(message.contains("3 browser sessions"), "{message}");
         assert!(message.contains("and 2 more"), "{message}");
         assert!(message.contains("2 stale session records"), "{message}");
