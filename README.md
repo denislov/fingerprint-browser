@@ -58,11 +58,13 @@ compatibility report, and read-back verification of the fingerprint itself.
   `FingerprintGeneration::PIVOT_MAJOR` (144) into a legacy and a verified
   generation, and both carry the stable set (seed, brand, platform, both version
   switches, language, timezone, hardware concurrency and the WebRTC policy).
-  The two switches that are not stable were measured on **two** builds and sit on
-  opposite sides of the pivot: `--fingerprinting-canvas-image-data-noise` is
-  honoured by 142 and 148 alike, while `--disable-spoofing` is honoured by 148
-  and ignored by 142. See [the switch matrix](docs/fingerprint-matrix.md) for the
-  readings and for which majors are still inherited rather than measured.
+  The two switches that are not stable were measured on **three** builds and sit
+  on opposite sides of the pivot: `--fingerprinting-canvas-image-data-noise` is
+  honoured by 142, 144 and 148 alike, while `--disable-spoofing` is honoured by
+  144 and 148 and ignored by 142. The pivot itself was measured last, because the
+  boundary the table is built on should not be its only borrowed row. See
+  [the switch matrix](docs/fingerprint-matrix.md) for the readings and for which
+  majors (145 to 147) are still inherited rather than measured.
 - Nothing is dropped in silence. A switch the core cannot honour is omitted at
   serialization time and reported by `runtime::compat::check`, which the
   supervisor turns into a `Warning` event; it lands in
@@ -361,8 +363,12 @@ state, waits up to two seconds for exit, and force-cleans remaining processes.
 Unavailable CDP falls back to forced cleanup; crash/rollback paths skip graceful
 close. Persistence is not guaranteed on a forced exit.
 
-Before declaring Phase 3 fully accepted for the fingerprint browser product,
-repeat acceptance with fingerprint-chromium. Wiring runtime settings and services
+Phase 3 acceptance and the Phase 4 measurement ran on the same artifacts: the
+`ungoogled-chromium-*` file names are the Linux release assets of
+`adryfish/fingerprint-chromium`, so the acceptance in
+[docs/chromium-acceptance.md](docs/chromium-acceptance.md) is already acceptance
+with the product's own engine, and the capability table is measured on the
+binaries it describes. Wiring runtime settings and services
 into the GPUI UI is done: profiles, their fingerprint fields, proxies, browser
 cores and the settings that need a restart are all managed from the window, with
 the pages below describing what each one refuses to do.

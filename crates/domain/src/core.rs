@@ -136,9 +136,11 @@ impl CoreCapabilities {
     ///   **142**, which accepts the switch and applies the noise anyway. Only
     ///   the verified generation is asked for it; the omission is reported.
     ///
-    /// 144 to 147 were not measured here: exclusions are claimed for them on
-    /// the strength of the sibling product's 144 measurement, and the noise
-    /// switch is claimed for every major on the strength of 142 and 148.
+    /// 144 has since been measured here as well, and it honours the exclusions,
+    /// so the inherited claim about the pivot was right - it is simply no longer
+    /// inherited. The noise switch is claimed for every major on the strength of
+    /// 142, 144 and 148; only 145 to 147 still rest on the sibling product's 144
+    /// reading.
     pub fn for_major(major: u32) -> Self {
         let generation = FingerprintGeneration::for_major(major);
         let verified = generation == FingerprintGeneration::Chrome144Plus;

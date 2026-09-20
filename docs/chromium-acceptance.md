@@ -9,6 +9,9 @@
   (`Chromium 142.0.7444.175`, the last release below the pivot). It runs the same
   `fingerprint_real` suite, which resolves the major from the binary itself; the
   readings are recorded in `docs/fingerprint-matrix.md`.
+- Those `ungoogled-chromium-*` names are the release assets of
+  `adryfish/fingerprint-chromium`: the runtime acceptance runs on the same builds
+  the switch matrix reads behaviour out of, not on a different engine.
 - Xray 26.2.6, copied from `Ant-Browser/bin/linux-amd64/xray`.
 - Linux x86_64, headless Chromium with its sandbox enabled.
 - Binaries are extracted/copied outside the repository and are not committed.
@@ -84,11 +87,12 @@ kill.
 
 ## Limits
 
-This certifies the tested Linux runtime path with **ungoogled-chromium**, not
-fingerprint spoofing: passing a `--fingerprint` argument does not prove that this
-browser implements it. What the fingerprint layer claims is certified separately,
-by reading the surface back out of the fingerprint-chromium builds (see
-`docs/fingerprint-matrix.md`), not by this report.
+This certifies the tested Linux runtime path, not fingerprint spoofing: passing a
+`--fingerprint` argument does not prove that the browser implements it, and
+nothing here reads the surface back out. That half is certified separately, by
+reading the surface back out of the same binaries (see
+`docs/fingerprint-matrix.md`), not by this report - majors 142, 144 and 148 were
+each measured to honour the switches this report only passes.
 
 Remote proxy endpoints, Windows/macOS process-tree cleanup and visible GPUI
 operation remain separate acceptance work. Process identity for reclaim is read

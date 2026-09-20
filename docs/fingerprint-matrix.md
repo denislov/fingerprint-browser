@@ -3,6 +3,13 @@
 Which fingerprint-chromium switches this project is willing to pass, for which
 core major, and on what evidence.
 
+The builds are the Linux release assets of `adryfish/fingerprint-chromium`, whose
+file names say `ungoogled-chromium-<version>-1-x86_64_linux.tar.xz`. The name is
+the upstream's asset name, not a different engine: the switches below are read
+back out of these binaries over CDP, which is what makes them fingerprint-chromium
+rather than stock Chromium. `docs/chromium-acceptance.md` certifies the runtime
+path on the same artifacts.
+
 ## The pivot: major 144
 
 `FingerprintGeneration::PIVOT_MAJOR` is 144. Below it the core is `Legacy`,
@@ -22,22 +29,22 @@ Evidence:
   build (`docs/chromium-acceptance.md`), and reads the fingerprint surface back
   out of the page (`crates/runtime/tests/fingerprint_real.rs`).
 - **A fingerprint-chromium 142 build (major 142, the last release below the
-  pivot) was measured here**, and it contradicts the inherited claim:
+  pivot) was measured here**, and it contradicts the inherited claim. **The pivot
+  itself (144) was measured the same way afterwards**, which is what settles the
+  boundary instead of borrowing it:
 
-  | Measured on 142 and 148 | 142 | 148 |
-  | --- | --- | --- |
-  | `--fingerprinting-canvas-image-data-noise` changes `toDataURL` | **yes** | yes |
-  | the same switch changes `getImageData` | no | no |
-  | `--disable-spoofing=canvas\|clientrects\|audio` is honoured | **no** | yes |
+  | Measured on 142 / 144 / 148 | 142 | 144 | 148 |
+  | --- | --- | --- | --- |
+  | `--fingerprinting-canvas-image-data-noise` changes `toDataURL` | **yes** | yes | yes |
+  | the same switch changes `getImageData` | no | no | no |
+  | `--disable-spoofing=canvas\|clientrects\|audio` is honoured | **no** | yes | yes |
 
   So the noise switch is *not* a 144 feature - a major below the pivot was being
   denied a switch the engine honours - and the exclusions *are*. Both the table
   and the tests were corrected (`the_capability_table_matches_this_build` now
-  measures this on whatever binary `CHROMIUM_BIN` points at).
-
-- Majors 144 to 147 remain inherited: exclusions are claimed for them on the
-  strength of the sibling product's 144 measurement, and the noise switch is
-  claimed for every major on the strength of 142 and 148.
+  measures this on whatever binary `CHROMIUM_BIN` points at). The inherited claim
+  about 144 turned out to be right, but it is no longer inherited: only majors 145
+  to 147 still rest on the sibling product's reading.
 - Nothing below 142 has been verified here.
 
 ## Capability table
@@ -118,16 +125,40 @@ to assume it. Same method, same probe, same seed as the 148 rows below.
 | `--fingerprint-platform=macos` | `navigator.platform`, user agent | honoured |
 | `--disable-non-proxied-udp` | ICE gathering completes with no candidates | honoured |
 
-All ten integration tests run against both builds:
+All eleven integration tests run against every build measured here:
 
 ```sh
 CHROMIUM_BIN=/path/to/chrome-142 cargo test -p runtime --test fingerprint_real -- --ignored
+CHROMIUM_BIN=/path/to/chrome-144 cargo test -p runtime --test fingerprint_real -- --ignored
 CHROMIUM_BIN=/path/to/chrome-148 cargo test -p runtime --test fingerprint_real -- --ignored
 ```
 
 The suite resolves the major from the binary it is given and checks the table's
 claims for *that* major against the engine, so a wrong table fails the run
 instead of hiding behind a hard-coded number.
+
+## Measured on the pivot generation (fingerprint-chromium 144, Linux)
+
+The pivot itself, measured for the same reason 142 was: the boundary the whole
+table is built on should not be its only borrowed row. Same method, same probe,
+same seeds.
+
+| Switch | Observable | 144 |
+| --- | --- | --- |
+| `--fingerprint=<seed>` | canvas `toDataURL`/`getImageData`, `measureText`, sub-pixel rects, UA-CH version | same as 148; the same seed gives the **same** canvas reading as 142 and 148 |
+| `--fingerprinting-canvas-image-data-noise` | canvas `toDataURL` | changes it, exactly as on 142 and 148; `getImageData` untouched |
+| `--fingerprinting-client-rects-noise` | client rects | no change beyond what the seed applies (same as 148) |
+| `--disable-spoofing=canvas` | canvas returns to the engine's own value | **yes**: the seed stops reaching the canvas |
+| `--disable-spoofing=clientrects` | client rects become integral | **yes** |
+| `--disable-spoofing=audio` | audio fingerprint returns to the engine's own value | **yes** |
+| `--fingerprint-platform=macos` | `navigator.platform`, user agent | honoured |
+| `--disable-non-proxied-udp` | ICE gathering completes with no candidates | honoured |
+
+The suite passes 11/11 on this build, and the numbers it prints are the 148 rows'
+numbers: canvas without the noise switch `(1251849731, 4160716610, -0.00011179)`,
+with it `(368676017, 4160716610, -0.00011179)`. So the two generations differ by
+that switch set and not by the engine behind it - which is what makes
+`PIVOT_MAJOR` a claim about switches rather than about a browser version.
 
 ## Measured on the verified generation (fingerprint-chromium 148, Linux)
 

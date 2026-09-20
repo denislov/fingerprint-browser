@@ -196,6 +196,36 @@ Phase 4 的剩余项在第十二批结清，结论与证据见 [fingerprint-matr
   修掉的 start time bug），修完后 `chromium_real` 的“被杀死的一轮留下的浏览器被回收”在真机上
   通过。所以这一项的结论是：限制留在 README，不上 X11 依赖；要真要 watchdog，那是另一个有界任务。
 
+### 第十五批：把 pivot 自己那一版（144）测了，并结算内核的名字
+
+进度（2026-09-20）：已完成。**这一批消掉的是“整张表里唯一一行靠继承的证据”。**
+
+第九批用 142 推翻了继承来的结论，但 pivot 本身（144）在本仓库从没测过：`for_major` 在 144 这
+一格上写的是兄弟项目 `Ant-Browser` 的读数。pivot 是整张表的分界，不该是唯一借来的那一行。
+
+- 上游 `adryfish/fingerprint-chromium` 的 Linux 资产里，144 就是 pivot 本身（第九批已注明没有
+  143 的 release）。这个包用户早就下载了，一直没解；本批解出来实测（`--version` →
+  `Chromium 144.0.7559.132`），命令与 142/148 完全相同：
+  `CHROMIUM_BIN=<144 的 chrome> cargo test -p runtime --test fingerprint_real -- --ignored`。
+- 结果：**继承来的结论这次是对的，但它现在是实测。**
+  `--disable-spoofing=canvas|clientrects|audio` 在 144 上**生效**（两个 seed 的读数完全相同，
+  说明 seed 到不了那个面）；`--fingerprinting-canvas-image-data-noise` 改 `toDataURL` 而不改
+  `getImageData`——与 148 一致。同 seed 的 canvas 读数与 142/148 **逐字节相同**（无 noise
+  `1251849731`，有 noise `368676017`，`getImageData` 均 `4160716610`），与第九批在 142 上记录的
+  数字一致，说明三台确实走在同一条路径上（`the_capability_table_matches_this_build` 打印的
+  就是这几个数）。
+- 三台上都是 11/11：142、144、148。测试按二进制自报的 major 断言能力表，所以覆盖的是
+  “表对 144 说了什么”而不是一个写死的数字。于是 pivot 两侧都由本仓库的实测支撑，只剩
+  145–147 仍按兄弟项目的 144 读数继承。
+- 顺手结算内核的**名字**：同一个包，`chromium-acceptance.md` 叫它 ungoogled-chromium，
+  `fingerprint-matrix.md` 叫它 fingerprint-chromium。实测把这个矛盾解决了——这些
+  `ungoogled-chromium-<version>-1-x86_64_linux.tar.xz` 就是 `adryfish/fingerprint-chromium`
+  的 Linux 资产名，而它们确实实现了指纹开关（本批实测的三台都是 11/11）。所以：
+  `fingerprint-matrix.md` 开头写清名字的来源；`chromium-acceptance.md` 的 Limits 从
+  “这是 ungoogled，不是指纹”改成“运行路径与指纹回读跑在同一批二进制上，两半各自证明什么”；
+  README 里“Phase 3 要再用 fingerprint-chromium 重做一次验收”这条**已经成立**，不再是待办。
+- 二进制仍然解在仓库之外、不入库（沿用既有约定）。
+
 ### 第二批：开关词汇的实测与回读验证
 
 进度（2026-09-19）：已完成。方法与全部实测数据见 [fingerprint-matrix.md](fingerprint-matrix.md)。
