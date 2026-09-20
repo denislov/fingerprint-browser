@@ -43,10 +43,10 @@ runtime implementation for SOCKS5/HTTP upstream proxies:
   the opt-in `xray_real` suite emits ten shapes and all ten are accepted, an
   unknown cipher is refused, and a hand-written `allowInsecure` is refused by
   name. `allowInsecure` is not modelled at all, because Xray 26.2.6 removed it
-  (the replacement is a certificate pin). The editor still offers only SOCKS5
-  and HTTP, and the proxy service refuses to store the other four: the form
-  cannot fill in their stream settings yet, so the model and the builder handle
-  all six while the window does not. A share link (`ss://`, `vmess://`,
+  (the replacement is a certificate pin). The editor's form fills in only SOCKS5
+  and HTTP; the other four are created by pasting a link on the Proxies page,
+  which goes through the same rules, so the form is the only part that is
+  narrower than the model. A share link (`ss://`, `vmess://`,
   `vless://`, `trojan://`) is read into that same model by `domain::uri`, which
   refuses by name what it cannot carry (`plugin`, `type=xhttp`, `type=raw`,
   `headerType=http`, `mode=multi`) rather than dropping it; the opt-in

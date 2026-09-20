@@ -10,6 +10,7 @@ mod editor;
 mod log_file;
 mod open_dir;
 mod proxy_editor;
+mod proxy_import;
 #[cfg(all(test, target_os = "linux"))]
 mod real_browser;
 mod reclaim;

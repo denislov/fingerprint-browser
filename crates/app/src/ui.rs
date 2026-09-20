@@ -8,6 +8,7 @@ use crate::core_editor::CoreEditor;
 use crate::editor::ProfileEditor;
 use crate::open_dir::DirectoryOpener;
 use crate::proxy_editor::ProxyEditor;
+use crate::proxy_import::ProxyImport;
 use crate::settings::SettingKey;
 use crate::state::{
     AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Page, ProfileRow, ProxyRow, Toast,
@@ -49,6 +50,8 @@ pub struct AppView {
     editor: Option<Entity<ProfileEditor>>,
     /// The proxy editor behind the open dialog, if any.
     proxy_editor: Option<Entity<ProxyEditor>>,
+    /// The link importer behind the open dialog, if any.
+    proxy_import: Option<Entity<ProxyImport>>,
     /// The browser-core editor behind the open dialog, if any.
     core_editor: Option<Entity<CoreEditor>>,
     /// The settings value field behind the open dialog, if any.
@@ -85,6 +88,7 @@ impl AppView {
         Self {
             editor: None,
             proxy_editor: None,
+            proxy_import: None,
             core_editor: None,
             setting_editor: None,
             setting_key: None,
@@ -122,6 +126,12 @@ impl AppView {
     #[cfg(test)]
     pub fn proxy_editor(&self) -> Option<Entity<ProxyEditor>> {
         self.proxy_editor.clone()
+    }
+
+    /// The link importer behind the open dialog, if any.
+    #[cfg(test)]
+    pub fn proxy_import(&self) -> Option<Entity<ProxyImport>> {
+        self.proxy_import.clone()
     }
 
     /// The browser-core editor behind the open dialog.
@@ -749,6 +759,70 @@ impl AppView {
         });
     }
 
+    /// Opens the paste dialog for a share link.
+    ///
+    /// The dialog parses and the view stores; on a refusal the dialog stays open
+    /// with the parser's own sentence, because the link is the thing to fix.
+    fn on_import_proxy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let proxy_import = cx.new(|cx| ProxyImport::new(window, cx));
+        self.proxy_import = Some(proxy_import.clone());
+        let view = cx.entity().downgrade();
+        let accepted = proxy_import.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let proxy_import = proxy_import.clone();
+            let view = view.clone();
+            let accepted = accepted.clone();
+            dialog
+                .title(proxy_import.read(cx).title())
+                .w(px(640.0))
+                .content({
+                    let proxy_import = proxy_import.clone();
+                    move |content, _, _| content.child(proxy_import.clone())
+                })
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            DialogClose::new().trigger(|button| button.label("Cancel").outline()),
+                        )
+                        .child(DialogAction::new().child(Button::new("ok").label("Import"))),
+                )
+                .on_ok(move |_, _, cx| {
+                    let imported: Result<(), String> = match proxy_import.read(cx).read_link(cx) {
+                        Ok((name, outbound)) => view
+                            .update(cx, |view, _| {
+                                match view.state.create_proxy(&name, outbound) {
+                                    Ok(_) => Ok(()),
+                                    Err(error) => {
+                                        let message = error.to_string();
+                                        view.state.push_notice(message.clone(), true);
+                                        Err(message)
+                                    }
+                                }
+                            })
+                            .unwrap_or_else(|_| Err("the window is gone".to_string())),
+                        Err(error) => Err(error),
+                    };
+                    match imported {
+                        Ok(()) => {
+                            accepted.update(cx, |import, cx| {
+                                import.set_error(None);
+                                cx.notify();
+                            });
+                            true
+                        }
+                        Err(message) => {
+                            accepted.update(cx, |import, cx| {
+                                import.set_error(Some(message));
+                                cx.notify();
+                            });
+                            false
+                        }
+                    }
+                })
+        });
+        cx.notify();
+    }
+
     /// Deleting a proxy that is still assigned is refused, and says by whom.
     fn on_delete_proxy(&mut self, id: ProxyId, window: &mut Window, cx: &mut Context<Self>) {
         let (name, endpoint, used_by) = match self.state.proxy(id) {
@@ -1117,10 +1191,25 @@ fn proxies_header(cx: &mut Context<AppView>) -> Div {
                 ),
         )
         .child(
-            Button::new("new-proxy")
-                .label("New Proxy")
-                .primary()
-                .on_click(cx.listener(|this, _, window, cx| this.on_edit_proxy(None, window, cx))),
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new("import-proxy")
+                        .label("Import from link")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.on_import_proxy(window, cx)),
+                        ),
+                )
+                .child(
+                    Button::new("new-proxy")
+                        .label("New Proxy")
+                        .primary()
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.on_edit_proxy(None, window, cx)),
+                        ),
+                ),
         )
 }
 
@@ -2845,6 +2934,98 @@ mod tests {
             cx.update(|window, _| window.try_find("proxy-name").is_none()),
             "saving closes the dialog"
         );
+    }
+
+    /// A real link of the shape a provider hands out, remark and all.
+    const SHARE_LINK: &str = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@node.example:443\
+        ?encryption=none&security=reality&sni=front.example&fp=chrome\
+        &pbk=LOLTG162EtSegCnMAofVY3oKrbrCvH8zOTZEPd1GRQU&sid=ab12#Tokyo";
+
+    fn set_link(
+        cx: &mut gpui_kit::VisualTestContext,
+        view: &gpui_kit::Entity<AppView>,
+        link: &str,
+    ) {
+        let import = view
+            .read_with(cx, |view, _| view.proxy_import())
+            .expect("an importer");
+        let field = import.read_with(cx, |import, _| import.link_input());
+        cx.update(|window, cx| field.update(cx, |state, cx| state.set_value(link, window, cx)));
+    }
+
+    fn import_error(
+        cx: &mut gpui_kit::VisualTestContext,
+        view: &gpui_kit::Entity<AppView>,
+    ) -> Option<String> {
+        view.read_with(cx, |view, _| view.proxy_import())
+            .expect("an importer")
+            .read_with(cx, |import, _| import.error().map(str::to_string))
+    }
+
+    #[gpui_kit::test]
+    fn a_pasted_link_becomes_a_proxy(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("import-proxy", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("proxy-link").is_some()),
+            "the import dialog opens"
+        );
+
+        set_link(cx, &view, SHARE_LINK);
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        let rows = view.read_with(cx, |view, cx| {
+            let _ = cx;
+            view.state().proxy_rows().expect("rows")
+        });
+        assert_eq!(rows.len(), 1);
+        // The remark in the link is the name, and the endpoint is what the link
+        // said rather than what a form would have rebuilt.
+        assert_eq!(rows[0].proxy.name, "Tokyo");
+        assert_eq!(rows[0].endpoint(), "vless://node.example:443");
+        assert!(
+            cx.update(|window, _| window.try_find("proxy-link").is_none()),
+            "importing closes the dialog"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_link_this_program_cannot_read_says_so_and_creates_nothing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Proxies", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("import-proxy", cx));
+        settle(cx);
+
+        set_link(cx, &view, "hysteria2://secret@node.example:443");
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        let error = import_error(cx, &view).expect("a refusal");
+        assert!(error.contains("hysteria2"), "{error}");
+        assert!(
+            cx.update(|window, _| window.try_find("proxy-import-error").is_some()),
+            "the dialog shows the reason"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("proxy-link").is_some()),
+            "the dialog stays open so the link can be fixed"
+        );
+        let rows = view.read_with(cx, |view, cx| {
+            let _ = cx;
+            view.state().proxy_rows().expect("rows")
+        });
+        assert!(rows.is_empty(), "a refused link creates nothing");
     }
 
     #[gpui_kit::test]

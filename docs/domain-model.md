@@ -246,6 +246,10 @@ v1 实现顺序建议：
 ```
 
 不是一次把所有 Xray 协议 UI 做完；“配置先行、表单随后”就是按这个顺序落的。
+分享链接（`ss://` / `vmess://` / `vless://` / `trojan://`）由 `domain::uri` 读成上面这套模型：
+它认识的字段若模型装不下就**点名拒绝**（`plugin`、`type=xhttp|raw`、`headerType=http`、
+`mode=multi`），完全不认识的 query 参数则放过。解析完还会跑同一份 `validate_stream`，
+所以“解析得出来但起不来”的链接在粘贴那一刻就被拒绝。
 
 ---
 

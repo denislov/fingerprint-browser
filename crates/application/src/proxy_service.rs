@@ -40,16 +40,14 @@ impl DefaultProxyService {
         Self { proxies, profiles }
     }
 
-    /// Storage rules first, then the question storage cannot answer: does the
-    /// runtime have a config builder for this protocol?
+    /// Storage rules, and the domain rules storage also enforces.
+    ///
+    /// There used to be a second question here - does the runtime have a config
+    /// builder for this protocol - and the answer is now "for all six". What is
+    /// left is what the rules say, and the window is where a protocol without a
+    /// form is reached, by pasting a link.
     fn check(&self, proxy: &ProxyProfile) -> Result<(), AppError> {
         validate_proxy(proxy)?;
-        if !runtime::outbound_is_supported(&proxy.outbound) {
-            return Err(AppError::Conflict(format!(
-                "the runtime cannot build a {} outbound yet",
-                proxy.outbound.kind()
-            )));
-        }
         Ok(())
     }
 
@@ -133,8 +131,8 @@ impl ProxyService for DefaultProxyService {
 mod tests {
     use super::*;
     use domain::{
-        BrowserProfile, CoreId, FingerprintProfile, ProfileId, ShadowsocksOutbound, Socks5Outbound,
-        StartTarget, StreamSettings, WindowProfile,
+        BrowserProfile, CoreId, FingerprintProfile, ProfileId, Socks5Outbound, StartTarget,
+        WindowProfile,
     };
     use storage::{MemProfileRepository, MemProxyRepository};
 
@@ -205,25 +203,28 @@ mod tests {
         assert!(proxies.list().expect("list").is_empty());
     }
 
-    /// The form cannot fill in the stream settings these protocols carry, so
-    /// neither the editor nor the service offers them yet. The config builder
-    /// itself builds all six (see `runtime::DefaultXrayConfigBuilder`).
+    /// A protocol with no form is stored like any other: the window reaches it
+    /// by pasting a link, and an imported proxy goes through the same rules a
+    /// typed one does.
     #[test]
-    fn a_protocol_the_editor_cannot_fill_in_is_refused() {
+    fn an_imported_protocol_is_stored_like_any_other() {
         let (service, proxies, _) = service();
-        let draft = NewProxy {
-            name: "Shadowsocks".to_string(),
-            outbound: ProxyOutbound::Shadowsocks(ShadowsocksOutbound {
-                host: "shadow.example".to_string(),
-                port: 8388,
-                password: "secret".to_string(),
-                method: "aes-256-gcm".to_string(),
-                stream: StreamSettings::plain(),
-            }),
-        };
-        let error = service.create(draft).unwrap_err();
-        assert!(error.to_string().contains("shadowsocks"), "{error}");
-        assert!(proxies.list().expect("list").is_empty());
+        let imported = domain::parse_proxy_uri(
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@node.example:443?encryption=none\
+             &security=reality&pbk=LOLTG162EtSegCnMAofVY3oKrbrCvH8zOTZEPd1GRQU&sni=front.example",
+        )
+        .expect("a share link");
+        service
+            .create(NewProxy {
+                name: imported.suggested_name(),
+                outbound: imported.outbound,
+            })
+            .expect("an imported proxy is storable");
+
+        let stored = proxies.list().expect("list");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].name, "vless node.example");
+        assert_eq!(stored[0].outbound.kind(), "vless");
     }
 
     #[test]

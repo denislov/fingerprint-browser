@@ -1,10 +1,10 @@
 //! The proxy editor: the form behind "New proxy" and "Edit proxy".
 //!
-//! Only the protocols the runtime can actually build are offered. The model and
-//! storage can hold six, and the rest are shown rather than hidden — greyed out
-//! with the reason, so the list does not look like an oversight — but they
-//! cannot be selected, because a stored proxy the config builder cannot use
-//! fails the launch instead of working.
+//! This form is for the two protocols that are an address and a pair of
+//! credentials. The other four carry a public key, a short id, a uTLS
+//! fingerprint or a websocket path, which is not something to type: they arrive
+//! through the paste dialog beside it ([`crate::proxy_import::ProxyImport`]), and
+//! they are named here so the list does not look like an oversight.
 //!
 //! Like the profile editor, this never writes: the view turns the form into a
 //! [`ProxyProfile`] through [`ProxyEditor::build_outbound`], hands it to
@@ -28,13 +28,8 @@ pub enum ProxyKind {
 impl ProxyKind {
     pub const ALL: [(Self, &'static str); 2] = [(Self::Socks5, "SOCKS5"), (Self::Http, "HTTP")];
 
-    /// Protocols the model can store but the config builder cannot build yet.
-    pub const UNBUILDABLE: [&'static str; 4] = ["Shadowsocks", "VMess", "VLESS", "Trojan"];
-
-    /// Whether the runtime can turn this protocol into a working config.
-    pub fn is_supported(self) -> bool {
-        matches!(self, Self::Socks5 | Self::Http)
-    }
+    /// Protocols with no form here: they are created by pasting a share link.
+    pub const BY_LINK: [&'static str; 4] = ["Shadowsocks", "VMess", "VLESS", "Trojan"];
 
     fn of(outbound: &ProxyOutbound) -> Self {
         match outbound {
@@ -219,43 +214,42 @@ impl ProxyKind {
     }
 }
 
-/// One of the two buildable protocols, as a chip.
+/// One of the two protocols this form fills in, as a chip.
 fn kind_row(editor: Entity<ProxyEditor>, selected: ProxyKind) -> Div {
-    div().flex().flex_wrap().gap_2().children(
-        ProxyKind::ALL
-            .iter()
-            .filter(|(kind, _)| kind.is_supported())
-            .map(|(kind, label)| {
-                let kind = *kind;
-                let active = kind == selected;
-                let editor = editor.clone();
-                div()
-                    .id(format!("proxy-kind-{label}"))
-                    .test_support()
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(if active { 0x52525b } else { 0x27272a }))
-                    .text_xs()
-                    .when(active, |this| {
-                        this.bg(rgb(0x27272a))
-                            .text_color(rgb(0xf4f4f5))
-                            .font_weight(FontWeight::MEDIUM)
-                    })
-                    .when(!active, |this| this.text_color(rgb(0x71717a)))
-                    .child(*label)
-                    .on_click(move |_, window, cx| {
-                        editor.update(cx, |editor, cx| {
-                            editor.set_kind(kind, window, cx);
-                            cx.notify();
-                        });
-                    })
-            }),
-    )
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_2()
+        .children(ProxyKind::ALL.iter().map(|(kind, label)| {
+            let kind = *kind;
+            let active = kind == selected;
+            let editor = editor.clone();
+            div()
+                .id(format!("proxy-kind-{label}"))
+                .test_support()
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(if active { 0x52525b } else { 0x27272a }))
+                .text_xs()
+                .when(active, |this| {
+                    this.bg(rgb(0x27272a))
+                        .text_color(rgb(0xf4f4f5))
+                        .font_weight(FontWeight::MEDIUM)
+                })
+                .when(!active, |this| this.text_color(rgb(0x71717a)))
+                .child(*label)
+                .on_click(move |_, window, cx| {
+                    editor.update(cx, |editor, cx| {
+                        editor.set_kind(kind, window, cx);
+                        cx.notify();
+                    });
+                })
+        }))
 }
 
-/// The protocols that are storable but not buildable, named rather than hidden.
+/// The protocols that are not filled in here, named rather than hidden.
 ///
 /// Split into short lines on purpose: the dialog is 640px wide, and a longer
 /// sentence is clipped at the edge instead of wrapping.
@@ -267,11 +261,11 @@ fn unbuildable_note() -> Div {
         .text_xs()
         .text_color(rgb(0x71717a))
         .child(format!(
-            "{} are not offered:",
-            ProxyKind::UNBUILDABLE.join(", ")
+            "{} are not filled in here:",
+            ProxyKind::BY_LINK.join(", ")
         ))
-        .child("the runtime has no config builder for them yet.")
-        .child("A proxy that cannot be built would fail the launch.")
+        .child("a link carries the fields they need.")
+        .child("Use \"Import from link\" on the Proxies page.")
 }
 
 impl Render for ProxyEditor {
@@ -556,23 +550,34 @@ mod tests {
         assert!(error.contains("port must be"), "{error}");
     }
 
-    /// The form's list and the config builder must agree: a chip that opens a
-    /// form the runtime cannot build would fail at launch instead of here.
+    /// Every one of the model's six protocols is reachable: two through this
+    /// form, four through a share link. Nothing is storable-but-uncreatable.
     #[test]
-    fn the_offered_protocols_match_what_the_runtime_can_build() {
-        for (kind, label) in ProxyKind::ALL {
-            let sample = match kind {
-                ProxyKind::Socks5 => stored(ProxyKind::Socks5).outbound,
-                ProxyKind::Http => stored(ProxyKind::Http).outbound,
-            };
-            assert_eq!(
-                kind.is_supported(),
-                runtime::outbound_is_supported(&sample),
-                "{label} is offered but the runtime disagrees"
-            );
-        }
+    fn every_protocol_without_a_form_arrives_by_link() {
+        let links = [
+            "ss://YWVzLTI1Ni1nY206c2VjcmV0@node.example:8388",
+            "trojan://secret@node.example:443",
+            "vless://b831381d-6324-4d53-ad4f-8cda48b30811@node.example:443?encryption=none",
+            "vmess://eyJhZGQiOiJub2RlLmV4YW1wbGUiLCJwb3J0IjoxMDA4NiwiaWQiOiJiODMxMzgxZC02MzI0LTRkNTMtYWQ0Zi04Y2RhNDhiMzA4MTEifQ==",
+        ];
+        let mut kinds: Vec<&str> = links
+            .iter()
+            .map(|link| {
+                domain::parse_proxy_uri(link)
+                    .expect("a real link")
+                    .outbound
+                    .kind()
+            })
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, ["shadowsocks", "trojan", "vless", "vmess"]);
+        assert_eq!(ProxyKind::BY_LINK.len(), kinds.len());
         assert_eq!(ProxyKind::ALL.len(), 2);
-        assert_eq!(ProxyKind::UNBUILDABLE.len(), 4);
+        assert_eq!(
+            ProxyKind::ALL.len() + ProxyKind::BY_LINK.len(),
+            6,
+            "six protocols to reach, and every one of them has a way in"
+        );
     }
 
     /// Clicks the protocol chip the way the window does.

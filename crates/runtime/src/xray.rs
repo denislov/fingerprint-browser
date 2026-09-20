@@ -9,17 +9,6 @@ use std::path::Path;
 /// credentials, so a run that is killed has to clear it on the way back in.
 pub const XRAY_CONFIG_FILE: &str = "xray.json";
 
-/// Whether the editor is allowed to offer this protocol and the proxy service
-/// to store it.
-///
-/// This is about the *form*, not about the config: [`DefaultXrayConfigBuilder`]
-/// builds all six protocols, but the proxy editor cannot fill in the stream
-/// settings four of them carry yet, so nothing offers them until it can. A
-/// protocol with no form would be a row a user could create and never complete.
-pub fn is_supported(outbound: &ProxyOutbound) -> bool {
-    matches!(outbound, ProxyOutbound::Socks5(_) | ProxyOutbound::Http(_))
-}
-
 pub trait XrayConfigBuilder: Send + Sync {
     fn build(
         &self,
