@@ -172,7 +172,10 @@ to record it anyway. Re-pointing a core at another binary, or pressing
 Re-detect after replacing one in place, re-reads the version instead of keeping
 the old major; a core whose version was never read has no capability table and
 cannot be launched or verified with. Removing a core that a profile still uses
-is refused by name.
+is refused by name. Every core on this page is also what the profile form offers,
+with the major it answered with; a core whose version was never read is listed
+there too, because it is a real choice that will be refused at launch rather than
+one the form hides.
 
 Proxies have a page of their own. A proxy can be created, edited and deleted,
 and assigned to a profile from the profile editor; the row says which profiles
@@ -183,14 +186,23 @@ fail at launch. A proxy that a profile still points at cannot be deleted: the
 schema would null the assignment out and send that traffic direct, so the refusal
 names the profiles that hold it.
 
-Profiles can be edited, duplicated and deleted from the window. The editor is a
-form over the profile's fingerprint and window: name, seed (with a re-roll),
-brand and its version, platform and its version, language, accept language,
-timezone, CPU cores, window size, the WebRTC policy and which spoofing features
-to exclude. Saving runs the same domain rules storage enforces and keeps the
-dialog open with the reason when one fails; fields the form does not edit (core,
-proxy assignment, data directory, start target) are carried through untouched.
-Deleting asks first and keeps the profile's browser data on disk.
+Profiles can be created, edited, duplicated and deleted from the window. New
+Profile opens the same form the editor uses rather than writing a row: the
+profile that appears is the one that was configured, and a form that is
+cancelled leaves nothing behind. The form is over the profile's fingerprint and
+window: name, the browser core it runs on, seed (with a re-roll), brand and its
+version, platform and its version, language, accept language, timezone, CPU
+cores, window size, the WebRTC policy and which spoofing features to exclude.
+The core is a field rather than a hidden default because it is what decides
+which switches the engine may be asked for: the row offers every registered core
+with the major it answered with, and the line under it says whether that engine
+honours `--disable-spoofing` (measured: not before major 144). A profile whose
+core was removed keeps it and shows it as missing rather than quietly becoming a
+profile on a core nobody chose. Saving runs the same domain rules storage
+enforces and keeps the dialog open with the reason when one fails; the fields the
+form does not edit (id, data directory, start target) are carried through
+untouched when editing, and left to the service when creating. Deleting asks
+first and keeps the profile's browser data on disk.
 
 Feedback is a toast, and what happened is a page. A success is a toast and
 leaves the banner clear; a problem owns the banner until it is dismissed, and is

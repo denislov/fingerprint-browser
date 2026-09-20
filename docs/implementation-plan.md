@@ -327,6 +327,37 @@ Phase 4 的剩余项在第十二批结清，结论与证据见 [fingerprint-matr
   没有 home 时回退、配置目录每平台、旧库提示的三种情况，以及一个用真实环境跑 `Host::from_process()`
   的检查（防止变量读错而只在用户那里才发现）。
 
+### 第二十批：新建 profile 走表单，内核成为表单上的字段
+
+进度（2026-09-20）：已完成。**这一批把「新建」从一次点击变成一次选择，并把内核从隐式默认
+变成表单上可选的字段。**
+
+- `ProfileEditor` 现在有两种身份：编辑一个已经存在的 profile，或创建一个还不存在的。
+  接受表单的结果是 `ProfileEdit::{Save(BrowserProfile), Create(NewProfile)}`——**创建返回的是
+  `NewProfile` 而不是 `BrowserProfile`**，因为 id、数据目录与 start target 属于服务：一个还能被
+  取消的表单不该先把它们编出来，否则取消就成了「留下一个半成品」。表单不编辑的字段在编辑模式下
+  仍然原样带回。
+- 新建表单的默认值来自 `FingerprintProfile::new_random(seed)` 与 `WindowProfile::default()`；
+  而**表单上的 seed 就是建出来的 profile 的 seed**。此前草稿不带指纹时由服务自己掷一次，
+  于是表单显示一个 seed、建出来的是另一个——同一个「看起来有设置、其实没生效」的老毛病。
+- **内核是可编辑字段**（新建与编辑都有）。这不是装饰：内核决定这个 profile 能声明哪些开关，
+  所以 `AppState::core_choices()` 把每个内核连同它刚才回答的 major 一起交给表单，字段下面那行
+  说明该引擎是否尊重 `--disable-spoofing`（实测：144 之前不尊重，勾了也没用）。
+  内核被删掉的 profile **保留原内核并显示为 missing**，而不是静默落到列表里的第一个内核上。
+  内核名仍是自动名（`<binary> <major>`）时不重复 major：`chrome 148` 不会写成
+  `chrome 148 (Chrome 148)`。
+- 新建按钮不再直接写行：没有内核时**拒绝打开**并说明要去 Browser Cores 页添加；有内核时打开表单，
+  取消不留痕。默认名沿用 `next_profile_name()`，所以行为上的变化只有「多了一次确认」。
+- `ProfileEditor::build` 取代 `build_profile`；`AppState::create_profile(name)` 保留为测试与验收
+  harness 的捷径并带上 `#[cfg(test)]`（与第十九批同一处理）——编译器的 dead_code 说得对：
+  它存在的理由就是让调用者不必先驱动对话框。
+- 测试：editor 侧覆盖「新建产出 `NewProfile` 而不是 `BrowserProfile`」「表单上的 seed 就是
+  建出来的 seed」「换内核改变 profile 建在哪个内核上」「legacy 内核会说明排除项不生效」
+  「没有版本的内核被如实标出」「内核被删掉时保留并标注」；UI 侧覆盖「点 New Profile 打开表单，
+  且此时不写任何行」「接受表单后列表出现配置好的 profile，名字与内核都对」「两次接受得到两个
+  profile，start/stop 照旧」。其余 UI 测试不再靠点 New Profile 造夹具，改用 `seed_profile`
+  ——夹具不该依赖正在被测的那段流程。
+
 ### 第二批：开关词汇的实测与回读验证
 
 进度（2026-09-19）：已完成。方法与全部实测数据见 [fingerprint-matrix.md](fingerprint-matrix.md)。

@@ -1,17 +1,23 @@
-//! The profile editor: the form behind "Edit profile".
+//! The profile editor: the form behind "Edit profile" and "New Profile".
 //!
-//! The editor owns an editable copy of one profile and turns it back into a
-//! [`BrowserProfile`] when the user saves. It never writes to storage itself:
-//! the view hands the result to [`crate::state::AppState`], and a rejection
-//! comes back as a message the form shows without closing.
+//! The editor owns an editable copy of one profile - or, for a profile that
+//! does not exist yet, the values the form starts from - and turns it into
+//! either a [`BrowserProfile`] to write back or a [`NewProfile`] to create. It
+//! never writes to storage itself: the view hands the result to
+//! [`crate::state::AppState`], and a rejection comes back as a message the form
+//! shows without closing.
 //!
-//! Fields the profile already owns but this form does not edit (id, core, user
-//! data directory, start target) are carried through untouched, so saving
-//! cannot silently drop them.
+//! Fields an existing profile already owns but this form does not edit (id, user
+//! data directory, start target) are carried through untouched, so saving cannot
+//! silently drop them. A new profile has none of those yet, which is why creating
+//! and saving are two different results rather than one profile with half-made
+//! fields that a cancelled form would leave behind.
 
+use crate::state::CoreChoice;
+use application::NewProfile;
 use domain::{
-    BrowserBrand, BrowserProfile, Platform, ProxyId, SpoofingFeature, WebRtcPolicy,
-    validate_fingerprint, validate_profile, validate_window,
+    BrowserBrand, BrowserProfile, CoreId, FingerprintProfile, Platform, ProfileId, ProxyId,
+    SpoofingFeature, StartTarget, WebRtcPolicy, WindowProfile, validate_profile,
 };
 use gpui_kit::component::button::*;
 use gpui_kit::component::checkbox::Checkbox;
@@ -19,13 +25,52 @@ use gpui_kit::component::form::*;
 use gpui_kit::component::input::*;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use std::path::PathBuf;
 
 const LABEL_WIDTH: f32 = 170.0;
 
+/// What an accepted form asks the window to do.
+#[derive(Debug)]
+pub enum ProfileEdit {
+    /// Write this back over the profile the form was opened on.
+    Save(BrowserProfile),
+    /// Create this.
+    Create(NewProfile),
+}
+
+/// The profile the form was opened on.
+enum Mode {
+    /// One that is already stored: the fields this form does not edit are
+    /// carried through untouched.
+    ///
+    /// Boxed because the other variant carries nothing: a form that creates a
+    /// profile should not pay for a whole stored profile on every value of this
+    /// enum.
+    Edit(Box<BrowserProfile>),
+    /// None yet. The id, the data directory and the start target belong to the
+    /// service, not to a form that can still be cancelled.
+    New,
+}
+
+/// The values a new form starts from.
+struct Draft {
+    name: String,
+    fingerprint: FingerprintProfile,
+    window: WindowProfile,
+    proxy: Option<ProxyId>,
+}
+
 /// An editable copy of one profile.
 pub struct ProfileEditor {
-    /// Everything the form does not edit, kept verbatim.
-    base: BrowserProfile,
+    mode: Mode,
+    /// The core the profile runs on.
+    ///
+    /// Editable in both modes: which engine runs a profile decides which
+    /// switches it may be asked for, so pointing it at another core is a real
+    /// change, and the form shows which core is in force.
+    core: CoreId,
+    /// The cores the form offers, with the version each one answered with.
+    cores: Vec<CoreChoice>,
     name: Entity<InputState>,
     seed: Entity<InputState>,
     brand_version: Entity<InputState>,
@@ -83,22 +128,80 @@ const SPOOFING_FEATURES: [(SpoofingFeature, &str); 5] = [
 impl ProfileEditor {
     /// Builds the form from the profile as it is stored.
     ///
-    /// The proxies are passed in because they live outside the profile: the
-    /// form needs their names to offer a choice, and the id it stores is the
-    /// only part of the assignment the profile owns.
+    /// The cores and the proxies are passed in because they live outside the
+    /// profile: the form needs their names to offer a choice, and the ids it
+    /// stores are the only part of those assignments the profile owns.
     pub fn new(
         profile: &BrowserProfile,
+        cores: &[CoreChoice],
         proxies: &[(ProxyId, String)],
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
-        let fingerprint = &profile.fingerprint;
+        Self::form(
+            Mode::Edit(Box::new(profile.clone())),
+            profile.core_id,
+            Draft {
+                name: profile.name.clone(),
+                fingerprint: profile.fingerprint.clone(),
+                window: profile.window,
+                proxy: profile.proxy_id,
+            },
+            cores,
+            proxies,
+            window,
+            cx,
+        )
+    }
+
+    /// Builds the form for a profile that does not exist yet.
+    ///
+    /// `core` is the core the form starts on. The caller refuses to open this
+    /// form when there is no core at all, because a profile with no core has
+    /// nothing to launch and the service would have to invent one behind the
+    /// user's back.
+    pub fn new_profile(
+        name: &str,
+        core: CoreId,
+        cores: &[CoreChoice],
+        proxies: &[(ProxyId, String)],
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        Self::form(
+            Mode::New,
+            core,
+            Draft {
+                name: name.to_string(),
+                fingerprint: FingerprintProfile::new_random(profile_seed()),
+                window: WindowProfile::default(),
+                proxy: None,
+            },
+            cores,
+            proxies,
+            window,
+            cx,
+        )
+    }
+
+    fn form(
+        mode: Mode,
+        core: CoreId,
+        draft: Draft,
+        cores: &[CoreChoice],
+        proxies: &[(ProxyId, String)],
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let fingerprint = draft.fingerprint;
         let field = |value: &str, window: &mut Window, cx: &mut App| {
             cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()))
         };
         Self {
-            base: profile.clone(),
-            name: field(&profile.name, window, cx),
+            mode,
+            core,
+            cores: cores.to_vec(),
+            name: field(&draft.name, window, cx),
             seed: field(&fingerprint.seed.to_string(), window, cx),
             brand_version: field(
                 fingerprint.brand_version.as_deref().unwrap_or(""),
@@ -121,14 +224,14 @@ impl ProfileEditor {
                 window,
                 cx,
             ),
-            window_width: field(&profile.window.width.to_string(), window, cx),
-            window_height: field(&profile.window.height.to_string(), window, cx),
+            window_width: field(&draft.window.width.to_string(), window, cx),
+            window_height: field(&draft.window.height.to_string(), window, cx),
             brand: fingerprint.brand,
             platform: fingerprint.platform,
             webrtc_policy: fingerprint.webrtc_policy,
             disabled_spoofing: fingerprint.disabled_spoofing.clone(),
             proxies: proxies.to_vec(),
-            proxy: profile.proxy_id,
+            proxy: draft.proxy,
             error: None,
         }
     }
@@ -145,8 +248,9 @@ impl ProfileEditor {
         self.seed.clone()
     }
 
-    /// Turns the form back into a profile, or explains what is wrong with it.
-    pub fn build_profile(&self, cx: &App) -> Result<BrowserProfile, String> {
+    /// Turns the form into what the window should do, or explains what is wrong
+    /// with it.
+    pub fn build(&self, cx: &App) -> Result<ProfileEdit, String> {
         let text = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
         let optional = |input: &Entity<InputState>| {
             let value = text(input);
@@ -171,29 +275,70 @@ impl ProfileEditor {
             .parse()
             .map_err(|_| "window height must be a whole number".to_string())?;
 
-        let mut profile = self.base.clone();
-        profile.name = text(&self.name);
-        profile.window.width = width;
-        profile.window.height = height;
-        profile.fingerprint.seed = seed;
-        profile.fingerprint.brand = self.brand;
-        profile.fingerprint.brand_version = optional(&self.brand_version);
-        profile.fingerprint.platform = self.platform;
-        profile.fingerprint.platform_version = optional(&self.platform_version);
-        profile.fingerprint.language = text(&self.language);
-        profile.fingerprint.accept_language = text(&self.accept_language);
-        profile.fingerprint.timezone = text(&self.timezone);
-        profile.fingerprint.hardware_concurrency = hardware_concurrency;
-        profile.fingerprint.webrtc_policy = self.webrtc_policy;
-        profile.fingerprint.disabled_spoofing = self.disabled_spoofing.clone();
-        profile.proxy_id = self.proxy;
+        let fingerprint = FingerprintProfile {
+            seed,
+            brand: self.brand,
+            brand_version: optional(&self.brand_version),
+            platform: self.platform,
+            platform_version: optional(&self.platform_version),
+            language: text(&self.language),
+            accept_language: text(&self.accept_language),
+            timezone: text(&self.timezone),
+            hardware_concurrency,
+            webrtc_policy: self.webrtc_policy,
+            disabled_spoofing: self.disabled_spoofing.clone(),
+        };
+        let window = WindowProfile::new(width, height);
+        let name = text(&self.name);
 
         // The same rules storage enforces, run before anything is written.
-        validate_profile(&profile)
-            .and_then(|()| validate_fingerprint(&profile.fingerprint))
-            .and_then(|()| validate_window(&profile.window))
-            .map_err(|error| error.to_string())?;
-        Ok(profile)
+        let validate =
+            |profile: &BrowserProfile| validate_profile(profile).map_err(|error| error.to_string());
+
+        match &self.mode {
+            Mode::Edit(base) => {
+                let mut profile = base.as_ref().clone();
+                profile.name = name;
+                profile.core_id = self.core;
+                profile.window = window;
+                profile.fingerprint = fingerprint;
+                profile.proxy_id = self.proxy;
+                validate(&profile)?;
+                Ok(ProfileEdit::Save(profile))
+            }
+            Mode::New => {
+                // Same rules, same shape: a draft profile is what they are
+                // written against. Its id, data directory and start target are
+                // placeholders - `NewProfile` asks the service for exactly the
+                // rest of the fields and leaves those three to it.
+                let draft = BrowserProfile {
+                    id: ProfileId::new(),
+                    name,
+                    core_id: self.core,
+                    user_data_dir: PathBuf::new(),
+                    fingerprint: fingerprint.clone(),
+                    proxy_id: self.proxy,
+                    window,
+                    start_target: StartTarget::default(),
+                };
+                validate(&draft)?;
+                Ok(ProfileEdit::Create(NewProfile {
+                    name: draft.name,
+                    core_id: self.core,
+                    user_data_dir: None,
+                    fingerprint: Some(fingerprint),
+                    proxy_id: self.proxy,
+                    window: Some(window),
+                    start_target: None,
+                }))
+            }
+        }
+    }
+
+    /// Whether this form creates a profile rather than editing one.
+    #[cfg(test)]
+    pub fn is_new(&self) -> bool {
+        matches!(self.mode, Mode::New)
     }
 
     #[cfg(test)]
@@ -222,6 +367,28 @@ impl ProfileEditor {
             self.disabled_spoofing.remove(index);
         } else {
             self.disabled_spoofing.push(feature);
+        }
+    }
+
+    /// What the form says about the core in force.
+    ///
+    /// The generation matters on this form, not only on the Cores page: it
+    /// decides whether the exclusions below are honoured at all, and a form that
+    /// kept quiet about it would let a checkbox be ticked and ignored.
+    fn core_note(&self) -> String {
+        match self.cores.iter().find(|choice| choice.id == self.core) {
+            Some(choice) => match &choice.generation {
+                Some(generation) if choice.exclusions_honoured => generation.clone(),
+                Some(generation) => {
+                    format!("{generation}; the exclusions below are ignored by this engine")
+                }
+                None => "this core answered no version, so a profile on it cannot be started \
+                         until one is recorded"
+                    .to_string(),
+            },
+            None => "the core this profile was on is no longer registered; pick another one \
+                     before saving"
+                .to_string(),
         }
     }
 }
@@ -280,12 +447,17 @@ fn proxy_row(
         }))
 }
 
-fn proxy_choice(
+/// One selectable chip: a proxy, a browser core.
+///
+/// They are the same control over different fields, so they differ in what the
+/// click writes back and nothing else.
+fn chip<T: std::marker::Copy + PartialEq + 'static>(
     editor: Entity<ProfileEditor>,
     id: String,
     label: String,
     active: bool,
-    value: Option<ProxyId>,
+    value: Option<T>,
+    apply: fn(&mut ProfileEditor, Option<T>),
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -305,10 +477,68 @@ fn proxy_choice(
         .child(label)
         .on_click(move |_, _, cx| {
             editor.update(cx, |editor, cx| {
-                editor.proxy = value;
+                apply(editor, value);
                 cx.notify();
             });
         })
+}
+
+fn proxy_choice(
+    editor: Entity<ProfileEditor>,
+    id: String,
+    label: String,
+    active: bool,
+    value: Option<ProxyId>,
+) -> impl IntoElement {
+    chip(editor, id, label, active, value, |editor, value| {
+        editor.proxy = value
+    })
+}
+
+/// The browser cores, as chips.
+///
+/// There is no "none" here, unlike the proxy row: a profile without a core has
+/// nothing to launch. A profile whose core was removed keeps it and shows it as
+/// missing, so it cannot silently read as a profile on a core nobody chose.
+fn core_row(editor: Entity<ProfileEditor>, selected: CoreId, options: &[CoreChoice]) -> Div {
+    let missing = (!options.iter().any(|choice| choice.id == selected)).then_some(selected);
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .children(options.iter().enumerate().map(|(index, choice)| {
+            core_choice(
+                editor.clone(),
+                format!("editor-core-{index}"),
+                choice.label(),
+                selected == choice.id,
+                Some(choice.id),
+            )
+        }))
+        .children(missing.map(|id| {
+            core_choice(
+                editor.clone(),
+                "editor-core-missing".to_string(),
+                format!("(missing core {id})"),
+                true,
+                Some(id),
+            )
+        }))
+}
+
+fn core_choice(
+    editor: Entity<ProfileEditor>,
+    id: String,
+    label: String,
+    active: bool,
+    value: Option<CoreId>,
+) -> impl IntoElement {
+    chip(editor, id, label, active, value, |editor, value| {
+        if let Some(id) = value {
+            editor.core = id;
+        }
+    })
 }
 
 /// A seed that is very unlikely to repeat, from the clock.
@@ -367,6 +597,7 @@ fn choice_row<T: std::marker::Copy + PartialEq + 'static>(
 impl Render for ProfileEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let editor = cx.entity();
+        let core_note = self.core_note();
         let mut form = Form::new()
             .label_layout(Axis::Horizontal)
             .label_width(px(LABEL_WIDTH))
@@ -376,6 +607,12 @@ impl Render for ProfileEditor {
                         .id("editor-name")
                         .aria_label("Profile name"),
                 ),
+            )
+            .child(
+                Field::new()
+                    .label("Browser core")
+                    .description(core_note)
+                    .child(core_row(editor.clone(), self.core, &self.cores)),
             )
             .child(
                 Field::new()
@@ -559,7 +796,7 @@ impl Render for ProfileEditor {
 mod tests {
     // Explicit imports: a glob here pulls the whole gpui surface into the test
     // macro's expansion and makes it recurse.
-    use super::ProfileEditor;
+    use super::{ProfileEdit, ProfileEditor};
     use domain::{
         BrowserBrand, CoreId, FingerprintProfile, Platform, ProfileId, ProxyId, SpoofingFeature,
         StartTarget, WebRtcPolicy, WindowProfile,
@@ -581,6 +818,17 @@ mod tests {
         }
     }
 
+    /// One browser core, as the form is offered it.
+    fn choice(id: CoreId, name: &str, major: u32) -> super::CoreChoice {
+        super::CoreChoice {
+            id,
+            name: name.to_string(),
+            major,
+            generation: Some("Chrome 144+ · spoofing exclusions honoured".to_string()),
+            exclusions_honoured: true,
+        }
+    }
+
     /// The editor inside a window, so its inputs can be driven.
     fn editor<'a>(
         cx: &'a mut TestAppContext,
@@ -590,14 +838,61 @@ mod tests {
     }
 
     /// The editor with proxies to choose from.
+    ///
+    /// The profile's own core is in the list, so the form opens on it instead of
+    /// reading as a profile whose core went missing.
     fn editor_with<'a>(
         cx: &'a mut TestAppContext,
         profile: &super::BrowserProfile,
         proxies: &[(ProxyId, String)],
     ) -> (Entity<ProfileEditor>, &'a mut VisualTestContext) {
+        let cores = vec![choice(profile.core_id, "chrome 148", 148)];
+        editor_full(cx, profile, &cores, proxies)
+    }
+
+    /// The editor over an explicit core list, for the cases the default one
+    /// cannot express: several cores, or none of them the profile's own.
+    fn editor_full<'a>(
+        cx: &'a mut TestAppContext,
+        profile: &super::BrowserProfile,
+        cores: &[super::CoreChoice],
+        proxies: &[(ProxyId, String)],
+    ) -> (Entity<ProfileEditor>, &'a mut VisualTestContext) {
         let profile = profile.clone();
+        let cores = cores.to_vec();
         let proxies = proxies.to_vec();
-        cx.add_window_view(move |window, cx| ProfileEditor::new(&profile, &proxies, window, cx))
+        cx.add_window_view(move |window, cx| {
+            ProfileEditor::new(&profile, &cores, &proxies, window, cx)
+        })
+    }
+
+    /// The form for a profile that does not exist yet, on the first core given.
+    fn new_editor<'a>(
+        cx: &'a mut TestAppContext,
+        cores: &[super::CoreChoice],
+    ) -> (Entity<ProfileEditor>, &'a mut VisualTestContext) {
+        let cores = cores.to_vec();
+        let core = cores.first().expect("a core to open the form on").id;
+        cx.add_window_view(move |window, cx| {
+            ProfileEditor::new_profile("Profile 1", core, &cores, &[], window, cx)
+        })
+    }
+
+    /// The profile an edit form rebuilds.
+    ///
+    /// A form that creates rather than saves panics here: these tests are about
+    /// the fields, not about which of the two results came back.
+    fn built_profile(
+        cx: &mut VisualTestContext,
+        editor: &Entity<ProfileEditor>,
+    ) -> super::BrowserProfile {
+        match editor
+            .read_with(cx, |editor, cx| editor.build(cx))
+            .expect("a valid form")
+        {
+            super::ProfileEdit::Save(profile) => profile,
+            super::ProfileEdit::Create(_) => panic!("this form creates a profile"),
+        }
     }
 
     fn set(cx: &mut VisualTestContext, input: &Entity<InputState>, text: &str) {
@@ -622,9 +917,7 @@ mod tests {
         let original = profile();
         let (editor, cx) = editor(cx, &original);
 
-        let rebuilt = editor
-            .read_with(cx, |editor, cx| editor.build_profile(cx))
-            .expect("an untouched form is valid");
+        let rebuilt = built_profile(cx, &editor);
 
         assert_eq!(rebuilt.id, original.id);
         assert_eq!(rebuilt.core_id, original.core_id);
@@ -666,9 +959,7 @@ mod tests {
             cx.notify();
         });
 
-        let rebuilt = editor
-            .read_with(cx, |editor, cx| editor.build_profile(cx))
-            .expect("the edited form is valid");
+        let rebuilt = built_profile(cx, &editor);
 
         assert_eq!(rebuilt.name, "Edited name");
         assert_eq!(rebuilt.fingerprint.seed, 777);
@@ -702,7 +993,7 @@ mod tests {
         set(cx, &seed, "not a number");
 
         let error = editor
-            .read_with(cx, |editor, cx| editor.build_profile(cx))
+            .read_with(cx, |editor, cx| editor.build(cx))
             .expect_err("a seed that is not a number cannot be saved");
 
         assert!(error.contains("seed"), "unhelpful message: {error}");
@@ -723,18 +1014,14 @@ mod tests {
 
         set(cx, &name, "   ");
         assert!(
-            editor
-                .read_with(cx, |editor, cx| editor.build_profile(cx))
-                .is_err(),
+            editor.read_with(cx, |editor, cx| editor.build(cx)).is_err(),
             "a blank name is refused by the domain rules"
         );
 
         set(cx, &name, "Fine");
         set(cx, &width, "0");
         assert!(
-            editor
-                .read_with(cx, |editor, cx| editor.build_profile(cx))
-                .is_err(),
+            editor.read_with(cx, |editor, cx| editor.build(cx)).is_err(),
             "a zero-sized window is refused by the domain rules"
         );
     }
@@ -752,9 +1039,7 @@ mod tests {
             });
         });
 
-        let rebuilt = editor
-            .read_with(cx, |editor, cx| editor.build_profile(cx))
-            .expect("a re-rolled seed is valid");
+        let rebuilt = built_profile(cx, &editor);
 
         assert_ne!(rebuilt.fingerprint.seed, 4242);
     }
@@ -771,9 +1056,7 @@ mod tests {
         ];
         let (editor, cx) = editor_with(cx, &original, &proxies);
 
-        let rebuilt = editor
-            .read_with(cx, |editor, cx| editor.build_profile(cx))
-            .expect("valid");
+        let rebuilt = built_profile(cx, &editor);
         assert_eq!(
             rebuilt.proxy_id,
             Some(proxy),
@@ -804,30 +1087,20 @@ mod tests {
         let proxies = vec![(proxy, "Office".to_string())];
         let (editor, cx) = editor_with(cx, &profile(), &proxies);
         assert!(
-            editor
-                .read_with(cx, |editor, cx| editor.build_profile(cx))
-                .expect("valid")
-                .proxy_id
-                .is_none(),
+            built_profile(cx, &editor).proxy_id.is_none(),
             "a profile with no proxy starts on Direct"
         );
 
         click(cx, "editor-proxy-0");
         assert_eq!(
-            editor
-                .read_with(cx, |editor, cx| editor.build_profile(cx))
-                .expect("valid")
-                .proxy_id,
+            built_profile(cx, &editor).proxy_id,
             Some(proxy),
             "picking a proxy assigns it"
         );
 
         click(cx, "editor-proxy-direct");
         assert_eq!(
-            editor
-                .read_with(cx, |editor, cx| editor.build_profile(cx))
-                .expect("valid")
-                .proxy_id,
+            built_profile(cx, &editor).proxy_id,
             None,
             "picking Direct clears the assignment"
         );
@@ -844,10 +1117,7 @@ mod tests {
         let (editor, cx) = editor_with(cx, &original, &[]);
 
         assert_eq!(
-            editor
-                .read_with(cx, |editor, cx| editor.build_profile(cx))
-                .expect("valid")
-                .proxy_id,
+            built_profile(cx, &editor).proxy_id,
             Some(gone),
             "the assignment survives even though the proxy is gone"
         );
@@ -856,6 +1126,232 @@ mod tests {
                 .read_with(cx, |editor, _| editor.proxy)
                 .is_some_and(|id| id == gone)
         );
+    }
+
+    /// A new profile starts from the defaults and names the core it will run on.
+    ///
+    /// What a create form asks for is a `NewProfile`, not a `BrowserProfile`: the
+    /// id, the data directory and the start target belong to the service, and a
+    /// form that filled them in itself would be inventing state the user cannot
+    /// see or cancel.
+    #[gpui_kit::test]
+    fn a_new_form_asks_for_a_profile_rather_than_inventing_one(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let core = CoreId::new();
+        let (editor, cx) = new_editor(cx, &[choice(core, "chrome 148", 148)]);
+
+        let draft = created(&editor, cx);
+
+        assert!(editor.read_with(cx, |editor, _| editor.is_new()));
+        assert_eq!(draft.name, "Profile 1");
+        assert_eq!(
+            draft.core_id, core,
+            "the core the form opened on is the one the profile is created on"
+        );
+        assert!(
+            draft.user_data_dir.is_none(),
+            "the data directory is the service's to make"
+        );
+        assert!(draft.start_target.is_none(), "and so is the start target");
+        assert!(
+            draft.window.is_some(),
+            "the window size comes from the form"
+        );
+        let fingerprint = draft.fingerprint.clone().expect("a fingerprint");
+        assert_eq!(fingerprint.brand, BrowserBrand::Chrome);
+        assert_eq!(fingerprint.platform, Platform::Windows);
+        assert_eq!(fingerprint.language, "en-US");
+    }
+
+    /// The seed on the form is the seed the profile gets.
+    ///
+    /// The service used to roll its own when a draft carried none, so a form that
+    /// showed a seed could still create a profile with a different one.
+    #[gpui_kit::test]
+    fn the_seed_on_a_new_form_is_the_seed_the_profile_is_created_with(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (editor, cx) = new_editor(cx, &[choice(CoreId::new(), "chrome 148", 148)]);
+
+        let seed = input(cx, &editor, |editor| editor.seed.clone());
+        set(cx, &seed, "31415");
+        let drafted = created(&editor, cx);
+
+        assert_eq!(
+            drafted.fingerprint.expect("a fingerprint").seed,
+            31415,
+            "the created profile gets the seed the form showed"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn choosing_another_core_changes_which_engine_the_profile_is_created_on(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let first = CoreId::new();
+        let second = CoreId::new();
+        let (editor, cx) = new_editor(
+            cx,
+            &[
+                choice(first, "chrome 148", 148),
+                choice(second, "chrome 142", 142),
+            ],
+        );
+
+        assert_eq!(
+            created(&editor, cx).core_id,
+            first,
+            "the first core is the default"
+        );
+
+        click(cx, "editor-core-1");
+        assert_eq!(
+            created(&editor, cx).core_id,
+            second,
+            "picking the other core creates the profile on it"
+        );
+    }
+
+    /// A new form is refused by the same rules an edit is.
+    #[gpui_kit::test]
+    fn a_new_form_still_refuses_what_the_domain_refuses(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (editor, cx) = new_editor(cx, &[choice(CoreId::new(), "chrome 148", 148)]);
+
+        let name = input(cx, &editor, |editor| editor.name.clone());
+        set(cx, &name, "   ");
+
+        assert!(
+            editor.read_with(cx, |editor, cx| editor.build(cx)).is_err(),
+            "a blank name is refused before anything is created"
+        );
+    }
+
+    /// The form says whether the core in force honours the exclusions.
+    ///
+    /// A legacy engine accepts `--disable-spoofing` and applies the noise anyway,
+    /// so a checkbox that looked effective would be a lie the launch warning then
+    /// had to correct.
+    #[gpui_kit::test]
+    fn the_form_says_when_a_core_ignores_the_exclusions(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let modern = choice(CoreId::new(), "chrome 148", 148);
+        let (editor, cx) = new_editor(cx, std::slice::from_ref(&modern));
+        let note = editor.read_with(cx, |editor, _| editor.core_note());
+        assert!(note.contains("spoofing exclusions honoured"), "{note}");
+        assert!(!note.contains("ignored"), "{note}");
+
+        let legacy = super::CoreChoice {
+            exclusions_honoured: false,
+            ..choice(CoreId::new(), "chrome 142", 142)
+        };
+        let (editor, cx) = new_editor(cx, &[legacy]);
+        let note = editor.read_with(cx, |editor, _| editor.core_note());
+        assert!(
+            note.contains("ignored by this engine"),
+            "the form says the exclusions will not be applied: {note}"
+        );
+    }
+
+    /// The chip says which core it stands for.
+    ///
+    /// The automatic name a core gets already carries its major; repeating it
+    /// would put "chrome 148 (Chrome 148)" in the form.
+    #[test]
+    fn a_core_chip_names_the_core_without_repeating_an_automatic_major() {
+        assert_eq!(
+            choice(CoreId::new(), "chrome 148", 148).label(),
+            "chrome 148"
+        );
+        assert_eq!(
+            choice(CoreId::new(), "Daily driver", 148).label(),
+            "Daily driver (Chrome 148)",
+            "a name the user chose does not carry the major, so the chip adds it"
+        );
+        assert_eq!(
+            choice(CoreId::new(), "chrome", 0).label(),
+            "chrome (version unknown)"
+        );
+    }
+
+    /// A core whose version was never read is a real choice, not a hidden one.
+    #[gpui_kit::test]
+    fn a_core_with_no_version_is_shown_as_one_that_cannot_be_started(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let unread = super::CoreChoice {
+            generation: None,
+            exclusions_honoured: false,
+            ..choice(CoreId::new(), "chrome", 0)
+        };
+        let (editor, cx) = new_editor(cx, &[unread]);
+
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.cores[0].label()),
+            "chrome (version unknown)"
+        );
+        let note = editor.read_with(cx, |editor, _| editor.core_note());
+        assert!(note.contains("cannot be started"), "{note}");
+    }
+
+    #[gpui_kit::test]
+    fn an_edit_can_move_a_profile_to_another_core(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let original = profile();
+        let other = CoreId::new();
+        let cores = vec![
+            choice(original.core_id, "chrome 148", 148),
+            choice(other, "chrome 142", 142),
+        ];
+        let (editor, cx) = editor_full(cx, &original, &cores, &[]);
+
+        assert_eq!(
+            built_profile(cx, &editor).core_id,
+            original.core_id,
+            "an edit that does not touch the core keeps it"
+        );
+
+        click(cx, "editor-core-1");
+        let moved = built_profile(cx, &editor);
+        assert_eq!(
+            moved.core_id, other,
+            "picking another core moves the profile"
+        );
+        assert_eq!(moved.id, original.id, "it is still the same profile");
+    }
+
+    /// A profile whose core was removed keeps it, and the form says so.
+    #[gpui_kit::test]
+    fn a_missing_core_is_kept_and_named(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let gone = CoreId::new();
+        let mut original = profile();
+        original.core_id = gone;
+        let (editor, cx) = editor_full(cx, &original, &[], &[]);
+
+        assert_eq!(
+            built_profile(cx, &editor).core_id,
+            gone,
+            "the assignment survives even though the core is gone"
+        );
+        let note = editor.read_with(cx, |editor, _| editor.core_note());
+        assert!(note.contains("no longer registered"), "{note}");
+        assert!(
+            cx.update(|window, _| window.try_find("editor-core-missing").is_some()),
+            "the missing core is shown rather than silently replaced"
+        );
+    }
+
+    fn created(
+        editor: &Entity<ProfileEditor>,
+        cx: &mut VisualTestContext,
+    ) -> application::NewProfile {
+        match editor
+            .read_with(cx, |editor, cx| editor.build(cx))
+            .expect("a valid new form")
+        {
+            ProfileEdit::Create(draft) => draft,
+            ProfileEdit::Save(_) => panic!("this form saves a profile"),
+        }
     }
 
     fn click(cx: &mut VisualTestContext, id: &str) {

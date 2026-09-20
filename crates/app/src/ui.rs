@@ -5,7 +5,7 @@
 //! runtime façade contract requires.
 
 use crate::core_editor::CoreEditor;
-use crate::editor::ProfileEditor;
+use crate::editor::{ProfileEdit, ProfileEditor};
 use crate::open_dir::DirectoryOpener;
 use crate::proxy_editor::ProxyEditor;
 use crate::proxy_import::ProxyImport;
@@ -333,8 +333,24 @@ impl AppView {
             cx.notify();
             return;
         };
+        let cores = self.state.core_choices();
         let proxies = self.state.proxy_choices();
-        let editor = cx.new(|cx| ProfileEditor::new(&profile, &proxies, window, cx));
+        let editor = cx.new(|cx| ProfileEditor::new(&profile, &cores, &proxies, window, cx));
+        self.open_profile_form(editor, "Edit profile", "Save", window, cx);
+    }
+
+    /// Opens the form for a profile and wires its accept button.
+    ///
+    /// Creating and saving share one dialog because they share one form: what
+    /// the accepted form asks for is the editor's answer, not the dialog's.
+    fn open_profile_form(
+        &mut self,
+        editor: Entity<ProfileEditor>,
+        title: &'static str,
+        confirm: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.editor = Some(editor.clone());
         let view = cx.entity().downgrade();
         let accepted = editor.clone();
@@ -343,7 +359,7 @@ impl AppView {
             let view = view.clone();
             let accepted = accepted.clone();
             dialog
-                .title("Edit profile")
+                .title(title)
                 .w(px(760.0))
                 .child(editor.clone())
                 // `Dialog` renders its own footer, not `button_props`; the
@@ -353,15 +369,26 @@ impl AppView {
                         .child(
                             DialogClose::new().trigger(|button| button.label("Cancel").outline()),
                         )
-                        .child(DialogAction::new().child(Button::new("ok").label("Save"))),
+                        .child(DialogAction::new().child(Button::new("ok").label(confirm))),
                 )
                 .on_ok(move |_, _, cx| {
                     // Both ways of refusing end the same way: the dialog stays
                     // open and says why. A refusal from the service is shown in
                     // the form as well as the banner, because the form is where
                     // the mistake is.
-                    let saved: Result<(), String> = match editor.read(cx).build_profile(cx) {
-                        Ok(profile) => view
+                    let asked = editor.read(cx).build(cx);
+                    let saved: Result<(), String> = match asked {
+                        Ok(ProfileEdit::Create(draft)) => view
+                            .update(cx, |view, _| match view.state.create_profile_from(draft) {
+                                Ok(_) => Ok(()),
+                                Err(error) => {
+                                    let message = error.to_string();
+                                    view.state.push_notice(message.clone(), true);
+                                    Err(message)
+                                }
+                            })
+                            .unwrap_or_else(|_| Err("the window is gone".to_string())),
+                        Ok(ProfileEdit::Save(profile)) => view
                             .update(cx, |view, _| match view.state.update_profile(profile) {
                                 Ok(()) => {
                                     view.state.push_notice("Saved.", false);
@@ -374,7 +401,7 @@ impl AppView {
                                 }
                             })
                             .unwrap_or_else(|_| Err("the window is gone".to_string())),
-                        Err(error) => Err(error),
+                        Err(message) => Err(message),
                     };
                     match saved {
                         Ok(()) => {
@@ -876,10 +903,28 @@ impl AppView {
         cx.notify();
     }
 
-    fn on_new_profile(&mut self, cx: &mut Context<Self>) {
+    /// A new profile starts a form rather than a row.
+    ///
+    /// The row is written when the form is accepted, so a cancelled form leaves
+    /// nothing behind and the profile that appears is the one that was
+    /// configured - core included, because which engine runs a profile is what
+    /// decides the switches it may claim.
+    fn on_new_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cores = self.state.core_choices();
+        let Some(core) = cores.first().map(|choice| choice.id) else {
+            self.state.push_notice(
+                "no browser core is registered yet; add one on the Browser Cores page \
+                 before creating a profile",
+                true,
+            );
+            cx.notify();
+            return;
+        };
+        let proxies = self.state.proxy_choices();
         let name = self.state.next_profile_name();
-        let _ = self.state.create_profile(&name);
-        cx.notify();
+        let editor =
+            cx.new(|cx| ProfileEditor::new_profile(&name, core, &cores, &proxies, window, cx));
+        self.open_profile_form(editor, "New profile", "Create", window, cx);
     }
 
     fn on_start(&mut self, id: ProfileId, cx: &mut Context<Self>) {
@@ -1146,7 +1191,7 @@ fn profiles_header(cx: &mut Context<AppView>) -> Div {
             Button::new("new-profile")
                 .label("New Profile")
                 .primary()
-                .on_click(cx.listener(|this, _, _, cx| this.on_new_profile(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.on_new_profile(window, cx))),
         )
 }
 
@@ -2431,7 +2476,7 @@ mod tests {
     use crate::state::testing::{FakeRuntime, core};
     use crate::verifier::testing::FakeVerifier;
     use application::{DefaultProfileService, DefaultProxyService, ProxyService, RuntimeService};
-    use domain::CoreId;
+    use domain::{CoreId, ProfileId};
     use gpui_kit::component::Root;
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
@@ -2537,63 +2582,91 @@ mod tests {
         view_with_verifier(cx, Arc::new(FakeVerifier::passing()))
     }
 
+    /// A profile to work with, made without going through the form.
+    ///
+    /// Tests that are about something else should not have to drive the New
+    /// Profile dialog for a row; creating through the window has its own test.
+    fn seed_profile<C: gpui_kit::AppContext>(
+        cx: &mut C,
+        view: &gpui_kit::Entity<AppView>,
+    ) -> ProfileId {
+        view.update(cx, |view, cx| {
+            let id = view
+                .state_mut()
+                .create_profile("Profile 1")
+                .expect("seed a profile");
+            cx.notify();
+            id
+        })
+    }
+
     #[gpui_kit::test]
     fn profiles_can_be_created_started_and_stopped_from_the_window(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (view, runtime) = view(cx);
+        let cx = window(cx, &view);
 
-        let handle = cx.open_window(size(px(1200.), px(800.)), |window, cx| {
-            Root::new(view.clone(), window, cx)
+        assert!(
+            cx.update(|window, _| window.try_find("quit").is_some()),
+            "the header renders a quit affordance"
+        );
+        assert_eq!(view.read_with(cx, |view, _| view.state().rows().len()), 0);
+
+        let label = |cx: &mut gpui_kit::VisualTestContext, id: ProfileId| {
+            cx.update(|window, _| {
+                window
+                    .find(format!("state-{id}"))
+                    .label()
+                    .map(|label| label.to_string())
+            })
+        };
+
+        // New Profile opens the form: the row appears when the form is accepted,
+        // not when the button is clicked.
+        cx.update(|window, cx| window.click("new-profile", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("editor-name").is_some()),
+            "the New Profile button opens the form"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().rows().len()),
+            0,
+            "nothing is written while the form is still open"
+        );
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        let ids = view.read_with(cx, |view, _| {
+            view.state()
+                .rows()
+                .iter()
+                .map(|row| row.profile.id)
+                .collect::<Vec<_>>()
         });
+        assert_eq!(ids.len(), 2, "two profiles after two accepted forms");
 
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            assert!(
-                window.try_find("quit").is_some(),
-                "the header renders a quit affordance"
-            );
-            assert_eq!(view.read_with(cx, |view, _| view.state().rows().len()), 0);
+        let (first, second) = (ids[0], ids[1]);
+        assert_eq!(label(cx, first).as_deref(), Some("Stopped"));
+        assert_eq!(label(cx, second).as_deref(), Some("Stopped"));
 
-            window.click("new-profile", cx);
-            window.click("new-profile", cx);
+        cx.update(|window, cx| window.click(format!("start-{first}"), cx));
+        settle(cx);
+        assert_eq!(label(cx, first).as_deref(), Some("Running"));
+        assert_eq!(
+            label(cx, second).as_deref(),
+            Some("Stopped"),
+            "starting one profile leaves the other alone"
+        );
 
-            let ids = view.read_with(cx, |view, _| {
-                view.state()
-                    .rows()
-                    .iter()
-                    .map(|row| row.profile.id)
-                    .collect::<Vec<_>>()
-            });
-            assert_eq!(ids.len(), 2, "two profiles after two clicks");
-
-            let (first, second) = (ids[0], ids[1]);
-            assert_eq!(
-                window.find(format!("state-{first}")).label(),
-                Some("Stopped")
-            );
-            assert_eq!(
-                window.find(format!("state-{second}")).label(),
-                Some("Stopped")
-            );
-
-            window.click(format!("start-{first}"), cx);
-            assert_eq!(
-                window.find(format!("state-{first}")).label(),
-                Some("Running")
-            );
-            assert_eq!(
-                window.find(format!("state-{second}")).label(),
-                Some("Stopped"),
-                "starting one profile leaves the other alone"
-            );
-
-            window.click(format!("stop-{first}"), cx);
-            assert_eq!(
-                window.find(format!("state-{first}")).label(),
-                Some("Stopped")
-            );
-        })
-        .unwrap();
+        cx.update(|window, cx| window.click(format!("stop-{first}"), cx));
+        settle(cx);
+        assert_eq!(label(cx, first).as_deref(), Some("Stopped"));
 
         let commands = runtime.commands.lock().expect("command log").clone();
         assert_eq!(
@@ -2603,6 +2676,49 @@ mod tests {
         );
         assert!(commands[0].starts_with("start:"));
         assert!(commands[1].starts_with("stop:"));
+    }
+
+    /// A new profile is the one that was configured, on the core that was picked.
+    #[gpui_kit::test]
+    fn a_new_profile_is_created_from_the_form_with_the_core_it_was_given(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+        let seeded_core = view.read_with(cx, |view, _| {
+            view.state()
+                .core_rows()
+                .expect("rows")
+                .first()
+                .expect("the fixture seeds a core")
+                .core
+                .id
+        });
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("editor-core-0").is_some()),
+            "the form offers the core the profile will run on"
+        );
+
+        let editor = view.read_with(cx, |view, _| view.editor()).expect("a form");
+        let name = editor.read_with(cx, |editor, _| editor.name_input());
+        cx.update(|window, cx| {
+            name.update(cx, |state, cx| state.set_value("Shop account", window, cx));
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+
+        let row = view.read_with(cx, |view, _| view.state().rows()[0].clone());
+        assert_eq!(row.profile.name, "Shop account");
+        assert_eq!(
+            row.profile.core_id, seeded_core,
+            "the profile runs on the core the form was opened with"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("editor-name").is_none()),
+            "accepting the form closes it"
+        );
     }
 
     #[gpui_kit::test]
@@ -2616,8 +2732,7 @@ mod tests {
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("new-profile", cx);
-            let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+            let id = seed_profile(cx, &view);
 
             // The longest warning the compatibility layer produces.
             runtime.set_warning(
@@ -2696,8 +2811,7 @@ mod tests {
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("new-profile", cx);
-            let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+            let id = seed_profile(cx, &view);
 
             // A stopped profile has no browser to read.
             assert!(
@@ -2743,8 +2857,7 @@ mod tests {
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("new-profile", cx);
-            let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+            let id = seed_profile(cx, &view);
             window.click(format!("start-{id}"), cx);
             runtime.set_cdp_port(id, 9333);
             view.update(cx, |view, cx| {
@@ -2793,8 +2906,7 @@ mod tests {
 
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            window.click("new-profile", cx);
-            let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+            let id = seed_profile(cx, &view);
             window.click(format!("start-{id}"), cx);
             runtime.set_cdp_port(id, 9333);
             view.update(cx, |view, cx| {
@@ -3083,8 +3195,7 @@ mod tests {
         // A profile to assign it to.
         cx.update(|window, cx| window.click("nav-Profiles", cx));
         settle(cx);
-        cx.update(|window, cx| window.click("new-profile", cx));
-        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        let id = seed_profile(cx, &view);
         cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
         settle(cx);
 
@@ -3128,8 +3239,7 @@ mod tests {
 
         cx.update(|window, cx| window.click("nav-Profiles", cx));
         settle(cx);
-        cx.update(|window, cx| window.click("new-profile", cx));
-        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        let id = seed_profile(cx, &view);
         cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
         settle(cx);
         cx.update(|window, cx| window.click("editor-proxy-0", cx));
@@ -3307,7 +3417,7 @@ mod tests {
         let cx = window(cx, &view);
 
         // The fixture seeds one core; a profile is created against it.
-        cx.update(|window, cx| window.click("new-profile", cx));
+        seed_profile(cx, &view);
         settle(cx);
         cx.update(|window, cx| window.click("nav-Browser Cores", cx));
         settle(cx);
@@ -3498,7 +3608,7 @@ mod tests {
         let (view, _runtime) = view(cx);
         let cx = window(cx, &view);
 
-        cx.update(|window, cx| window.click("new-profile", cx));
+        seed_profile(cx, &view);
         flush_toasts(cx, &view);
 
         assert_eq!(
@@ -3579,7 +3689,7 @@ mod tests {
         let (view, _runtime) = view(cx);
         let cx = window(cx, &view);
 
-        cx.update(|window, cx| window.click("new-profile", cx));
+        seed_profile(cx, &view);
         cx.update(|window, cx| window.click("nav-Log", cx));
         settle(cx);
 
@@ -3610,8 +3720,7 @@ mod tests {
         let (view, runtime) = view(cx);
         let cx = window(cx, &view);
 
-        cx.update(|window, cx| window.click("new-profile", cx));
-        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        let id = seed_profile(cx, &view);
         // A launch line to show, and a line of this profile's own history.
         runtime.set_args(
             id,
@@ -3677,7 +3786,7 @@ mod tests {
         let (view, _runtime) = view(cx);
         let cx = window(cx, &view);
 
-        cx.update(|window, cx| window.click("new-profile", cx));
+        seed_profile(cx, &view);
         cx.update(|window, cx| window.click("nav-Log", cx));
         settle(cx);
         assert!(
@@ -3724,7 +3833,7 @@ mod tests {
         );
         let cx = window(cx, &view);
 
-        cx.update(|window, cx| window.click("new-profile", cx));
+        seed_profile(cx, &view);
         cx.update(|window, cx| window.click("nav-Log", cx));
         settle(cx);
 
@@ -3751,8 +3860,7 @@ mod tests {
             view_with_opener(cx, Arc::new(FakeVerifier::passing()), None, opener);
         let cx = window(cx, &view);
 
-        cx.update(|window, cx| window.click("new-profile", cx));
-        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        let id = seed_profile(cx, &view);
         let path = view.read_with(cx, |view, _| {
             view.state().profile(id).expect("the profile").user_data_dir
         });
@@ -3792,8 +3900,7 @@ mod tests {
             view_with_opener(cx, Arc::new(FakeVerifier::passing()), None, opener);
         let cx = window(cx, &view);
 
-        cx.update(|window, cx| window.click("new-profile", cx));
-        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        let id = seed_profile(cx, &view);
         cx.update(|window, cx| window.click(format!("open-dir-{id}"), cx));
         wait_for_state(cx, &view, |state| state.notice().is_some());
 
@@ -3821,8 +3928,7 @@ mod tests {
         let (view, _runtime) = view(cx);
         let cx = window(cx, &view);
 
-        cx.update(|window, cx| window.click("new-profile", cx));
-        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        let id = seed_profile(cx, &view);
 
         cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
         settle(cx);
@@ -3855,8 +3961,7 @@ mod tests {
         let (view, _runtime) = view(cx);
         let cx = window(cx, &view);
 
-        cx.update(|window, cx| window.click("new-profile", cx));
-        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        let id = seed_profile(cx, &view);
         let name_before = view.read_with(cx, |view, _| view.state().rows()[0].profile.name.clone());
 
         cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
@@ -3893,8 +3998,7 @@ mod tests {
         let (view, _runtime) = view(cx);
         let cx = window(cx, &view);
 
-        cx.update(|window, cx| window.click("new-profile", cx));
-        let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
+        let id = seed_profile(cx, &view);
 
         cx.update(|window, cx| window.click(format!("duplicate-{id}"), cx));
         settle(cx);

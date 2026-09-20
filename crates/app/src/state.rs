@@ -434,13 +434,59 @@ impl CoreRow {
     /// `None` for a core whose version was never read: there is no generation,
     /// which is exactly what the launch path refuses on.
     pub fn generation_label(&self) -> Option<String> {
-        self.core.capabilities().map(|capabilities| {
-            format!(
-                "{} · {}",
-                capabilities.generation_label(),
-                capabilities.exclusion_label()
-            )
-        })
+        generation_line(&self.core)
+    }
+}
+
+/// The generation line a core is shown with, in one place.
+///
+/// `None` when the version was never read: "unknown" is not a generation, and
+/// a core that has none cannot be launched with.
+fn generation_line(core: &BrowserCore) -> Option<String> {
+    core.capabilities().map(|capabilities| {
+        format!(
+            "{} · {}",
+            capabilities.generation_label(),
+            capabilities.exclusion_label()
+        )
+    })
+}
+
+/// One browser core the profile form can put a profile on.
+///
+/// The name, the major and the generation are read from the core that was
+/// detected rather than typed: which engine runs a profile decides which
+/// switches the engine may be asked to spoof, so the form shows what the binary
+/// answered instead of a version somebody remembered.
+#[derive(Clone)]
+pub struct CoreChoice {
+    pub id: CoreId,
+    pub name: String,
+    /// The detected major, or `0` when the version was never read.
+    pub major: u32,
+    /// The same generation line the Browser Cores page shows.
+    pub generation: Option<String>,
+    /// Whether this engine honours `--disable-spoofing` (measured: not before
+    /// major 144). The form says so rather than letting a checkbox be silently
+    /// ignored at launch.
+    pub exclusions_honoured: bool,
+}
+
+impl CoreChoice {
+    /// The chip label: the core's own name and the major it answered with.
+    ///
+    /// A core still called what the binary and its major suggest (the name the
+    /// Cores page generates) already carries the number, and repeating it would
+    /// put "chrome 148 (Chrome 148)" in the window.
+    pub fn label(&self) -> String {
+        let major = self.major.to_string();
+        if self.major == 0 {
+            format!("{} (version unknown)", self.name)
+        } else if self.name.contains(&major) {
+            self.name.clone()
+        } else {
+            format!("{} (Chrome {})", self.name, major)
+        }
     }
 }
 
@@ -1089,6 +1135,7 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    #[cfg(test)]
     fn default_core_id(&self) -> Result<CoreId, AppError> {
         self.cores
             .list()?
@@ -1102,9 +1149,40 @@ impl AppState {
             })
     }
 
+    /// The cores a profile can be put on, for the profile form.
+    ///
+    /// A core with no detected version is listed too: it is a real choice that
+    /// will be refused at launch, and hiding it would leave the user with a
+    /// form that cannot explain where their core went.
+    pub fn core_choices(&self) -> Vec<CoreChoice> {
+        self.cores
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|core| {
+                let capabilities = core.capabilities();
+                CoreChoice {
+                    generation: generation_line(&core),
+                    exclusions_honoured: capabilities
+                        .as_ref()
+                        .is_some_and(|capabilities| capabilities.supports_disable_spoofing),
+                    major: core.major,
+                    name: core.name,
+                    id: core.id,
+                }
+            })
+            .collect()
+    }
+
+    /// Creates a profile with the default fingerprint on the first core.
+    ///
+    /// The window's New Profile form goes through [`Self::create_profile_from`]
+    /// instead, so this is only the shortcut a caller without a form in front of
+    /// it uses - the acceptance harness that needs a working row, and the tests.
+    #[cfg(test)]
     pub fn create_profile(&mut self, name: &str) -> Result<ProfileId, AppError> {
         let core_id = self.core_id()?;
-        let draft = NewProfile {
+        self.create_profile_from(NewProfile {
             name: name.trim().to_string(),
             core_id,
             user_data_dir: None,
@@ -1112,8 +1190,16 @@ impl AppState {
             proxy_id: None,
             window: None,
             start_target: None,
-        };
+        })
+    }
 
+    /// Creates the profile a filled-in form asked for.
+    ///
+    /// The draft carries the whole profile the user configured, so nothing is
+    /// defaulted behind their back: the seed, the core and the fingerprint are
+    /// the ones on the form. Only what the form does not ask about (id, data
+    /// directory, start target) is left to the service.
+    pub fn create_profile_from(&mut self, draft: NewProfile) -> Result<ProfileId, AppError> {
         let profile = self.record(self.profiles.create(draft))?;
         let id = profile.id;
         self.load()?;
@@ -1293,6 +1379,7 @@ impl AppState {
         })
     }
 
+    #[cfg(test)]
     fn core_id(&mut self) -> Result<CoreId, AppError> {
         let resolved = self.default_core_id();
         self.record(resolved)
