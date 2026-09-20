@@ -10,6 +10,7 @@
 //! model, and the view hands that to [`crate::state::AppState`], which refuses
 //! it through the same rules a typed proxy goes through.
 
+use crate::theme::palette;
 use domain::{ProxyOutbound, parse_proxy_uri};
 use gpui_kit::component::form::*;
 use gpui_kit::component::input::*;
@@ -65,7 +66,8 @@ impl ProxyImport {
 }
 
 impl Render for ProxyImport {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         let mut form = Form::new()
             .label_layout(Axis::Horizontal)
             .label_width(px(LABEL_WIDTH))
@@ -88,9 +90,9 @@ impl Render for ProxyImport {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x2a1a1a))
+                    .bg(rgb(p.danger_bg))
                     .text_xs()
-                    .text_color(rgb(0xfca5a5))
+                    .text_color(rgb(p.danger))
                     // One line per clause: gpui does not wrap a single line, and
                     // a refusal that runs off the edge is a refusal half read.
                     .children(

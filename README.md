@@ -50,6 +50,10 @@ this repository does not bundle or fork them.
   reports how many bytes it wrote.
 - Configure data/Xray paths for the next start; Settings shows effective values,
   their sources and any environment overrides.
+- Choose the window's appearance: **Dark**, the palette the program has always
+  painted, or **Light**. The window repaints as soon as the choice is made - it is
+  the one setting that does not wait for the next start - and the choice is kept
+  in the config file.
 
 ## Proxy testing
 

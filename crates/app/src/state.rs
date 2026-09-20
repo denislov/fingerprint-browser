@@ -9,6 +9,7 @@ use crate::browser_data::BrowserDataJob;
 use crate::log_file::LogFile;
 use crate::proxy_tester::ProxyTestJob;
 use crate::settings::{SettingKey, SettingRow, Settings};
+use crate::theme::ThemeChoice;
 use crate::verifier::{EgressJob, VerificationJob, VerificationReport};
 use application::{
     AppError, BrowserDataReport, CoreService, Counts, Credentials, DeleteMode, Direction,
@@ -1272,6 +1273,30 @@ impl AppState {
     /// do not both aim at the same file.
     pub fn export_default_path(&self) -> PathBuf {
         crate::paths::default_export_file(self.settings.data_dir(), SystemTime::now())
+    }
+
+    /// The appearance the window is shown in.
+    pub fn theme(&self) -> ThemeChoice {
+        self.settings.theme()
+    }
+
+    /// Stores the chosen appearance.
+    ///
+    /// The one setting whose effect is immediate, so the caller repaints rather
+    /// than waiting for a restart. It is still a setting, so a config file that
+    /// cannot be written refuses the change instead of accepting a choice that
+    /// would be gone by the next start - and the caller must therefore switch
+    /// only after this returns `Ok`, not before.
+    pub fn set_theme(&mut self, choice: ThemeChoice) -> Result<(), AppError> {
+        let result = self.settings.set_theme(choice).map_err(AppError::Conflict);
+        match &result {
+            Ok(()) => self.set_notice(Notice::info(format!(
+                "Now showing the {} theme.",
+                choice.label().to_lowercase()
+            ))),
+            Err(error) => self.set_notice(Notice::error(error.to_string())),
+        }
+        result
     }
 
     /// The export path field's contents. Empty means the default.
@@ -3355,6 +3380,31 @@ mod tests {
                 .value,
             "/srv/fp",
             "the page shows what the next start will use"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The appearance is stored and reported. It is read back out of the state
+    /// rather than only out of the file, because the state is what the window
+    /// paints from: a change that reached the file alone would leave the window
+    /// showing one thing while the file said another.
+    #[test]
+    fn choosing_an_appearance_stores_it_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("fp-app-theme-{}", CoreId::new()));
+        let config = dir.join("config.json");
+        let mut fixture = fixture_with_config(&config);
+        assert_eq!(fixture.state.theme(), ThemeChoice::Dark, "the default");
+
+        fixture.state.set_theme(ThemeChoice::Light).expect("save");
+
+        assert_eq!(fixture.state.theme(), ThemeChoice::Light);
+        let stored = std::fs::read_to_string(&config).expect("the config file was written");
+        assert!(stored.contains("\"light\""), "{stored}");
+        let toast = fixture.state.toasts().last().expect("a toast saying so");
+        assert!(toast.message.contains("light theme"), "{}", toast.message);
+        assert!(
+            fixture.state.notice().is_none(),
+            "choosing an appearance is not a problem, so the banner stays clear"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -16,6 +16,7 @@ use crate::state::{
     AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Page, ProfileRow, ProxyRow,
     ProxyTest, Toast, ToastKind, Verification,
 };
+use crate::theme::{Palette, ThemeChoice, palette};
 use crate::verifier::{FingerprintVerifier, VerificationReport};
 use application::{BrowserDataReport, Direction, RestoreMode};
 use crossbeam_channel::{Receiver, Sender};
@@ -28,19 +29,13 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::{Notification, NotificationType};
+use gpui_kit::component::theme::Theme;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use runtime::{Diagnosis, Fault, RuntimeEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-
-const BG: u32 = 0x18181b;
-const PANEL: u32 = 0x1f1f23;
-const BORDER: u32 = 0x27272a;
-const TEXT: u32 = 0xf4f4f5;
-const MUTED: u32 = 0x71717a;
-const DIM: u32 = 0x52525b;
 
 /// How often the window drains runtime notifications and reconciles snapshots.
 const TICK: Duration = Duration::from_millis(200);
@@ -594,11 +589,28 @@ impl AppView {
         cx.notify();
     }
 
+    /// Switches the window's palette, and remembers the choice.
+    ///
+    /// The component theme is changed *after* the choice is stored, not before:
+    /// a config file that cannot be written refuses the change, and repainting a
+    /// window into a mode that will not survive a restart would be the window
+    /// claiming something the file does not hold. The refusal is in the banner.
+    ///
+    /// One `Theme::change` moves both layers, because the window reads its own
+    /// colours back out of the component theme - see [`crate::theme`].
+    fn on_choose_theme(&mut self, choice: ThemeChoice, cx: &mut Context<Self>) {
+        if self.state.set_theme(choice).is_ok() {
+            Theme::change(choice.mode(), None, cx);
+        }
+        cx.notify();
+    }
+
     /// Asks for a new value for one editable setting.
     ///
     /// The dialog says when the value takes effect, because a setting that
     /// looks live and is not is the thing this page exists to avoid.
     fn on_edit_setting(&mut self, key: SettingKey, window: &mut Window, cx: &mut Context<Self>) {
+        let p = palette(cx);
         let row = self
             .state
             .setting_rows()
@@ -635,7 +647,7 @@ impl AppView {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(format!("Now: {now}")),
                         )
                         .child(
@@ -649,7 +661,7 @@ impl AppView {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x71717a))
+                                .text_color(rgb(p.muted))
                                 .child(key_help(key)),
                         ),
                 )
@@ -1362,6 +1374,7 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         // The overlay layers live above the view and are rendered by the view
         // itself: without these, a dialog can be opened and never appear.
         let dialogs = Root::render_dialog_layer(window, cx);
@@ -1403,8 +1416,8 @@ impl Render for AppView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(p.bg))
+            .text_color(rgb(p.text))
             .child(header(cx))
             .child(
                 div()
@@ -1443,8 +1456,8 @@ impl Render for AppView {
                             .child(match page {
                                 Page::Proxies => proxies_header(cx),
                                 Page::Cores => cores_header(cx),
-                                Page::Log => logs_header(log_filter, &log_status, cx),
-                                Page::Settings => settings_header(),
+                                Page::Log => logs_header(log_filter, &log_status, cx, p),
+                                Page::Settings => settings_header(p),
                                 Page::Profiles => profiles_header(
                                     &ProfilesHeader {
                                         search: filter_input.clone(),
@@ -1463,7 +1476,7 @@ impl Render for AppView {
                                 this.child(cores_body(&core_rows, cx))
                             })
                             .when(page == Page::Log, |this| {
-                                this.child(logs_body(&log_rows, log_count, log_filter, cx))
+                                this.child(logs_body(&log_rows, log_count, log_filter, cx, p))
                             })
                             .when(page == Page::Settings, |this| {
                                 this.child(settings_body(
@@ -1477,8 +1490,10 @@ impl Render for AppView {
                                         import: import_input.clone(),
                                         restore: restore_input.clone(),
                                         browser_data: browser_data_input.clone(),
+                                        theme: self.state.theme(),
                                     },
                                     cx,
+                                    p,
                                 ))
                             })
                             .when(page == Page::Profiles, |this| {
@@ -1497,12 +1512,14 @@ impl Render for AppView {
                                             has_core,
                                             &filter,
                                             cx,
+                                            p,
                                         ))
                                         .child(profile_list(
                                             &visible,
                                             selected_id,
                                             &verifications,
                                             cx,
+                                            p,
                                         )),
                                 )
                                 .child(details_panel(
@@ -1511,6 +1528,7 @@ impl Render for AppView {
                                     details_tab,
                                     &log_tail,
                                     cx,
+                                    p,
                                 ))
                             })
                     }),
@@ -1522,6 +1540,7 @@ impl Render for AppView {
 }
 
 fn header(cx: &mut Context<AppView>) -> Div {
+    let p = palette(cx);
     div()
         .flex()
         .items_center()
@@ -1529,7 +1548,7 @@ fn header(cx: &mut Context<AppView>) -> Div {
         .px_6()
         .py_4()
         .border_b_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(p.border))
         .child(
             div()
                 .text_lg()
@@ -1544,7 +1563,7 @@ fn header(cx: &mut Context<AppView>) -> Div {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(DIM))
+                        .text_color(rgb(p.dim))
                         .child("Rust + GPUI Kit + Fingerprint-Chromium"),
                 )
                 .child(
@@ -1565,6 +1584,7 @@ const PAGES: [Page; 5] = [
 ];
 
 fn sidebar(page: Page, cx: &mut Context<AppView>) -> Div {
+    let p = palette(cx);
     div()
         .flex()
         .flex_col()
@@ -1572,7 +1592,7 @@ fn sidebar(page: Page, cx: &mut Context<AppView>) -> Div {
         .w(px(220.0))
         .flex_shrink_0()
         .border_r_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(p.border))
         .p_4()
         .children(PAGES.map(|candidate| {
             let active = candidate == page;
@@ -1589,12 +1609,12 @@ fn sidebar(page: Page, cx: &mut Context<AppView>) -> Div {
                 .rounded_md()
                 .text_sm()
                 .when(active, |this| {
-                    this.bg(rgb(BORDER)).font_weight(FontWeight::MEDIUM)
+                    this.bg(rgb(p.border)).font_weight(FontWeight::MEDIUM)
                 })
                 .when(!active && candidate.is_ready(), |this| {
-                    this.text_color(rgb(MUTED)).cursor_pointer()
+                    this.text_color(rgb(p.muted)).cursor_pointer()
                 })
-                .when(!candidate.is_ready(), |this| this.text_color(rgb(0x52525b)))
+                .when(!candidate.is_ready(), |this| this.text_color(rgb(p.dim)))
                 .child(label)
                 .when(candidate.is_ready(), |this| {
                     this.on_click(cx.listener(move |this, _, _, cx| this.on_page(candidate, cx)))
@@ -1617,6 +1637,7 @@ struct ProfilesHeader {
 }
 
 fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>) -> Div {
+    let p = palette(cx);
     // While a filter is on, the count is the useful sentence: it is how the user
     // finds out that the list is not the whole list. Without one, the header
     // goes back to explaining what a profile is. The accessible name spells out
@@ -1666,7 +1687,7 @@ fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>) -> Div {
                                 .test_support()
                                 .aria_label(announcement)
                                 .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(subtitle),
                         ),
                 )
@@ -1690,6 +1711,7 @@ fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>) -> Div {
 }
 
 fn proxies_header(cx: &mut Context<AppView>) -> Div {
+    let p = palette(cx);
     div()
         .flex()
         .items_center()
@@ -1708,7 +1730,7 @@ fn proxies_header(cx: &mut Context<AppView>) -> Div {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(p.muted))
                         .child("Assign a proxy to a profile to route its traffic through it."),
                 ),
         )
@@ -1740,6 +1762,7 @@ fn proxies_body(
     tests: &std::collections::HashMap<ProxyId, ProxyTest>,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
+    let p = palette(cx);
     div()
         .id("proxies-scroll")
         .flex()
@@ -1754,9 +1777,9 @@ fn proxies_body(
                     .px_4()
                     .py_3()
                     .rounded_md()
-                    .bg(rgb(PANEL))
+                    .bg(rgb(p.panel))
                     .text_sm()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child(
                         "No proxies yet. A profile with no proxy goes direct from this machine.",
                     ),
@@ -1778,7 +1801,7 @@ fn proxies_body(
                 .py_3()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(p.border))
                 .child(
                     div()
                         .flex()
@@ -1790,14 +1813,19 @@ fn proxies_body(
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(row.proxy.name.clone()),
                         )
-                        .child(div().text_xs().text_color(rgb(MUTED)).child(row.endpoint()))
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(if row.is_used() { 0x86efac } else { 0x71717a }))
+                                .text_color(rgb(p.muted))
+                                .child(row.endpoint()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(if row.is_used() { p.success } else { p.muted }))
                                 .child(row.usage_label()),
                         )
-                        .children(proxy_test_reading(test, id)),
+                        .children(proxy_test_reading(test, id, p)),
                 )
                 .child(
                     div()
@@ -1838,13 +1866,13 @@ fn proxies_body(
 /// The row says which engine was probed, because "this proxy works" and "this
 /// profile's traffic is going through it" are different claims and only the
 /// second one is about a leak.
-fn proxy_test_reading(test: Option<&ProxyTest>, id: ProxyId) -> Option<AnyElement> {
+fn proxy_test_reading(test: Option<&ProxyTest>, id: ProxyId, p: Palette) -> Option<AnyElement> {
     let test = test?;
     let colour = match test {
-        ProxyTest::Running => DIM,
-        ProxyTest::Passed(reading) if reading.live => 0x86efac,
-        ProxyTest::Passed(_) => 0x7dd3fc,
-        ProxyTest::Failed(_) => 0xfca5a5,
+        ProxyTest::Running => p.dim,
+        ProxyTest::Passed(reading) if reading.live => p.success,
+        ProxyTest::Passed(_) => p.info,
+        ProxyTest::Failed(_) => p.danger,
     };
     let text = match test {
         ProxyTest::Running => test.label(),
@@ -1873,6 +1901,7 @@ fn proxy_test_reading(test: Option<&ProxyTest>, id: ProxyId) -> Option<AnyElemen
 }
 
 fn cores_header(cx: &mut Context<AppView>) -> Div {
+    let p = palette(cx);
     div()
         .flex()
         .items_center()
@@ -1888,7 +1917,7 @@ fn cores_header(cx: &mut Context<AppView>) -> Div {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("Browser Cores"),
                 )
-                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                .child(div().text_xs().text_color(rgb(p.muted)).child(
                     "Each core is a fingerprint-chromium binary; its detected version decides which switches a profile may claim.",
                 )),
         )
@@ -1901,6 +1930,7 @@ fn cores_header(cx: &mut Context<AppView>) -> Div {
 }
 
 fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
+    let p = palette(cx);
     div()
         .id("cores-scroll")
         .flex()
@@ -1915,9 +1945,9 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                     .px_4()
                     .py_3()
                     .rounded_md()
-                    .bg(rgb(PANEL))
+                    .bg(rgb(p.panel))
                     .text_sm()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child(
                         "No browser core yet. Add a fingerprint-chromium binary to launch profiles with it.",
                     ),
@@ -1938,7 +1968,7 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                 .py_3()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(p.border))
                 .child(
                     div()
                         .flex()
@@ -1959,7 +1989,7 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                                     this.child(
                                         div()
                                             .text_xs()
-                                            .text_color(rgb(0xfca5a5))
+                                            .text_color(rgb(p.danger))
                                             .child("executable missing"),
                                     )
                                 }),
@@ -1967,16 +1997,16 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(format!("{} · major {}", row.core.version, row.core.major)),
                         )
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(rgb(match row.generation_label() {
-                                    Some(label) if label.contains("honoured") => 0x86efac,
-                                    Some(_) => 0xfbbf24,
-                                    None => 0xfca5a5,
+                                    Some(label) if label.contains("honoured") => p.success,
+                                    Some(_) => p.warning,
+                                    None => p.danger,
                                 }))
                                 .child(row.generation_label().unwrap_or_else(|| {
                                     "no detected version: no switches can be claimed".to_string()
@@ -1985,13 +2015,13 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>) -> impl IntoElement {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x71717a))
+                                .text_color(rgb(p.muted))
                                 .child(row.core.executable.to_string_lossy().to_string()),
                         )
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(if row.is_used() { 0x86efac } else { 0x71717a }))
+                                .text_color(rgb(if row.is_used() { p.success } else { p.muted }))
                                 .child(row.usage_label()),
                         ),
                 )
@@ -2045,7 +2075,7 @@ fn key_help(key: SettingKey) -> String {
     }
 }
 
-fn settings_header() -> Div {
+fn settings_header(p: Palette) -> Div {
     div()
         .flex()
         .flex_col()
@@ -2056,7 +2086,7 @@ fn settings_header() -> Div {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("Settings"),
         )
-        .child(div().text_xs().text_color(rgb(MUTED)).child(
+        .child(div().text_xs().text_color(rgb(p.muted)).child(
             "The value in force and where it came from. An environment variable wins over the config file, and the row says so.",
         ))
 }
@@ -2085,17 +2115,20 @@ struct SettingsCards {
     import: Entity<InputState>,
     restore: Entity<InputState>,
     browser_data: Entity<InputState>,
+    theme: ThemeChoice,
 }
 
 fn settings_body(
     rows: &[crate::settings::SettingRow],
     cards: SettingsCards,
     cx: &mut Context<AppView>,
+    p: Palette,
 ) -> impl IntoElement {
     // Built first, with their lifetimes erased: each card borrows the context
     // and the chain below borrows it again for its own listeners, and an
     // opaque return type would keep the first borrow alive to the end of the
     // chain.
+    let appearance: AnyElement = appearance_card(cards.theme, cx).into_any_element();
     let export_card: AnyElement = export_card(&cards.export, cx).into_any_element();
     let import_card: AnyElement = import_card(&cards.import, cx).into_any_element();
     let restore_card: AnyElement = restore_card(&cards.restore, cx).into_any_element();
@@ -2125,7 +2158,7 @@ fn settings_body(
                 .py_3()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(p.border))
                 .child(
                     div()
                         .flex()
@@ -2148,9 +2181,9 @@ fn settings_body(
                                         .text_xs()
                                         .text_color(rgb(
                                             if row.source == crate::settings::Source::Environment {
-                                                0xfbbf24
+                                                p.warning
                                             } else {
-                                                0x71717a
+                                                p.muted
                                             },
                                         ))
                                         .child(row.source_label()),
@@ -2159,18 +2192,18 @@ fn settings_body(
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0xd4d4d8))
+                                .text_color(rgb(p.text_soft))
                                 .child(row.value.clone()),
                         )
                         .children(
                             row.shadowed_label().map(|label| {
-                                div().text_xs().text_color(rgb(0xfbbf24)).child(label)
+                                div().text_xs().text_color(rgb(p.warning)).child(label)
                             }),
                         )
                         .children(
                             row.note
                                 .clone()
-                                .map(|note| div().text_xs().text_color(rgb(0x71717a)).child(note)),
+                                .map(|note| div().text_xs().text_color(rgb(p.muted)).child(note)),
                         ),
                 )
                 .child(
@@ -2181,7 +2214,7 @@ fn settings_body(
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(rgb(0x71717a))
+                                .text_color(rgb(p.muted))
                                 .child(row.key.effect()),
                         )
                         .when(editable, |this| {
@@ -2196,10 +2229,80 @@ fn settings_body(
                         }),
                 )
         }))
+        .child(appearance)
         .child(export_card)
         .child(import_card)
         .child(restore_card)
         .child(browser_data_card)
+}
+
+/// The appearance card, first on the page.
+///
+/// It leads because it is the one setting that changes what the reader is
+/// looking at rather than what the program will do next, and because it is the
+/// one whose effect is immediate: every other card here describes a future start.
+///
+/// The control is a pair of chips rather than a toggle, so both options are
+/// visible at once. A toggle hides the alternative behind the label of the thing
+/// you are not currently looking at, which is the one thing the reader cannot
+/// check against the window in front of them.
+fn appearance_card(choice: ThemeChoice, cx: &mut Context<AppView>) -> impl IntoElement {
+    let p = palette(cx);
+    div()
+        .id("appearance")
+        .test_support()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .px_4()
+        .py_4()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(p.border))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Appearance"),
+                )
+                .child(div().text_xs().text_color(rgb(p.muted)).child(
+                    "The window repaints as soon as you choose, and the choice is kept for the next start.",
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .children(ThemeChoice::ALL.into_iter().map(|option| {
+                    let active = option == choice;
+                    div()
+                        .id(format!("theme-{}", option.code()))
+                        .test_support()
+                        .px_3()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(if active { p.dim } else { p.border }))
+                        .text_xs()
+                        .when(active, |this| {
+                            this.bg(rgb(p.border))
+                                .text_color(rgb(p.text))
+                                .font_weight(FontWeight::MEDIUM)
+                        })
+                        .when(!active, |this| this.text_color(rgb(p.muted)))
+                        .aria_label(format!("{} theme", option.label()))
+                        .child(option.label())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.on_choose_theme(option, cx)
+                        }))
+                })),
+        )
 }
 
 /// The export card at the foot of the Settings page.
@@ -2210,6 +2313,7 @@ fn settings_body(
 /// way to run this. The field starts empty, and the line under it names the file
 /// an empty field would write, so the default is shown rather than described.
 fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoElement {
+    let p = palette(cx);
     let view = cx.entity().downgrade();
     div()
         .id("export-configuration")
@@ -2221,7 +2325,7 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
         .py_4()
         .rounded_md()
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(p.border))
         .child(
             div()
                 .flex()
@@ -2233,7 +2337,7 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
                         .font_weight(FontWeight::MEDIUM)
                         .child("Export configuration"),
                 )
-                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                .child(div().text_xs().text_color(rgb(p.muted)).child(
                     "Writes cores, proxies and profiles to a JSON file, for another machine or for keeping. Browser data is not included: it is far larger, and a copy belongs beside the profile it came from.",
                 )),
         )
@@ -2258,7 +2362,7 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(DIM))
+                .text_color(rgb(p.dim))
                 .child(format!("Empty writes {}", export.destination.display())),
         )
         .child(
@@ -2281,12 +2385,12 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(p.muted))
                         .child("Left off, the passwords are dropped and the rest of each proxy is kept."),
                 ),
         )
         .child(
-            div().text_xs().text_color(rgb(0xfbbf24)).child(
+            div().text_xs().text_color(rgb(p.warning)).child(
                 "A file that includes credentials holds them in plain text. Do not send it to anyone casually.",
             ),
         )
@@ -2299,6 +2403,7 @@ fn export_card(export: &SettingsExport, cx: &mut Context<AppView>) -> impl IntoE
 /// program can keep on its own - it is what the rules do - but it is the
 /// sentence a reader needs before they type a path and press the button.
 fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl IntoElement {
+    let p = palette(cx);
     div()
         .id("import-configuration")
         .test_support()
@@ -2309,7 +2414,7 @@ fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl In
         .py_4()
         .rounded_md()
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(p.border))
         .child(
             div()
                 .flex()
@@ -2321,7 +2426,7 @@ fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl In
                         .font_weight(FontWeight::MEDIUM)
                         .child("Import configuration"),
                 )
-                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                .child(div().text_xs().text_color(rgb(p.muted)).child(
                     "Reads a backup written by the export above. Nothing already here is overwritten: identifiers that exist are kept as they are, a profile whose core is not here is skipped, and the report says which was which.",
                 )),
         )
@@ -2344,7 +2449,7 @@ fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl In
                 ),
         )
         .child(
-            div().text_xs().text_color(rgb(DIM)).child(
+            div().text_xs().text_color(rgb(p.dim)).child(
                 "Nothing is confirmed first: import only adds, so undoing one is deleting the rows it named.",
             ),
         )
@@ -2358,6 +2463,7 @@ fn import_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl In
 /// and only when there is something to replace, so the card states the rule
 /// rather than describing a dialog.
 fn restore_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl IntoElement {
+    let p = palette(cx);
     div()
         .id("restore-configuration")
         .test_support()
@@ -2368,7 +2474,7 @@ fn restore_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl I
         .py_4()
         .rounded_md()
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(p.border))
         .child(
             div()
                 .flex()
@@ -2380,7 +2486,7 @@ fn restore_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl I
                         .font_weight(FontWeight::MEDIUM)
                         .child("Restore configuration"),
                 )
-                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                .child(div().text_xs().text_color(rgb(p.muted)).child(
                     "Makes this installation be the file's configuration, replacing what is here. An empty installation is restored at once; a populated one asks before replacing anything.",
                 )),
         )
@@ -2405,7 +2511,7 @@ fn restore_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl I
                 ),
         )
         .child(
-            div().text_xs().text_color(rgb(DIM)).child(
+            div().text_xs().text_color(rgb(p.dim)).child(
                 "This replaces the configuration, not the sessions: a profile keeps its browser data on disk.",
             ),
         )
@@ -2418,6 +2524,7 @@ fn restore_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl I
 /// buttons, because a copy out writes to a place and a copy back in reads from
 /// the same one.
 fn browser_data_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> impl IntoElement {
+    let p = palette(cx);
     div()
         .id("browser-data")
         .test_support()
@@ -2428,7 +2535,7 @@ fn browser_data_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> i
         .py_4()
         .rounded_md()
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(p.border))
         .child(
             div()
                 .flex()
@@ -2440,7 +2547,7 @@ fn browser_data_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> i
                         .font_weight(FontWeight::MEDIUM)
                         .child("Browser data"),
                 )
-                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                .child(div().text_xs().text_color(rgb(p.muted)).child(
                     "Copies each profile's cookies, storage and sessions to a directory of your own, or back from one. Only stopped profiles are copied: a running browser is still writing.",
                 )),
         )
@@ -2473,7 +2580,7 @@ fn browser_data_card(input: &Entity<InputState>, cx: &mut Context<AppView>) -> i
                 ),
         )
         .child(
-            div().text_xs().text_color(rgb(DIM)).child(
+            div().text_xs().text_color(rgb(p.dim)).child(
                 "The directory holds one subdirectory per profile, named after its identifier, so it lines up with the configuration.",
             ),
         )
@@ -2483,6 +2590,7 @@ fn logs_header(
     filter: LogFilter,
     status: &Result<String, String>,
     cx: &mut Context<AppView>,
+    p: Palette,
 ) -> Div {
     div()
         .flex()
@@ -2496,7 +2604,7 @@ fn logs_header(
                 .gap_1()
                 .min_w_0()
                 .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Log"))
-                .child(div().text_xs().text_color(rgb(MUTED)).child(
+                .child(div().text_xs().text_color(rgb(p.muted)).child(
                     "What this window has done and seen: starts, stops, warnings, errors and reads, newest first.",
                 ))
                 .child(match status {
@@ -2505,14 +2613,14 @@ fn logs_header(
                         .test_support()
                         .aria_label(format!("Also written to {path}"))
                         .text_xs()
-                        .text_color(rgb(DIM))
+                        .text_color(rgb(p.dim))
                         .child(format!("Also written to {path}")),
                     Err(error) => div()
                         .id("log-file-status")
                         .test_support()
                         .aria_label(format!("Not written to a file: {error}"))
                         .text_xs()
-                        .text_color(rgb(0xfca5a5))
+                        .text_color(rgb(p.danger))
                         .child(format!("Not written to a file: {error}")),
                 }),
         )
@@ -2557,6 +2665,7 @@ fn logs_body(
     total: usize,
     filter: LogFilter,
     _cx: &mut Context<AppView>,
+    p: Palette,
 ) -> impl IntoElement {
     div()
         .id("logs-scroll")
@@ -2582,9 +2691,9 @@ fn logs_body(
                     .px_4()
                     .py_3()
                     .rounded_md()
-                    .bg(rgb(PANEL))
+                    .bg(rgb(p.panel))
                     .text_sm()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child(message),
             )
         })
@@ -2601,14 +2710,14 @@ fn logs_body(
                 .py_2()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(p.border))
                 .child(
                     div()
                         .w(px(64.0))
                         .flex_shrink_0()
                         .text_xs()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(log_level_color(row.level)))
+                        .text_color(rgb(log_level_color(row.level, p)))
                         .child(row.level.label()),
                 )
                 .child(
@@ -2616,7 +2725,7 @@ fn logs_body(
                         .w(px(56.0))
                         .flex_shrink_0()
                         .text_xs()
-                        .text_color(rgb(DIM))
+                        .text_color(rgb(p.dim))
                         .child(format_age(row.at)),
                 )
                 .child(
@@ -2625,7 +2734,7 @@ fn logs_body(
                         .flex_shrink_0()
                         .truncate()
                         .text_xs()
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(p.muted))
                         .child(row.who.clone()),
                 )
                 .child(
@@ -2633,17 +2742,17 @@ fn logs_body(
                         .flex_1()
                         .min_w_0()
                         .text_xs()
-                        .text_color(rgb(0xd4d4d8))
+                        .text_color(rgb(p.text_soft))
                         .child(row.message.clone()),
                 )
         }))
 }
 
-fn log_level_color(level: LogLevel) -> u32 {
+fn log_level_color(level: LogLevel, p: Palette) -> u32 {
     match level {
-        LogLevel::Info => MUTED,
-        LogLevel::Warning => 0xfbbf24,
-        LogLevel::Error => 0xf87171,
+        LogLevel::Info => p.muted,
+        LogLevel::Warning => p.warning,
+        LogLevel::Error => p.danger_strong,
     }
 }
 
@@ -2679,10 +2788,11 @@ fn push_toasts(toasts: &[Toast], window: &mut Window, cx: &mut App) {
 }
 
 fn notice_banner(notice: crate::state::Notice, cx: &mut Context<AppView>) -> Div {
+    let p = palette(cx);
     let (background, foreground) = if notice.error {
-        (0x2a1a1a, 0xfca5a5)
+        (p.danger_bg, p.danger)
     } else {
-        (PANEL, 0xa1a1aa)
+        (p.panel, p.secondary)
     };
 
     div()
@@ -2714,6 +2824,7 @@ fn empty_hint(
     has_core: bool,
     filter: &str,
     cx: &mut Context<AppView>,
+    p: Palette,
 ) -> Option<Div> {
     // Two kinds of empty look the same in a list and mean different things:
     // there are no profiles, or a filter is hiding the ones there are. Only the
@@ -2741,13 +2852,13 @@ fn empty_hint(
             .p_4()
             .rounded_md()
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(PANEL))
+            .border_color(rgb(p.border))
+            .bg(rgb(p.panel))
             .flex()
             .items_center()
             .justify_between()
             .gap_4()
-            .child(div().text_xs().text_color(rgb(MUTED)).child(message))
+            .child(div().text_xs().text_color(rgb(p.muted)).child(message))
             .when(filtering, |this| {
                 this.child(
                     Button::new("clear-filter").label("Clear filter").on_click(
@@ -2763,6 +2874,7 @@ fn profile_list(
     selected_id: Option<ProfileId>,
     verifications: &std::collections::HashMap<ProfileId, Verification>,
     cx: &mut Context<AppView>,
+    p: Palette,
 ) -> Div {
     div()
         .flex()
@@ -2783,8 +2895,8 @@ fn profile_list(
                 .py_3()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(if is_selected { DIM } else { BORDER }))
-                .bg(rgb(if is_selected { BORDER } else { PANEL }))
+                .border_color(rgb(if is_selected { p.dim } else { p.border }))
+                .bg(rgb(if is_selected { p.border } else { p.panel }))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.on_select(id, cx)))
                 .child(
@@ -2798,13 +2910,18 @@ fn profile_list(
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(row.profile.name.clone()),
                         )
-                        .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
+                        .child(div().text_xs().text_color(rgb(p.muted)).child(format!(
                             "seed {} · {} · {}",
                             row.profile.fingerprint.seed,
                             row.profile.fingerprint.brand,
                             row.profile.fingerprint.platform,
                         )))
-                        .child(div().text_xs().text_color(rgb(DIM)).child(route_label(row))),
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(p.dim))
+                                .child(route_label(row)),
+                        ),
                 )
                 .child(
                     div()
@@ -2817,8 +2934,8 @@ fn profile_list(
                                 .flex_col()
                                 .items_end()
                                 .gap_1()
-                                .child(state_badge(row))
-                                .children(verification_badge(verifications.get(&id)))
+                                .child(state_badge(row, p))
+                                .children(verification_badge(verifications.get(&id), p))
                                 .children(row.last_warning().map(|warning| {
                                     // The full text lives in Runtime Details; the row
                                     // only needs to say that something is off.
@@ -2828,13 +2945,13 @@ fn profile_list(
                                         .max_w(px(WARNING_WIDTH))
                                         .truncate()
                                         .text_xs()
-                                        .text_color(rgb(0xfbbf24))
+                                        .text_color(rgb(p.warning))
                                         .child(format!("warning: {warning}"))
                                 }))
                                 .children(row.last_error().map(|error| {
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0xf87171))
+                                        .text_color(rgb(p.danger_strong))
                                         .child(error.to_string())
                                 })),
                         )
@@ -2880,12 +2997,14 @@ fn route_label(row: &ProfileRow) -> String {
     }
 }
 
-fn state_badge(row: &ProfileRow) -> impl IntoElement {
+fn state_badge(row: &ProfileRow, p: Palette) -> impl IntoElement {
     let (background, foreground) = match row.state() {
-        RuntimeState::Running => (0x14351f, 0x4ade80),
-        RuntimeState::Starting | RuntimeState::Stopping => (0x3a2f12, 0xfbbf24),
-        RuntimeState::Stopped => (BORDER, 0xa1a1aa),
-        RuntimeState::Failed { .. } | RuntimeState::Crashed { .. } => (0x3a1717, 0xf87171),
+        RuntimeState::Running => (p.success_bg, p.success_strong),
+        RuntimeState::Starting | RuntimeState::Stopping => (p.warning_bg, p.warning),
+        RuntimeState::Stopped => (p.border, p.secondary),
+        RuntimeState::Failed { .. } | RuntimeState::Crashed { .. } => {
+            (p.danger_bg_soft, p.danger_strong)
+        }
     };
 
     div()
@@ -2909,13 +3028,14 @@ fn details_panel(
     tab: DetailsTab,
     log_tail: &[LogRow],
     cx: &mut Context<AppView>,
+    p: Palette,
 ) -> Div {
     // The three views are different element types once an id makes them
     // stateful, so the panel erases them before choosing one.
     let body: AnyElement = match selected {
         None => div()
             .text_xs()
-            .text_color(rgb(MUTED))
+            .text_color(rgb(p.muted))
             .child("Select a profile to inspect its runtime.")
             .into_any_element(),
         Some(row) => {
@@ -2956,7 +3076,7 @@ fn details_panel(
                 ("Started", elapsed(row)),
                 ("Dropped events", row.dropped_events().to_string()),
             ] {
-                grid = grid.child(key_value(label, value));
+                grid = grid.child(key_value(label, value, p));
             }
 
             let details = div()
@@ -2964,17 +3084,17 @@ fn details_panel(
                 .flex_col()
                 .gap_3()
                 .child(grid)
-                .child(verification_block(verification))
+                .child(verification_block(verification, p))
                 .children(row.last_warning().map(|warning| {
                     div()
                         .text_xs()
-                        .text_color(rgb(0xfbbf24))
+                        .text_color(rgb(p.warning))
                         .child(format!("warning: {warning}"))
                 }))
                 .children(row.last_error().map(|error| {
                     div()
                         .text_xs()
-                        .text_color(rgb(0xf87171))
+                        .text_color(rgb(p.danger_strong))
                         .child(format!("error: {error}"))
                 }));
 
@@ -2988,9 +3108,9 @@ fn details_panel(
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(effective_args(row))
+                    .child(effective_args(row, p))
                     .into_any_element(),
-                DetailsTab::Log => panel_log(log_tail).into_any_element(),
+                DetailsTab::Log => panel_log(log_tail, p).into_any_element(),
             }
         }
     };
@@ -3003,8 +3123,8 @@ fn details_panel(
         .p_4()
         .rounded_md()
         .border_1()
-        .border_color(rgb(BORDER))
-        .bg(rgb(PANEL))
+        .border_color(rgb(p.border))
+        .bg(rgb(p.panel))
         .child(
             div()
                 .flex()
@@ -3148,13 +3268,13 @@ fn details_panel(
 }
 
 /// The tail of one profile's activity log, for the panel's Log view.
-fn panel_log(rows: &[LogRow]) -> impl IntoElement {
+fn panel_log(rows: &[LogRow], p: Palette) -> impl IntoElement {
     if rows.is_empty() {
         return div()
             .id("panel-log-body")
             .test_support()
             .text_xs()
-            .text_color(rgb(DIM))
+            .text_color(rgb(p.dim))
             .child(
                 "Nothing logged for this profile yet. The Log page has the whole session, \
                  including window-level lines.",
@@ -3170,7 +3290,7 @@ fn panel_log(rows: &[LogRow]) -> impl IntoElement {
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(MUTED))
+                .text_color(rgb(p.muted))
                 .child(format!("This profile, newest first ({})", rows.len())),
         )
         .children(rows.iter().enumerate().map(|(index, row)| {
@@ -3185,21 +3305,21 @@ fn panel_log(rows: &[LogRow]) -> impl IntoElement {
                     div()
                         .w(px(56.0))
                         .flex_shrink_0()
-                        .text_color(rgb(log_level_color(row.level)))
+                        .text_color(rgb(log_level_color(row.level, p)))
                         .child(row.level.label()),
                 )
                 .child(
                     div()
                         .w(px(48.0))
                         .flex_shrink_0()
-                        .text_color(rgb(DIM))
+                        .text_color(rgb(p.dim))
                         .child(format_age(row.at)),
                 )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_color(rgb(0xd4d4d8))
+                        .text_color(rgb(p.text_soft))
                         .child(row.message.clone()),
                 )
         }))
@@ -3219,9 +3339,9 @@ fn can_verify(selected: Option<&ProfileRow>, verification: Option<&Verification>
 }
 
 /// The verification result for one profile, or a hint that it has not run.
-fn verification_block(verification: Option<Verification>) -> Div {
+fn verification_block(verification: Option<Verification>, p: Palette) -> Div {
     let Some(verification) = verification else {
-        return div().text_xs().text_color(rgb(DIM)).child(
+        return div().text_xs().text_color(rgb(p.dim)).child(
             "Fingerprint not verified in this session. Verification reads the \
                  running browser in its own tab and compares it with the profile.",
         );
@@ -3229,23 +3349,23 @@ fn verification_block(verification: Option<Verification>) -> Div {
     if verification.is_running() {
         return div()
             .text_xs()
-            .text_color(rgb(MUTED))
+            .text_color(rgb(p.muted))
             .child("Reading the fingerprint out of the running browser...");
     }
     if let Some(reason) = verification.failure() {
         return div()
             .text_xs()
-            .text_color(rgb(0xf87171))
+            .text_color(rgb(p.danger_strong))
             .child(format!("Could not read the fingerprint: {reason}"));
     }
     let found = verification.disagreements();
     let headline = if found.is_empty() {
         div()
             .text_xs()
-            .text_color(rgb(0x4ade80))
+            .text_color(rgb(p.success_strong))
             .child("Confirmed: every claim this profile makes was read back from the browser.")
     } else {
-        div().text_xs().text_color(rgb(0xfbbf24)).child(format!(
+        div().text_xs().text_color(rgb(p.warning)).child(format!(
             "{} claim(s) the browser did not reproduce:",
             found.len()
         ))
@@ -3259,9 +3379,9 @@ fn verification_block(verification: Option<Verification>) -> Div {
         && let Some(label) = report.exit_label()
     {
         let colour = if report.exit_ip.is_some() {
-            0x7dd3fc
+            p.info
         } else {
-            DIM
+            p.dim
         };
         block = block.child(
             div()
@@ -3282,7 +3402,7 @@ fn verification_block(verification: Option<Verification>) -> Div {
             .id(("disagreement", index))
             .test_support()
             .text_xs()
-            .text_color(rgb(0xfbbf24))
+            .text_color(rgb(p.warning))
             .child(format!(
                 "  {}: expected {}, observed {}",
                 discrepancy.claim, discrepancy.expected, discrepancy.observed
@@ -3292,13 +3412,13 @@ fn verification_block(verification: Option<Verification>) -> Div {
 
 /// A compact marker for the row: the user should not have to select a profile
 /// to know whether its fingerprint was confirmed.
-fn verification_badge(verification: Option<&Verification>) -> Option<impl IntoElement> {
+fn verification_badge(verification: Option<&Verification>, p: Palette) -> Option<impl IntoElement> {
     let verification = verification?;
     let (background, foreground) = match verification {
-        Verification::Confirmed(_) => (0x14351f, 0x4ade80),
-        Verification::Running => (BORDER, 0xa1a1aa),
-        Verification::Disagreements(_) => (0x3a2f12, 0xfbbf24),
-        Verification::Unreadable(_) => (0x3a1717, 0xf87171),
+        Verification::Confirmed(_) => (p.success_bg, p.success_strong),
+        Verification::Running => (p.border, p.secondary),
+        Verification::Disagreements(_) => (p.warning_bg, p.warning),
+        Verification::Unreadable(_) => (p.danger_bg_soft, p.danger_strong),
     };
     Some(
         div()
@@ -3313,12 +3433,12 @@ fn verification_badge(verification: Option<&Verification>) -> Option<impl IntoEl
     )
 }
 
-fn effective_args(row: &ProfileRow) -> Div {
+fn effective_args(row: &ProfileRow, p: Palette) -> Div {
     let args = row.effective_args();
     if args.is_empty() {
         return div()
             .text_xs()
-            .text_color(rgb(DIM))
+            .text_color(rgb(p.dim))
             .child("No launch recorded yet.");
     }
 
@@ -3329,7 +3449,7 @@ fn effective_args(row: &ProfileRow) -> Div {
         .child(
             div()
                 .text_xs()
-                .text_color(rgb(MUTED))
+                .text_color(rgb(p.muted))
                 .child(format!("Effective args ({})", args.len())),
         )
         .child(
@@ -3339,14 +3459,14 @@ fn effective_args(row: &ProfileRow) -> Div {
                 .gap_1()
                 .p_2()
                 .rounded_md()
-                .bg(rgb(BG))
+                .bg(rgb(p.bg))
                 .text_xs()
-                .text_color(rgb(0xa1a1aa))
+                .text_color(rgb(p.secondary))
                 .children(args.iter().map(|arg| div().child(arg.clone()))),
         )
 }
 
-fn key_value(label: &str, value: String) -> Div {
+fn key_value(label: &str, value: String, p: Palette) -> Div {
     div()
         .flex()
         .gap_2()
@@ -3355,10 +3475,10 @@ fn key_value(label: &str, value: String) -> Div {
             div()
                 .w(px(96.0))
                 .flex_shrink_0()
-                .text_color(rgb(MUTED))
+                .text_color(rgb(p.muted))
                 .child(label.to_string()),
         )
-        .child(div().text_color(rgb(0xd4d4d8)).child(value))
+        .child(div().text_color(rgb(p.text_soft)).child(value))
 }
 
 fn optional<T: ToString>(value: Option<T>) -> String {
@@ -3387,12 +3507,14 @@ mod tests {
     use crate::state::AppState;
     use crate::state::Verification;
     use crate::state::testing::{FakeRuntime, core};
+    use crate::theme::{Palette, ThemeChoice, palette};
     use crate::verifier::testing::FakeVerifier;
     use application::Direction;
     use application::{DefaultProfileService, DefaultProxyService, ProxyService, RuntimeService};
     use domain::{CoreId, ProfileId, ProxyId};
     use gpui_kit::component::Root;
     use gpui_kit::component::WindowExt as _;
+    use gpui_kit::component::theme::Theme;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext, px, size};
     use runtime::{Diagnosis, Discrepancy, Fault, FaultClass, RuntimeEvent};
@@ -4869,6 +4991,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Choosing an appearance repaints the window at once and stores the choice.
+    ///
+    /// This is the one setting on the page whose effect is now rather than at the
+    /// next start, so it has to be shown to be now: the assertion is on the
+    /// palette in force, not on the stored value, and on the file as well,
+    /// because a repaint that is forgotten by the next start is the failure the
+    /// two halves of the test exist to separate.
+    #[gpui_kit::test]
+    fn choosing_an_appearance_repaints_and_is_remembered(cx: &mut TestAppContext) {
+        // The component theme is process-wide; see `crate::theme::testing`.
+        let _exclusive = crate::theme::testing::exclusive();
+        cx.update(gpui_kit::init);
+        let dir = std::env::temp_dir().join(format!("fp-ui-theme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let config = dir.join("config.json");
+        let (view, _runtime) = view_with_config(cx, &config);
+        let cx = window(cx, &view);
+
+        // Named rather than assumed: the library's own default is not this
+        // program's default, so the starting point is set to what the window
+        // would be showing at boot.
+        cx.update(|_, cx| Theme::change(ThemeChoice::Dark.mode(), None, cx));
+        cx.update(|_, cx| assert_eq!(palette(cx), Palette::DARK, "the starting palette"));
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("theme-light").is_some()),
+            "the appearance card is on the page"
+        );
+
+        cx.update(|window, cx| window.click("theme-light", cx));
+        settle(cx);
+
+        cx.update(|_, cx| assert_eq!(palette(cx), Palette::LIGHT, "the window repainted"));
+        let stored = std::fs::read_to_string(&config).expect("the config file was written");
+        assert!(stored.contains("\"light\""), "{stored}");
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.state().theme(), ThemeChoice::Light);
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Show whatever the state has queued, the way the tick does.
     fn flush_toasts(cx: &mut gpui_kit::VisualTestContext, view: &gpui_kit::Entity<AppView>) {
         cx.update(|window, cx| {
@@ -5491,6 +5656,9 @@ mod tests {
 
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
+        // The export card is the second card on the page, below the fold of the
+        // test window.
+        scroll_settings_to_the_cards(cx);
         // The field exists only after the page has been rendered, which is where
         // an `InputState` gets the window it needs.
         type_export_path(cx, &view, path.to_string_lossy().as_ref());
@@ -5552,17 +5720,20 @@ mod tests {
         settle(cx);
     }
 
-    /// Brings the import card into view.
+    /// Brings the Settings page's cards into view.
     ///
-    /// The Settings page scrolls and the import card sits under the export
-    /// one, below the fold of the test window; a click on an off-screen
-    /// element is refused. The wheel event is dispatched over the export card
-    /// (the scrolling container is not a leaf the helpers can aim at) and
-    /// bubbles up to the page that scrolls.
-    fn scroll_settings_to_the_import_card(cx: &mut gpui_kit::VisualTestContext) {
+    /// The page scrolls and its cards sit below the fold of the test window; a
+    /// click on an off-screen element is refused. The wheel event is dispatched
+    /// over the first setting row, which is the one element guaranteed to be on
+    /// screen whatever the page holds above or below it (the scrolling container
+    /// is not a leaf the helpers can aim at, so the event is aimed at a child and
+    /// bubbles up). Aiming it at a card instead is what made this fragile: adding
+    /// a card above that one moved the aim point off screen and the scroll simply
+    /// failed, which reads as a broken card rather than a broken helper.
+    fn scroll_settings_to_the_cards(cx: &mut gpui_kit::VisualTestContext) {
         cx.update(|window, cx| {
             window.scroll(
-                "export-run",
+                "setting-data-dir",
                 gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
                     gpui_kit::px(0.),
                     gpui_kit::px(-4000.),
@@ -5607,7 +5778,7 @@ mod tests {
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
         type_import_path(cx, &view, path.to_string_lossy().as_ref());
-        scroll_settings_to_the_import_card(cx);
+        scroll_settings_to_the_cards(cx);
         cx.update(|window, cx| window.click("import-run", cx));
         settle(cx);
 
@@ -5632,7 +5803,7 @@ mod tests {
 
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
-        scroll_settings_to_the_import_card(cx);
+        scroll_settings_to_the_cards(cx);
         cx.update(|window, cx| window.click("import-run", cx));
         settle(cx);
 
@@ -5673,7 +5844,7 @@ mod tests {
         settle(cx);
         // The restore card sits below the import one; the same downward scroll
         // brings it into view.
-        scroll_settings_to_the_import_card(cx);
+        scroll_settings_to_the_cards(cx);
         cx.update(|window, cx| window.click("restore-run", cx));
         settle(cx);
 
@@ -5716,7 +5887,7 @@ mod tests {
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
         type_restore_path(cx, &view, path.to_string_lossy().as_ref());
-        scroll_settings_to_the_import_card(cx);
+        scroll_settings_to_the_cards(cx);
         cx.update(|window, cx| window.click("restore-run", cx));
         settle(cx);
 
@@ -5792,7 +5963,7 @@ mod tests {
         });
         settle(cx);
 
-        scroll_settings_to_the_import_card(cx);
+        scroll_settings_to_the_cards(cx);
         cx.update(|window, cx| window.click("browser-data-out", cx));
         wait_for_state(cx, &view, |state| {
             state
@@ -5826,7 +5997,7 @@ mod tests {
 
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
-        scroll_settings_to_the_import_card(cx);
+        scroll_settings_to_the_cards(cx);
         cx.update(|window, cx| window.click("browser-data-out", cx));
         settle(cx);
 

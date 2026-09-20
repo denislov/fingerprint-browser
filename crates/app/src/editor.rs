@@ -14,6 +14,7 @@
 //! fields that a cancelled form would leave behind.
 
 use crate::state::CoreChoice;
+use crate::theme::{Palette, palette};
 use application::NewProfile;
 use domain::{
     BrowserBrand, BrowserProfile, CoreId, FingerprintProfile, Platform, ProfileId, ProxyId,
@@ -411,6 +412,7 @@ fn proxy_row(
     editor: Entity<ProfileEditor>,
     selected: Option<ProxyId>,
     options: &[(ProxyId, String)],
+    p: Palette,
 ) -> Div {
     let missing = selected.filter(|id| !options.iter().any(|(candidate, _)| candidate == id));
 
@@ -425,6 +427,7 @@ fn proxy_row(
             "Direct".to_string(),
             selected.is_none(),
             None,
+            p,
         ))
         .children(options.iter().enumerate().map(|(index, (id, name))| {
             let (chip_id, label) = proxy_chip(index, name);
@@ -434,6 +437,7 @@ fn proxy_row(
                 label,
                 selected == Some(*id),
                 Some(*id),
+                p,
             )
         }))
         .children(missing.map(|id| {
@@ -443,6 +447,7 @@ fn proxy_row(
                 format!("(missing proxy {id})"),
                 true,
                 Some(id),
+                p,
             )
         }))
 }
@@ -458,6 +463,7 @@ fn chip<T: std::marker::Copy + PartialEq + 'static>(
     active: bool,
     value: Option<T>,
     apply: fn(&mut ProfileEditor, Option<T>),
+    p: Palette,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -466,14 +472,14 @@ fn chip<T: std::marker::Copy + PartialEq + 'static>(
         .py_1()
         .rounded_md()
         .border_1()
-        .border_color(rgb(if active { 0x52525b } else { 0x27272a }))
+        .border_color(rgb(if active { p.dim } else { p.border }))
         .text_xs()
         .when(active, |this| {
-            this.bg(rgb(0x27272a))
-                .text_color(rgb(0xf4f4f5))
+            this.bg(rgb(p.border))
+                .text_color(rgb(p.text))
                 .font_weight(FontWeight::MEDIUM)
         })
-        .when(!active, |this| this.text_color(rgb(0x71717a)))
+        .when(!active, |this| this.text_color(rgb(p.muted)))
         .child(label)
         .on_click(move |_, _, cx| {
             editor.update(cx, |editor, cx| {
@@ -489,10 +495,17 @@ fn proxy_choice(
     label: String,
     active: bool,
     value: Option<ProxyId>,
+    p: Palette,
 ) -> impl IntoElement {
-    chip(editor, id, label, active, value, |editor, value| {
-        editor.proxy = value
-    })
+    chip(
+        editor,
+        id,
+        label,
+        active,
+        value,
+        |editor, value| editor.proxy = value,
+        p,
+    )
 }
 
 /// The browser cores, as chips.
@@ -500,7 +513,12 @@ fn proxy_choice(
 /// There is no "none" here, unlike the proxy row: a profile without a core has
 /// nothing to launch. A profile whose core was removed keeps it and shows it as
 /// missing, so it cannot silently read as a profile on a core nobody chose.
-fn core_row(editor: Entity<ProfileEditor>, selected: CoreId, options: &[CoreChoice]) -> Div {
+fn core_row(
+    editor: Entity<ProfileEditor>,
+    selected: CoreId,
+    options: &[CoreChoice],
+    p: Palette,
+) -> Div {
     let missing = (!options.iter().any(|choice| choice.id == selected)).then_some(selected);
     div()
         .flex()
@@ -514,6 +532,7 @@ fn core_row(editor: Entity<ProfileEditor>, selected: CoreId, options: &[CoreChoi
                 choice.label(),
                 selected == choice.id,
                 Some(choice.id),
+                p,
             )
         }))
         .children(missing.map(|id| {
@@ -523,6 +542,7 @@ fn core_row(editor: Entity<ProfileEditor>, selected: CoreId, options: &[CoreChoi
                 format!("(missing core {id})"),
                 true,
                 Some(id),
+                p,
             )
         }))
 }
@@ -533,12 +553,21 @@ fn core_choice(
     label: String,
     active: bool,
     value: Option<CoreId>,
+    p: Palette,
 ) -> impl IntoElement {
-    chip(editor, id, label, active, value, |editor, value| {
-        if let Some(id) = value {
-            editor.core = id;
-        }
-    })
+    chip(
+        editor,
+        id,
+        label,
+        active,
+        value,
+        |editor, value| {
+            if let Some(id) = value {
+                editor.core = id;
+            }
+        },
+        p,
+    )
 }
 
 /// A seed that is very unlikely to repeat, from the clock.
@@ -560,6 +589,7 @@ fn choice_row<T: std::marker::Copy + PartialEq + 'static>(
     options: &[(T, &'static str)],
     selected: T,
     apply: fn(&mut ProfileEditor, T),
+    p: Palette,
 ) -> Div {
     div()
         .flex()
@@ -576,14 +606,14 @@ fn choice_row<T: std::marker::Copy + PartialEq + 'static>(
                 .py_1()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(if active { 0x52525b } else { 0x27272a }))
+                .border_color(rgb(if active { p.dim } else { p.border }))
                 .text_xs()
                 .when(active, |this| {
-                    this.bg(rgb(0x27272a))
-                        .text_color(rgb(0xf4f4f5))
+                    this.bg(rgb(p.border))
+                        .text_color(rgb(p.text))
                         .font_weight(FontWeight::MEDIUM)
                 })
-                .when(!active, |this| this.text_color(rgb(0x71717a)))
+                .when(!active, |this| this.text_color(rgb(p.muted)))
                 .child(*label)
                 .on_click(move |_, _, cx| {
                     editor.update(cx, |editor, cx| {
@@ -596,6 +626,7 @@ fn choice_row<T: std::marker::Copy + PartialEq + 'static>(
 
 impl Render for ProfileEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         let editor = cx.entity();
         let core_note = self.core_note();
         let mut form = Form::new()
@@ -612,7 +643,7 @@ impl Render for ProfileEditor {
                 Field::new()
                     .label("Browser core")
                     .description(core_note)
-                    .child(core_row(editor.clone(), self.core, &self.cores)),
+                    .child(core_row(editor.clone(), self.core, &self.cores, p)),
             )
             .child(
                 Field::new()
@@ -650,6 +681,7 @@ impl Render for ProfileEditor {
                 &BRANDS,
                 self.brand,
                 |editor, value| editor.brand = value,
+                p,
             )))
             .child(
                 Field::new()
@@ -669,6 +701,7 @@ impl Render for ProfileEditor {
                 &PLATFORMS,
                 self.platform,
                 |editor, value| editor.platform = value,
+                p,
             )))
             .child(
                 Field::new().label("Platform version").child(
@@ -724,7 +757,7 @@ impl Render for ProfileEditor {
                                     .aria_label("Window width"),
                             ),
                         )
-                        .child(div().text_xs().text_color(rgb(0x71717a)).child("x"))
+                        .child(div().text_xs().text_color(rgb(p.muted)).child("x"))
                         .child(
                             div().w(px(90.0)).child(
                                 Input::new(&self.window_height)
@@ -740,7 +773,7 @@ impl Render for ProfileEditor {
                     .description(
                         "Chosen when the profile starts. A change applies to the next start.",
                     )
-                    .child(proxy_row(editor.clone(), self.proxy, &self.proxies)),
+                    .child(proxy_row(editor.clone(), self.proxy, &self.proxies, p)),
             )
             .child(Field::new().label("WebRTC").child(choice_row(
                 editor.clone(),
@@ -748,6 +781,7 @@ impl Render for ProfileEditor {
                 &WEBRTC_POLICIES,
                 self.webrtc_policy,
                 |editor, value| editor.webrtc_policy = value,
+                p,
             )))
             .child(
                 Field::new()
@@ -778,7 +812,7 @@ impl Render for ProfileEditor {
                     .id("editor-error")
                     .test_support()
                     .text_xs()
-                    .text_color(rgb(0xf87171))
+                    .text_color(rgb(p.danger_strong))
                     // One line per clause: gpui does not wrap a single line, and
                     // a refusal that runs off the edge is a refusal half read.
                     .children(

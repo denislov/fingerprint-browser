@@ -10,6 +10,7 @@
 //! [`ProxyProfile`] through [`ProxyEditor::build_outbound`], hands it to
 //! [`crate::state::AppState`], and shows the refusal without closing.
 
+use crate::theme::{Palette, palette};
 use domain::{HttpOutbound, ProxyOutbound, ProxyProfile, Socks5Outbound, validate_proxy};
 use gpui_kit::component::form::*;
 use gpui_kit::component::input::*;
@@ -215,7 +216,7 @@ impl ProxyKind {
 }
 
 /// One of the two protocols this form fills in, as a chip.
-fn kind_row(editor: Entity<ProxyEditor>, selected: ProxyKind) -> Div {
+fn kind_row(editor: Entity<ProxyEditor>, selected: ProxyKind, p: Palette) -> Div {
     div()
         .flex()
         .flex_wrap()
@@ -231,14 +232,14 @@ fn kind_row(editor: Entity<ProxyEditor>, selected: ProxyKind) -> Div {
                 .py_1()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(if active { 0x52525b } else { 0x27272a }))
+                .border_color(rgb(if active { p.dim } else { p.border }))
                 .text_xs()
                 .when(active, |this| {
-                    this.bg(rgb(0x27272a))
-                        .text_color(rgb(0xf4f4f5))
+                    this.bg(rgb(p.border))
+                        .text_color(rgb(p.text))
                         .font_weight(FontWeight::MEDIUM)
                 })
-                .when(!active, |this| this.text_color(rgb(0x71717a)))
+                .when(!active, |this| this.text_color(rgb(p.muted)))
                 .child(*label)
                 .on_click(move |_, window, cx| {
                     editor.update(cx, |editor, cx| {
@@ -253,13 +254,13 @@ fn kind_row(editor: Entity<ProxyEditor>, selected: ProxyKind) -> Div {
 ///
 /// Split into short lines on purpose: the dialog is 640px wide, and a longer
 /// sentence is clipped at the edge instead of wrapping.
-fn unbuildable_note() -> Div {
+fn unbuildable_note(p: Palette) -> Div {
     div()
         .flex()
         .flex_col()
         .gap_1()
         .text_xs()
-        .text_color(rgb(0x71717a))
+        .text_color(rgb(p.muted))
         .child(format!(
             "{} are not filled in here:",
             ProxyKind::BY_LINK.join(", ")
@@ -270,6 +271,7 @@ fn unbuildable_note() -> Div {
 
 impl Render for ProxyEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         let editor = cx.entity();
 
         let mut form = Form::new()
@@ -288,8 +290,8 @@ impl Render for ProxyEditor {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(kind_row(editor.clone(), self.kind))
-                        .child(unbuildable_note()),
+                        .child(kind_row(editor.clone(), self.kind, p))
+                        .child(unbuildable_note(p)),
                 ),
             )
             .child(
@@ -335,9 +337,9 @@ impl Render for ProxyEditor {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x2a1a1a))
+                    .bg(rgb(p.danger_bg))
                     .text_xs()
-                    .text_color(rgb(0xfca5a5))
+                    .text_color(rgb(p.danger))
                     // One line per clause: gpui does not wrap a single line, and
                     // a refusal that runs off the edge is a refusal half read.
                     .children(

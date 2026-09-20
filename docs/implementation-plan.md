@@ -14,7 +14,7 @@ statements there are not current TODOs.
 | Xray | Per-profile process, six outbound builders, transport/TLS settings, fail-closed cleanup |
 | Proxy diagnostics | One real request per test: exit address or a classified fault, through a temporary engine or one already running |
 | Fingerprints | Version/capability checks, warnings, live read-back; Linux 142/144/148 measured; the read-back also reports the address a running browser's own traffic leaves from |
-| Desktop UI | Profile forms, core/proxy management, link import, proxy tests, settings, runtime details, logs and a profile-list filter |
+| Desktop UI | Profile forms, core/proxy management, link import, proxy tests, settings, runtime details, logs, a profile-list filter and a dark/light appearance switch |
 | Windows lifecycle | Atomic job assignment, kill-on-close containment, native identity, recovery with retained failure records |
 | Backup | Configuration export, import and restore are in, from the Settings page, along with the browser-data copy for stopped profiles - see below |
 | Validation | Linux/Windows CI configuration, native process tests, opt-in real Windows Chromium/Xray acceptance |
@@ -97,6 +97,49 @@ the one this project exists to prevent. So verification asks the browser too.
 
 Not established, and deliberately not claimed: that a page the user opened
 takes the same path; this reads one document, in one tab, once.
+
+## Appearance
+
+Two palettes and the switch between them, on the Settings page.
+
+- **The component theme is the single source of truth for which mode is in
+  force.** `crates/app/src/theme.rs` holds `ThemeChoice` (stored as `dark` or
+  `light`, unknown names falling back to dark so a file from a later build still
+  starts) and `Palette`, two sets of semantic colours. The window paints its own
+  chrome, and the component library themes its own widgets; if the two were
+  switched separately a button's outline would vanish into the card behind it. So
+  `Theme::change` moves both, and `palette(cx)` reads the mode back out of the
+  component theme rather than from a second switch. The two layers cannot
+  disagree, because there is only one of them.
+- The refactor that made this possible was mechanical but wide: the six module
+  constants and the scattered hex literals in `crates/app/src/ui.rs` - 96 call
+  sites - became `Palette` fields. A helper with a context does
+  `let p = palette(cx);`; a helper without one takes `p: Palette` by value, which
+  is why every render path still says which palette it is painting with. The
+  dialog forms (`editor.rs`, `proxy_editor.rs`, `core_editor.rs`,
+  `proxy_import.rs`) went the same way.
+- The card is **first on the Settings page**, and the control is a pair of chips
+  rather than a toggle: a toggle hides the other option behind the label of the
+  mode you are not currently looking at, which is the one thing the reader cannot
+  check against the window in front of them.
+- **It is the one setting whose effect is now.** Every other card on the page
+  describes what the next start will do; this one repaints immediately. It is
+  still a setting, so it is written **before** the theme changes: a config file
+  that cannot be written refuses the switch rather than showing a mode that would
+  be gone by the next start.
+- The component theme is process-wide, so the two tests that assert on it take a
+  shared lock (`theme::testing::exclusive`). Without it they would each observe
+  the other's palette and fail on a race rather than on a mistake - which is a
+  gate that fails for reasons unrelated to the code.
+- "Chosen for contrast" is **checked, not asserted**. `both_palettes_have_readable_contrast`
+  computes WCAG 2.1 ratios for every text-on-background pair, and every status
+  colour twice: on the window and on the tinted background it is paired with in a
+  badge. The light palette failed this on the first run - three status colours
+  read at 3:1 or just under as text - which is exactly the kind of thing an eye
+  cannot reliably catch and a test can.
+
+The window boots into the stored choice, applied before the first frame, so it is
+never painted in one palette and then corrected.
 
 ## Profile filter
 

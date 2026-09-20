@@ -19,6 +19,7 @@
 //! a typo cannot cost the user the settings it still holds.
 
 use crate::paths;
+use crate::theme::ThemeChoice;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -177,6 +178,9 @@ struct Stored {
     data_dir: Option<String>,
     xray_executable: Option<String>,
     echo_url: Option<String>,
+    /// The chosen appearance, as a name. Absent means the default, which is why
+    /// a config file written before the switch existed still reads.
+    theme: Option<String>,
 }
 
 /// The environment, read once so a test can supply its own.
@@ -241,6 +245,7 @@ pub struct Settings {
     data_dir: PathBuf,
     xray_executable: PathBuf,
     echo_url: String,
+    theme: ThemeChoice,
 }
 
 impl Settings {
@@ -274,6 +279,9 @@ impl Settings {
             .unwrap_or_else(default_xray);
 
         let echo_url = resolve_echo_url(&stored, &env);
+        // No environment override: the appearance is a standing choice about
+        // what the user is looking at, not about what this process does.
+        let theme = ThemeChoice::from_code(stored.theme.as_deref().unwrap_or(""));
 
         let notice = config_error.as_ref().map(|error| {
             (
@@ -290,6 +298,7 @@ impl Settings {
             data_dir,
             xray_executable,
             echo_url,
+            theme,
         };
         (settings, notice)
     }
@@ -306,6 +315,31 @@ impl Settings {
     /// from: that is the whole point of asking it.
     pub fn echo_url(&self) -> &str {
         &self.echo_url
+    }
+
+    /// The appearance the window is shown in.
+    pub fn theme(&self) -> ThemeChoice {
+        self.theme
+    }
+
+    /// Stores the chosen appearance.
+    ///
+    /// Refused while the config file is unreadable, like the path settings and
+    /// for the same reason: saving rewrites the whole file, so a broken one
+    /// would lose the values it still holds in exchange for a colour.
+    pub fn set_theme(&mut self, choice: ThemeChoice) -> Result<(), String> {
+        if let Some(error) = &self.config_error {
+            return Err(format!(
+                "{} cannot be written while the config file is unreadable: {error}",
+                self.config_path.display()
+            ));
+        }
+        let mut stored = self.stored.clone();
+        stored.theme = Some(choice.code().to_string());
+        write_config(&self.config_path, &stored)?;
+        self.stored = stored;
+        self.theme = choice;
+        Ok(())
     }
 
     pub fn runtime_dir(&self) -> PathBuf {
@@ -835,6 +869,44 @@ mod tests {
         assert_eq!(reloaded.data_dir(), Path::new("/srv/fp"));
         assert_eq!(reloaded.xray_executable(), Path::new("/opt/xray"));
         assert_eq!(reloaded.echo_url(), "http://echo.example/ip");
+    }
+
+    /// The appearance survives a restart, and a config file written before the
+    /// switch existed still starts - on the palette the program has always
+    /// painted, not on the component library's default.
+    #[test]
+    fn the_appearance_is_stored_and_an_absent_one_means_dark() {
+        let config = TempConfig::new("theme");
+        config.write(r#"{"data_dir": "/srv/fp"}"#);
+        let (mut settings, _) = Settings::load(env(&config));
+        assert_eq!(settings.theme(), ThemeChoice::Dark, "absent means dark");
+
+        settings.set_theme(ThemeChoice::Light).expect("save");
+        assert_eq!(settings.theme(), ThemeChoice::Light);
+        assert_eq!(
+            settings.data_dir(),
+            Path::new("/srv/fp"),
+            "kept across the rewrite"
+        );
+
+        let (reloaded, _) = Settings::load(env(&config));
+        assert_eq!(reloaded.theme(), ThemeChoice::Light);
+    }
+
+    /// A config file this build cannot write refuses the change rather than
+    /// accepting one that would be gone by the next start.
+    #[test]
+    fn the_appearance_is_refused_while_the_config_file_is_unreadable() {
+        let config = TempConfig::new("theme-broken");
+        config.write("{ not json");
+        let (mut settings, _) = Settings::load(env(&config));
+
+        let error = settings
+            .set_theme(ThemeChoice::Light)
+            .expect_err("a broken file cannot be rewritten");
+
+        assert!(error.contains("cannot be written"), "{error}");
+        assert_eq!(settings.theme(), ThemeChoice::Dark, "nothing changed");
     }
 
     #[test]

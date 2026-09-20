@@ -21,6 +21,7 @@ mod settings;
 #[cfg(unix)]
 mod signal;
 mod state;
+mod theme;
 mod ui;
 mod verifier;
 
@@ -185,14 +186,12 @@ fn main() {
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
-        // The component library defaults to the light theme; the window paints its
-        // own dark palette, so switch the components to match or their labels and
-        // outlines become invisible against it.
-        gpui_kit::component::theme::Theme::change(
-            gpui_kit::component::theme::ThemeMode::Dark,
-            None,
-            cx,
-        );
+        // The appearance the user last chose, applied before the first frame so
+        // the window is never painted in the other palette and then corrected.
+        // The component library's own default is light; the window reads its
+        // colours back out of this same theme, so one call moves both layers.
+        let theme = app_state.theme();
+        gpui_kit::component::theme::Theme::change(theme.mode(), None, cx);
 
         let window_bounds = WindowBounds::centered(
             Size {

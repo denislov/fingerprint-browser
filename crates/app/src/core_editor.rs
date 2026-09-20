@@ -9,6 +9,7 @@
 //! Re-pointing an existing core at a different binary is the one edit that
 //! re-reads the version, for the same reason.
 
+use crate::theme::palette;
 use domain::BrowserCore;
 use gpui_kit::component::form::*;
 use gpui_kit::component::input::*;
@@ -122,6 +123,7 @@ impl CoreEditor {
 
 impl Render for CoreEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
         let _ = cx;
         let known = self.base.as_ref().map(|core| {
             let generation = core.capabilities().map(|capabilities| {
@@ -169,9 +171,9 @@ impl Render for CoreEditor {
                             .flex_col()
                             .gap_1()
                             .text_xs()
-                            .child(div().text_color(rgb(0xd4d4d8)).child(version))
+                            .child(div().text_color(rgb(p.text_soft)).child(version))
                             .children(generation.map(|generation| {
-                                div().text_color(rgb(0x71717a)).child(generation)
+                                div().text_color(rgb(p.muted)).child(generation)
                             })),
                     ),
             );
@@ -185,9 +187,9 @@ impl Render for CoreEditor {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(0x2a1a1a))
+                    .bg(rgb(p.danger_bg))
                     .text_xs()
-                    .text_color(rgb(0xfca5a5))
+                    .text_color(rgb(p.danger))
                     // One line per clause: gpui does not wrap a single line, and
                     // a refusal that runs off the edge is a refusal half read.
                     .children(
