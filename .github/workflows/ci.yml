@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: workspace gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The font stack is the only thing this workspace links against a system
+      # library (freetype-sys and yeslogic-fontconfig-sys; verified from the
+      # build-script output). gpui's X11/Wayland backend dlopens, and the UI
+      # tests render headless: no display is needed, and python3 - required by
+      # the runtime lifecycle tests - is already on the runner image.
+      - name: Install the system libraries the workspace links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libfontconfig1-dev libfreetype-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run the gate
+        run: ./scripts/check.sh

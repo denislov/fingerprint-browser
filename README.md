@@ -268,18 +268,34 @@ Known limitations:
 ## Validation and next steps
 
 ```sh
+# all four, in this order
+./scripts/check.sh
+
+# what that script runs
 cargo fmt --all --check
 cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Strict `-D warnings` is the gate. The workspace used to carry a
-`.cargo/config.toml` that set `RUSTC_BOOTSTRAP` and injected
-`feature(cold_path, atomic_try_update)` into every crate; both features have been
-stable since Rust 1.95, no crate in the workspace uses them, and nothing in the
-dependency graph needs a nightly compiler. The file is gone and the checks above
-run clean on a stable toolchain (verified on rustc 1.96.0).
+Strict `-D warnings` is the gate, and it is executable: `scripts/check.sh` runs
+exactly those four commands and `.github/workflows/ci.yml` runs that script, so
+what passes is the commands themselves rather than a claim about them.
+
+The workspace used to carry a `.cargo/config.toml` that set `RUSTC_BOOTSTRAP` and
+injected `feature(cold_path, atomic_try_update)` into every crate. Both features
+have been stable since Rust 1.95, no crate in the workspace uses them, and
+nothing in the dependency graph needs a nightly compiler, so the file is gone
+again. It had been re-added by a commit about something else, which is what
+`-D warnings` refuses on a stable toolchain (`stable_features` is a warning, and
+the gate turns warnings into errors) - a red gate that only a run would notice,
+which is why the run is now wired up. Checks pass on a stable toolchain
+(verified on rustc 1.96.0).
+
+The Linux job installs `libfontconfig1-dev` and `libfreetype-dev`: the font stack
+is the only thing linked against a system library, X11 and Wayland are dlopened,
+and the UI tests render headless, so no display is required (the suite was run
+with `DISPLAY` unset to check that).
 
 Runtime lifecycle tests on Unix require Python 3 and permission to bind loopback
 ports. They use controlled child processes rather than a real browser/Xray pair.
