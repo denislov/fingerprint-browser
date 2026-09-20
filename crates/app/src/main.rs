@@ -7,6 +7,7 @@
 mod core_detect;
 mod core_editor;
 mod editor;
+mod log_file;
 mod open_dir;
 mod proxy_editor;
 #[cfg(all(test, target_os = "linux"))]

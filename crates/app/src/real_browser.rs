@@ -117,7 +117,7 @@ impl Harness {
             data_dir: Some(dir.to_string_lossy().to_string()),
             ..crate::settings::Environment::default()
         });
-        let mut state = AppState::new(
+        let mut state = AppState::for_test(
             profiles,
             runtime_service,
             Arc::new(cores),

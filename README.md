@@ -167,8 +167,18 @@ every problem ever seen. Either way the line is kept: the Log page lists starts
 and stops with the pids, ports and argument count they got, warnings, crashes,
 refused commands and the outcome of every fingerprint reading, newest first,
 attributed to the profile it is about or to `app` for the window itself. The
-page has Copy and Clear actions, and the history is capped at 500 lines so a
-long session does not grow without bound. Toasts are pushed from the background
+page has Copy, Clear and an All / Warnings / Errors filter, and says which kind
+of empty it is showing when the filter hides everything. The history is capped at
+500 lines so a long session does not grow without bound.
+
+The same lines are also written to `logs/activity.log` under the data directory,
+with an absolute UTC timestamp and the profile named rather than identified, so
+the record outlives the window; when that file passes 512 KiB it is rotated to
+`activity.log.1`, which the next rotation replaces, so there are at most two
+files and nothing grows without bound. The page says which file it is writing to,
+and a directory it cannot write to is reported at startup rather than at the
+first line someone needed; the first write that fails is reported once, as a
+toast, and never per line. Toasts are pushed from the background
 tick into the component library's notification layer, not from the click
 handler, so a warning that arrives on its own - a legacy core omitting a switch,
 a browser that crashed - is shown the same way a button press is. The data
@@ -177,12 +187,12 @@ directory of the selected profile can be opened in the desktop's file manager
 run has no directory yet, and the refusal names the path instead of creating an
 empty folder that looks like state. A relative data directory is resolved
 against the working directory first, the same way the Settings page shows it,
-because the opener is a foreign process that may not share this one's. The
-opener is reaped on a worker so a slow file manager cannot leave a zombie or
-block the window. A spawn is not a window appearing, though: an opener that
-exits non-zero - a desktop with no handler registered - is written to the
-process log, because the window cannot see it from the spawn and claiming the
-directory was opened would be a guess.
+because the opener is a foreign process that may not share this one's. The opener
+is run on a worker and its result is reported, because a spawn is not an open: an
+exit of 0 means something took the request, a non-zero exit is reported with the
+program that failed - a desktop with no handler is exactly that - and an opener
+still running after five seconds is a file manager that stays in the foreground,
+which is an open too.
 
 - `crates/app/src/state.rs` holds the view-facing state (`AppState`). It owns no
   runtime state: every read goes through `RuntimeService::snapshot`, and a

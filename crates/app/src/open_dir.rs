@@ -7,10 +7,19 @@
 //! appearing on the machine running it.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 /// What this build should run to open a directory.
 pub const CURRENT_OS: &str = std::env::consts::OS;
+
+/// How long the opener is given to hand the request off.
+///
+/// An opener that exits 0 handed it to something; one that exits non-zero found
+/// nothing to hand it to. One that is still running after this is a file manager
+/// that stays in the foreground, which is an open too - so the wait has to end
+/// somewhere, and this is where.
+pub const OPENER_GRACE: Duration = Duration::from_secs(5);
 
 /// The opener for a platform, as `std::env::consts::OS` spells it.
 ///
@@ -29,14 +38,18 @@ pub fn opener(path: &Path, os: &str) -> (String, Vec<String>) {
 
 /// Opens a directory in the desktop's file manager.
 pub trait DirectoryOpener: Send + Sync {
-    /// Returns an error message to show when nothing could be opened. The
-    /// directory is not created: a profile that has never run has no browser
-    /// data yet, and saying so is more useful than an empty folder.
+    /// Opens the directory and reports whether the desktop accepted it.
+    ///
+    /// Blocks until the opener has handed the request off, or until it is clear
+    /// that it will not; callers run it off the UI thread. Returns an error
+    /// message to show when nothing was opened. The directory is not created: a
+    /// profile that has never run has no browser data yet, and saying so is more
+    /// useful than an empty folder.
     fn open(&self, path: &Path) -> Result<(), String>;
 }
 
-/// The real opener: spawn the platform command and reap it on a worker, so a
-/// slow file manager cannot leave a zombie behind or block the window.
+/// The real opener: runs the platform command and waits, so the window can say
+/// whether anything happened instead of assuming the spawn was the open.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemDirectoryOpener;
 
@@ -58,26 +71,40 @@ impl DirectoryOpener for SystemDirectoryOpener {
             ));
         }
         let (program, args) = opener(&path, CURRENT_OS);
-        let child = Command::new(&program)
+        let mut child = Command::new(&program)
             .args(&args)
             .spawn()
             .map_err(|error| format!("could not run {program}: {error}"))?;
-        // Reaped on a worker so a slow file manager cannot leave a zombie or
-        // block the window. The window has already reported the open as done:
-        // an opener that ran but found no handler is a desktop problem this
-        // process cannot see from a spawn, so it is at least written down.
-        std::thread::spawn(move || {
-            let mut child = child;
-            match child.wait() {
-                Ok(status) if !status.success() => tracing::warn!(
-                    "{program} exited with {status}; nothing may have opened for {}",
+        wait_for_opener(&program, &mut child, &path, OPENER_GRACE)
+    }
+}
+
+/// Waits for an opener to finish handing the request off.
+///
+/// Three outcomes, and they are different things: it succeeded, it failed (a
+/// desktop with no handler for a directory is what `xdg-open` exits non-zero
+/// for), or it is still running, which is a file manager that stays in the
+/// foreground and therefore did open something.
+fn wait_for_opener(
+    program: &str,
+    child: &mut Child,
+    path: &Path,
+    grace: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "{program} exited with {status}; nothing may have opened {}",
                     path.display()
-                ),
-                Ok(_) => {}
-                Err(error) => tracing::warn!("could not wait for {program}: {error}"),
+                ));
             }
-        });
-        Ok(())
+            Ok(None) if Instant::now() >= deadline => return Ok(()),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => return Err(format!("could not wait for {program}: {error}")),
+        }
     }
 }
 
@@ -172,5 +199,61 @@ mod tests {
             error.contains(&cwd.join(&relative).display().to_string()),
             "{error}"
         );
+    }
+
+    /// A spawn is not an open. These three drive the wait without a file
+    /// manager, which is the part a test must not run.
+    #[cfg(unix)]
+    mod opener_wait {
+        use super::*;
+
+        fn spawn(program: &str, args: &[&str]) -> Child {
+            Command::new(program)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn the stand-in opener")
+        }
+
+        #[test]
+        fn an_opener_that_exits_successfully_is_an_open() {
+            let mut child = spawn("/bin/true", &[]);
+            wait_for_opener("/bin/true", &mut child, Path::new("/tmp"), OPENER_GRACE)
+                .expect("exit 0 handed the request off");
+        }
+
+        /// The case the spawn cannot see: a desktop with no handler exits
+        /// non-zero, and the window has to say so rather than claim success.
+        #[test]
+        fn an_opener_that_fails_is_reported_with_what_it_ran() {
+            let mut child = spawn("/bin/false", &[]);
+            let error = wait_for_opener(
+                "/bin/false",
+                &mut child,
+                Path::new("/tmp/profiles/1"),
+                OPENER_GRACE,
+            )
+            .expect_err("exit 1 opened nothing");
+            assert!(error.contains("/bin/false"), "{error}");
+            assert!(error.contains("/tmp/profiles/1"), "{error}");
+            assert!(error.contains("nothing may have opened"), "{error}");
+        }
+
+        /// A file manager that stays in the foreground is an open, so the wait
+        /// has to end without treating it as a failure.
+        #[test]
+        fn an_opener_that_keeps_running_is_an_open() {
+            let mut child = spawn("/bin/sleep", &["30"]);
+            wait_for_opener(
+                "/bin/sleep",
+                &mut child,
+                Path::new("/tmp"),
+                Duration::from_millis(50),
+            )
+            .expect("still running is still an open");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }

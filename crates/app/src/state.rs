@@ -5,6 +5,7 @@
 //! into it. Runtime state is never owned here: every read goes through
 //! [`RuntimeService::snapshot`], which is the documented reconciliation path.
 
+use crate::log_file::LogFile;
 use crate::settings::{SettingKey, SettingRow, Settings};
 use application::{
     AppError, CoreService, DeleteMode, NewProfile, NewProxy, ProfileService, ProxyService,
@@ -103,6 +104,53 @@ pub struct LogRow {
 /// How many log lines are kept. The window is a session tool, not an audit
 /// system, and an unbounded vector would grow with every restart.
 const LOG_CAPACITY: usize = 500;
+
+/// Which of the activity log's lines the page is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogFilter {
+    #[default]
+    All,
+    /// Warnings and errors: the lines that are not routine.
+    Warnings,
+    Errors,
+}
+
+impl LogFilter {
+    pub const ALL: [LogFilter; 3] = [Self::All, Self::Warnings, Self::Errors];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Warnings => "Warnings",
+            Self::Errors => "Errors",
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::All => "log-filter-all",
+            Self::Warnings => "log-filter-warnings",
+            Self::Errors => "log-filter-errors",
+        }
+    }
+
+    /// What the filter keeps, for the empty line that says what is hidden.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Self::All => "anything",
+            Self::Warnings => "warning or error",
+            Self::Errors => "error",
+        }
+    }
+
+    fn admits(self, level: LogLevel) -> bool {
+        match self {
+            Self::All => true,
+            Self::Warnings => level != LogLevel::Info,
+            Self::Errors => level == LogLevel::Error,
+        }
+    }
+}
 
 /// One row of the profiles list with the display names already resolved.
 #[derive(Clone)]
@@ -374,6 +422,12 @@ pub struct AppState {
     toasts: Vec<Toast>,
     /// What happened this session, oldest first.
     log: Vec<LogEntry>,
+    /// Which of those lines the page is showing.
+    log_filter: LogFilter,
+    /// Where the lines are also written down, when a file could be opened.
+    log_file: Option<LogFile>,
+    /// Why there is no file, or the first write that failed.
+    log_file_error: Option<String>,
 }
 
 impl AppState {
@@ -383,6 +437,68 @@ impl AppState {
         cores: Arc<dyn CoreService>,
         proxies: Arc<dyn ProxyService>,
         settings: Settings,
+    ) -> Self {
+        let (log_file, log_file_error) =
+            match LogFile::open(&settings.data_dir().join(crate::log_file::LOG_DIR)) {
+                Ok(file) => (Some(file), None),
+                Err(error) => (None, Some(error)),
+            };
+        Self::assemble(
+            profiles,
+            runtime,
+            cores,
+            proxies,
+            settings,
+            log_file,
+            log_file_error,
+        )
+    }
+
+    /// The same state with a specific activity log, or none at all.
+    ///
+    /// A test must not write into the data directory of the machine it runs on;
+    /// a test that drives the sink's failure path builds its own [`LogFile`].
+    #[cfg(test)]
+    pub(crate) fn with_log(
+        profiles: Arc<dyn ProfileService>,
+        runtime: Arc<RuntimeService>,
+        cores: Arc<dyn CoreService>,
+        proxies: Arc<dyn ProxyService>,
+        settings: Settings,
+        log_file: Option<LogFile>,
+        log_file_error: Option<String>,
+    ) -> Self {
+        Self::assemble(
+            profiles,
+            runtime,
+            cores,
+            proxies,
+            settings,
+            log_file,
+            log_file_error,
+        )
+    }
+
+    /// The window's state with no activity log on disk.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        profiles: Arc<dyn ProfileService>,
+        runtime: Arc<RuntimeService>,
+        cores: Arc<dyn CoreService>,
+        proxies: Arc<dyn ProxyService>,
+        settings: Settings,
+    ) -> Self {
+        Self::with_log(profiles, runtime, cores, proxies, settings, None, None)
+    }
+
+    fn assemble(
+        profiles: Arc<dyn ProfileService>,
+        runtime: Arc<RuntimeService>,
+        cores: Arc<dyn CoreService>,
+        proxies: Arc<dyn ProxyService>,
+        settings: Settings,
+        log_file: Option<LogFile>,
+        log_file_error: Option<String>,
     ) -> Self {
         Self {
             profiles,
@@ -397,6 +513,9 @@ impl AppState {
             verifications: HashMap::new(),
             toasts: Vec::new(),
             log: Vec::new(),
+            log_filter: LogFilter::default(),
+            log_file,
+            log_file_error,
         }
     }
 
@@ -541,29 +660,58 @@ impl AppState {
     }
 
     /// The activity log with profile names resolved and the newest line first,
-    /// which is the order the Log page reads in.
+    /// which is the order the Log page reads in. The page's filter is applied.
     pub fn log_rows(&self) -> Vec<LogRow> {
-        let names: HashMap<ProfileId, String> = self
-            .rows
-            .iter()
-            .map(|row| (row.profile.id, row.profile.name.clone()))
-            .collect();
         self.log
             .iter()
             .rev()
+            .filter(|entry| self.log_filter.admits(entry.level))
             .map(|entry| LogRow {
                 at: entry.at,
                 level: entry.level,
-                who: match entry.profile_id {
-                    None => "app".to_string(),
-                    Some(id) => names
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| "a removed profile".to_string()),
-                },
+                who: self.who(entry.profile_id),
                 message: entry.message.clone(),
             })
             .collect()
+    }
+
+    /// How many lines were recorded, before the page's filter.
+    pub fn log_len(&self) -> usize {
+        self.log.len()
+    }
+
+    pub fn log_filter(&self) -> LogFilter {
+        self.log_filter
+    }
+
+    pub fn set_log_filter(&mut self, filter: LogFilter) {
+        self.log_filter = filter;
+    }
+
+    /// Where the log is also written down: the path, or the reason it is not.
+    ///
+    /// A write that failed outranks the path: the file is there, but it is no
+    /// longer being appended to.
+    pub fn log_file_status(&self) -> Result<&std::path::Path, &str> {
+        if let Some(error) = &self.log_file_error {
+            return Err(error.as_str());
+        }
+        match &self.log_file {
+            Some(file) => Ok(file.path()),
+            None => Err("no activity log is being kept"),
+        }
+    }
+
+    /// The name a line's profile is shown under.
+    fn who(&self, profile_id: Option<ProfileId>) -> String {
+        let Some(id) = profile_id else {
+            return "app".to_string();
+        };
+        self.rows
+            .iter()
+            .find(|row| row.profile.id == id)
+            .map(|row| row.profile.name.clone())
+            .unwrap_or_else(|| "a removed profile".to_string())
     }
 
     pub fn clear_log(&mut self) {
@@ -653,6 +801,37 @@ impl AppState {
         if self.log.len() > LOG_CAPACITY {
             let excess = self.log.len() - LOG_CAPACITY;
             self.log.drain(..excess);
+        }
+
+        // The file gets the same line, including the profile's name rather than
+        // its id: a log read a week later has no profile list next to it.
+        let Some(entry) = self.log.last() else {
+            return;
+        };
+        let line = format!(
+            "{} {:<7} {}: {}\n",
+            crate::log_file::timestamp(entry.at),
+            entry.level.label(),
+            self.who(entry.profile_id),
+            entry.message
+        );
+        let Some(file) = self.log_file.as_mut() else {
+            return;
+        };
+        if let Err(error) = file.append(&line) {
+            self.report_log_failure(error);
+        }
+    }
+
+    /// Says so once when the log cannot be written, and never recurses: the
+    /// report is a toast, and a toast does not go through the log.
+    fn report_log_failure(&mut self, error: String) {
+        if self.log_file_error.is_none() {
+            self.log_file_error = Some(error.clone());
+            self.toast(
+                ToastKind::Error,
+                format!("the activity log could not be written: {error}"),
+            );
         }
     }
 
@@ -1300,6 +1479,26 @@ mod tests {
 
     /// The same fixture, with the settings file somewhere the test can read.
     fn fixture_with_config(config: &std::path::Path) -> Fixture {
+        fixture_full(config, None, None)
+    }
+
+    /// The same fixture, with an activity log on disk in `log_dir`.
+    fn fixture_with_log(log_dir: &std::path::Path) -> Fixture {
+        let file = crate::log_file::LogFile::open(log_dir).expect("open the log file");
+        fixture_full(
+            &std::env::temp_dir()
+                .join("fp-app-settings-fixture")
+                .join("config.json"),
+            Some(file),
+            None,
+        )
+    }
+
+    fn fixture_full(
+        config: &std::path::Path,
+        log_file: Option<crate::log_file::LogFile>,
+        log_file_error: Option<String>,
+    ) -> Fixture {
         let profile_repo: Arc<MemProfileRepository> = Arc::new(MemProfileRepository::new());
         let core_repo: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
         let proxy_repo: Arc<MemProxyRepository> = Arc::new(MemProxyRepository::new());
@@ -1326,12 +1525,14 @@ mod tests {
             config: Some(config.to_string_lossy().to_string()),
             ..crate::settings::Environment::default()
         });
-        let state = AppState::new(
+        let state = AppState::with_log(
             service,
             runtime_service,
             core_service,
             proxy_service,
             settings,
+            log_file,
+            log_file_error,
         );
 
         Fixture {
@@ -2360,5 +2561,139 @@ mod tests {
             fixture.state.notice().is_none(),
             "clearing the history does not silence a current problem"
         );
+    }
+
+    #[test]
+    fn the_log_page_filter_hides_lines_without_losing_them() {
+        let mut fixture = fixture();
+        fixture.state.push_notice("Saved.", false);
+        fixture.state.push_notice("careful", true);
+        let id = running_profile(&mut fixture);
+        fixture.state.record_event(&RuntimeEvent::Warning {
+            profile_id: id,
+            message: "legacy core".into(),
+        });
+
+        assert_eq!(fixture.state.log_filter(), LogFilter::All);
+        assert_eq!(fixture.state.log_rows().len(), fixture.state.log_len());
+
+        fixture.state.set_log_filter(LogFilter::Warnings);
+        let warnings: Vec<&str> = fixture
+            .state
+            .log_rows()
+            .iter()
+            .map(|row| row.level.label())
+            .collect();
+        assert!(!warnings.contains(&"info"), "{warnings:?}");
+        assert!(
+            fixture.state.log_len() > fixture.state.log_rows().len(),
+            "the filter hides lines, it does not drop them"
+        );
+
+        fixture.state.set_log_filter(LogFilter::Errors);
+        assert!(
+            fixture
+                .state
+                .log_rows()
+                .iter()
+                .all(|row| row.level == LogLevel::Error),
+            "the narrowest filter keeps only errors"
+        );
+        assert!(fixture.state.log_len() >= 4, "nothing was cleared");
+    }
+
+    #[test]
+    fn the_activity_log_is_written_to_the_file_as_well() {
+        let dir = std::env::temp_dir().join(format!("fp-app-log-{}", CoreId::new()));
+        let path = dir.join(crate::log_file::LOG_FILE);
+        let mut fixture = fixture_with_log(&dir);
+        let id = running_profile(&mut fixture);
+        fixture.state.clear_log();
+
+        fixture.state.record_event(&RuntimeEvent::Started {
+            profile_id: id,
+            browser_pid: 4242,
+            xray_pid: None,
+            cdp_port: 9222,
+            socks_port: None,
+        });
+        fixture.state.push_notice("Saved.", false);
+        fixture.state.push_notice("it broke", true);
+
+        let text = std::fs::read_to_string(&path).expect("the log file was written");
+        let lines: Vec<&str> = text.lines().collect();
+        // The profile creation line is already in the file: `clear_log` empties
+        // the window's history, not what was written down.
+        assert_eq!(lines.len(), 4, "{text}");
+        assert!(lines[0].contains("app: Created verify me"), "{}", lines[0]);
+        assert!(
+            lines[1].contains("info")
+                && lines[1].contains("verify me")
+                && lines[1].contains("browser started (pid 4242, cdp port 9222)"),
+            "a line names the profile and what happened: {}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("info") && lines[2].ends_with("app: Saved."),
+            "{}",
+            lines[2]
+        );
+        assert!(
+            lines[3].contains("error") && lines[3].ends_with("app: it broke"),
+            "{}",
+            lines[3]
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.starts_with("20") && line.contains('T')),
+            "every line carries an absolute UTC time: {text}"
+        );
+        assert_eq!(
+            fixture.state.log_file_status().ok(),
+            Some(path.as_path()),
+            "the page can say where the file is"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The window must keep working when the log cannot be written, and the
+    /// failure must be said once rather than per line.
+    #[test]
+    fn a_log_file_that_cannot_be_written_is_reported_once() {
+        let dir = std::env::temp_dir().join(format!("fp-app-log-bad-{}", CoreId::new()));
+        let mut fixture = fixture_full(
+            &dir.join("config.json"),
+            Some(crate::log_file::LogFile::at(
+                dir.join("missing").join("activity.log"),
+            )),
+            None,
+        );
+
+        fixture.state.push_notice("first", false);
+        fixture.state.push_notice("second", false);
+        fixture.state.push_notice("third", true);
+
+        let error = fixture
+            .state
+            .log_file_status()
+            .expect_err("the sink failed");
+        assert!(error.contains("could not open"), "{error}");
+        assert_eq!(
+            fixture
+                .state
+                .toasts()
+                .iter()
+                .filter(|toast| toast.message.contains("activity log could not be written"))
+                .count(),
+            1,
+            "the failure is reported once, not once per line"
+        );
+        assert_eq!(
+            fixture.state.log_len(),
+            3,
+            "the in-memory log is unaffected"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

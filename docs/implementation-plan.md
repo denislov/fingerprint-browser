@@ -151,6 +151,31 @@ Phase 4 的剩余项在第十二批结清，结论与证据见 [fingerprint-matr
   “the next run will not reclaim them”。修法是 `ProcessInspector::start_time`：
   从 `/proc/<pid>/stat` 单独读第 22 个字段，进程一创建就有。
 
+### 第十三批：日志落盘与过滤，以及 opener 的真实结果
+
+进度（2026-09-20）：已完成。**这一批把上一批的可观测性从“窗口活着时”扩到“窗口关闭后”，
+并消掉一个“spawn 成功就算打开成功”的自欺。**
+
+- `app::log_file`（新）：`LogFile` 把页面上的每一行同时写到数据目录下的
+  `logs/activity.log`。行格式是绝对 UTC 时间 + 级别 + profile 名 + 消息；时间戳由本仓
+  的 `civil_from_days` 算（不引日期库，含闰日测试）。超过 512 KiB 轮转为 `activity.log.1`，
+  下次轮转覆盖它——**最多两个文件，不无界增长，也不按运行堆碎文件**。
+- 失败不静默也不重试刷屏：目录建不出来/不可写时启动就记下错误（页面头部直接显示
+  “Not written to a file: …”），写入失败**只报一次**（一个 toast；toast 不走日志，不会递归）。
+- Log 页新增 **All / Warnings / Errors 过滤**：`LogFilter` 在 `log_rows()` 里生效，
+  `log_len()` 保留总数，所以空页会说清是哪种空（“No error lines; 3 were recorded …”）。
+  按 profile 过滤没做：每行已经标明归属，而 Log 页再放一个 profile 选择器只增长 UI 债务。
+- **opener 的结果能到窗口了**。`DirectoryOpener::open` 的契约从“spawn 完就返回”改成
+  “等到桌面接手为止（有界）”：exit 0 = 打开了；退出码非 0 = 报出程序与退出码（
+  `xdg-open` 找不到 handler 就是这条路）；超过 5 秒仍在跑 = 前台文件管理器，算打开。
+  它在 worker 线程上跑，结果经 channel 由 tick 取回——与指纹回读同一套模式，
+  `wait_for_state` 测试助手同时驱动两条队列。真机验收：把 `xdg-open` 换成一个
+  `exit 3` 的包装脚本，界面红横幅 + error toast + 文件日志都出现了
+  “xdg-open exited with exit status: 3; nothing may have opened …”；目录不存在那条拒绝路径
+  也走同一条异步通道。
+- 测试卫生：`AppState::new` 会写真实数据目录，所以测试改用 `AppState::for_test` /
+  `with_log`（显式注入 sink），测试不会往 Cargo.toml 旁边的 `data/` 写东西。
+
 ### 第二批：开关词汇的实测与回读验证
 
 进度（2026-09-19）：已完成。方法与全部实测数据见 [fingerprint-matrix.md](fingerprint-matrix.md)。
@@ -822,6 +847,8 @@ headless window: a refused setting keeps the banner and is also toasted
 headless window: the sidebar switches to the Log page and only that page renders
 headless window: the newest log line says what happened and at what level, and
   Clear empties the history
+headless window: the filter narrows the page and the line is hidden not dropped
+headless window: the page names the file it writes to, and the file holds the line
 headless window: clicking open-dir hands the profile's data directory to the
   opener, and a failed open is refused with the reason
 ```
@@ -839,6 +866,20 @@ a crash and a refused start are logged as errors
 a failed reading is logged as an error
 the log is capped and the newest line survives
 log rows name the profile and put the newest line first
+the log page filter hides lines without losing them
+the activity log is written to the file as well
+a log file that cannot be written is reported once
+```
+
+### Activity log file
+
+```text
+a line is appended and readable back
+an existing file is appended to rather than replaced
+a full file is rotated and the new line survives
+a full file is rotated at startup too
+a directory that cannot be created is an error
+a timestamp is utc and reads the same everywhere
 ```
 
 ### Open data directory
@@ -848,6 +889,9 @@ the opener matches the platform
 the directory is passed as one argument
 a directory that does not exist is refused with its path
 a relative directory is named against the working directory
+an opener that exits successfully is an open
+an opener that fails is reported with what it ran
+an opener that keeps running is an open
 ```
 
 ---

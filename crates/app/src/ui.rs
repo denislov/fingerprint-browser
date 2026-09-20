@@ -10,7 +10,8 @@ use crate::open_dir::DirectoryOpener;
 use crate::proxy_editor::ProxyEditor;
 use crate::settings::SettingKey;
 use crate::state::{
-    AppState, CoreRow, LogLevel, LogRow, Page, ProfileRow, ProxyRow, Toast, ToastKind, Verification,
+    AppState, CoreRow, LogFilter, LogLevel, LogRow, Page, ProfileRow, ProxyRow, Toast, ToastKind,
+    Verification,
 };
 use crate::verifier::FingerprintVerifier;
 use crossbeam_channel::{Receiver, Sender};
@@ -25,6 +26,7 @@ use gpui_kit::component::notification::{Notification, NotificationType};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use runtime::{Discrepancy, RuntimeEvent};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -58,6 +60,9 @@ pub struct AppView {
     opener: Arc<dyn DirectoryOpener>,
     verifications: Receiver<(ProfileId, Result<Vec<Discrepancy>, String>)>,
     verification_tx: Sender<(ProfileId, Result<Vec<Discrepancy>, String>)>,
+    /// What the opener reported, once it was done handing the request off.
+    open_results: Receiver<(PathBuf, Result<(), String>)>,
+    open_tx: Sender<(PathBuf, Result<(), String>)>,
     state: AppState,
     events: Receiver<RuntimeEvent>,
     /// Kept alive: dropping a GPUI subscription unregisters the observer.
@@ -72,8 +77,11 @@ impl AppView {
         opener: Arc<dyn DirectoryOpener>,
     ) -> Self {
         // A reading takes seconds and blocks on the browser, so it runs on a
-        // worker thread and reports back through this channel.
+        // worker thread and reports back through this channel. Opening a
+        // directory waits for the desktop's opener the same way, for the same
+        // reason: neither may block the window.
         let (verification_tx, verifications) = crossbeam_channel::unbounded();
+        let (open_tx, open_results) = crossbeam_channel::unbounded();
         Self {
             editor: None,
             proxy_editor: None,
@@ -84,6 +92,8 @@ impl AppView {
             opener,
             verifications,
             verification_tx,
+            open_results,
+            open_tx,
             state,
             events,
             window_closed: None,
@@ -164,7 +174,8 @@ impl AppView {
 
                     let notified = view.drain_events();
                     let verified = view.drain_verifications();
-                    if notified || reconcile || verified {
+                    let opened = view.drain_open_results();
+                    if notified || reconcile || verified || opened {
                         view.state.refresh_runtime();
                         cx.notify();
                     }
@@ -222,6 +233,22 @@ impl AppView {
         received
     }
 
+    /// Collect what the opener reported. The window never waited for it, so the
+    /// answer arrives a tick later.
+    fn drain_open_results(&mut self) -> bool {
+        let mut received = false;
+        while let Ok((path, result)) = self.open_results.try_recv() {
+            match result {
+                Ok(()) => self
+                    .state
+                    .push_notice(format!("Opened {}", path.display()), false),
+                Err(reason) => self.state.push_notice(reason, true),
+            }
+            received = true;
+        }
+        received
+    }
+
     /// Show every queued toast in one window.
     ///
     /// The tick drains the queue and calls `push_toasts` with each open window;
@@ -237,7 +264,10 @@ impl AppView {
     ///
     /// The directory is not created here: a profile that has never run has no
     /// browser data, and the refusal says so rather than leaving an empty
-    /// folder behind that looks like state.
+    /// folder behind that looks like state. The opener waits for the desktop to
+    /// accept the request, so it runs on a worker and the answer arrives on a
+    /// later tick - the window is not blocked either way, and a spawn that found
+    /// no handler is reported instead of being mistaken for an open.
     fn on_open_data_dir(&mut self, id: ProfileId, cx: &mut Context<Self>) {
         let path = match self.state.profile(id) {
             Some(profile) => profile.user_data_dir,
@@ -248,17 +278,22 @@ impl AppView {
                 return;
             }
         };
-        match self.opener.open(&path) {
-            Ok(()) => self
-                .state
-                .push_notice(format!("Opened {}", path.display()), false),
-            Err(reason) => self.state.push_notice(reason, true),
-        }
+        let opener = Arc::clone(&self.opener);
+        let sender = self.open_tx.clone();
+        std::thread::spawn(move || {
+            let result = opener.open(&path);
+            let _ = sender.send((path, result));
+        });
         cx.notify();
     }
 
     fn on_clear_log(&mut self, cx: &mut Context<Self>) {
         self.state.clear_log();
+        cx.notify();
+    }
+
+    fn on_set_log_filter(&mut self, filter: LogFilter, cx: &mut Context<Self>) {
+        self.state.set_log_filter(filter);
         cx.notify();
     }
 
@@ -869,6 +904,12 @@ impl Render for AppView {
                         let core_rows = self.state.core_rows().unwrap_or_default();
                         let setting_rows = self.state.setting_rows();
                         let log_rows = self.state.log_rows();
+                        let log_count = self.state.log_len();
+                        let log_filter = self.state.log_filter();
+                        let log_status = match self.state.log_file_status() {
+                            Ok(path) => Ok(path.display().to_string()),
+                            Err(error) => Err(error.to_string()),
+                        };
                         div()
                             .flex()
                             .flex_col()
@@ -880,7 +921,7 @@ impl Render for AppView {
                             .child(match page {
                                 Page::Proxies => proxies_header(cx),
                                 Page::Cores => cores_header(cx),
-                                Page::Log => logs_header(cx),
+                                Page::Log => logs_header(log_filter, &log_status, cx),
                                 Page::Settings => settings_header(),
                                 Page::Profiles => profiles_header(cx),
                             })
@@ -892,7 +933,7 @@ impl Render for AppView {
                                 this.child(cores_body(&core_rows, cx))
                             })
                             .when(page == Page::Log, |this| {
-                                this.child(logs_body(&log_rows, cx))
+                                this.child(logs_body(&log_rows, log_count, log_filter, cx))
                             })
                             .when(page == Page::Settings, |this| {
                                 this.child(settings_body(&setting_rows, cx))
@@ -1445,26 +1486,64 @@ fn settings_body(
         }))
 }
 
-fn logs_header(cx: &mut Context<AppView>) -> Div {
+fn logs_header(
+    filter: LogFilter,
+    status: &Result<String, String>,
+    cx: &mut Context<AppView>,
+) -> Div {
     div()
         .flex()
         .items_center()
         .justify_between()
+        .gap_4()
         .child(
             div()
                 .flex()
                 .flex_col()
                 .gap_1()
+                .min_w_0()
                 .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("Log"))
                 .child(div().text_xs().text_color(rgb(MUTED)).child(
                     "What this window has done and seen: starts, stops, warnings, errors and reads, newest first.",
-                )),
+                ))
+                .child(match status {
+                    Ok(path) => div()
+                        .id("log-file-status")
+                        .test_support()
+                        .aria_label(format!("Also written to {path}"))
+                        .text_xs()
+                        .text_color(rgb(DIM))
+                        .child(format!("Also written to {path}")),
+                    Err(error) => div()
+                        .id("log-file-status")
+                        .test_support()
+                        .aria_label(format!("Not written to a file: {error}"))
+                        .text_xs()
+                        .text_color(rgb(0xfca5a5))
+                        .child(format!("Not written to a file: {error}")),
+                }),
         )
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .children(LogFilter::ALL.map(|candidate| {
+                            let active = candidate == filter;
+                            Button::new(candidate.id())
+                                .label(candidate.label())
+                                .when(active, |button| button.primary())
+                                .when(!active, |button| button.outline())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.on_set_log_filter(candidate, cx)
+                                }))
+                        })),
+                )
                 .child(
                     Button::new("copy-log")
                         .label("Copy")
@@ -1480,7 +1559,12 @@ fn logs_header(cx: &mut Context<AppView>) -> Div {
         )
 }
 
-fn logs_body(rows: &[LogRow], _cx: &mut Context<AppView>) -> impl IntoElement {
+fn logs_body(
+    rows: &[LogRow],
+    total: usize,
+    filter: LogFilter,
+    _cx: &mut Context<AppView>,
+) -> impl IntoElement {
     div()
         .id("logs-scroll")
         .test_support()
@@ -1491,6 +1575,15 @@ fn logs_body(rows: &[LogRow], _cx: &mut Context<AppView>) -> impl IntoElement {
         .gap_1()
         .overflow_y_scroll()
         .when(rows.is_empty(), |this| {
+            // An empty page says which kind of empty it is: nothing happened,
+            // or the filter is hiding what did.
+            let message = match total {
+                0 => "Nothing has happened yet in this window.".to_string(),
+                count => format!(
+                    "No {} lines; {count} were recorded - switch the filter to All to see them",
+                    filter.noun()
+                ),
+            };
             this.child(
                 div()
                     .px_4()
@@ -1499,7 +1592,7 @@ fn logs_body(rows: &[LogRow], _cx: &mut Context<AppView>) -> impl IntoElement {
                     .bg(rgb(PANEL))
                     .text_sm()
                     .text_color(rgb(MUTED))
-                    .child("Nothing has happened yet in this window."),
+                    .child(message),
             )
         })
         .children(rows.iter().enumerate().map(|(index, row)| {
@@ -2203,6 +2296,17 @@ mod tests {
         config: Option<&std::path::Path>,
         opener: Arc<FakeOpener>,
     ) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>, Arc<FakeOpener>) {
+        view_with_log(cx, verifier, config, opener, None)
+    }
+
+    /// The same view, with an activity log the test can read back.
+    fn view_with_log(
+        cx: &mut TestAppContext,
+        verifier: Arc<FakeVerifier>,
+        config: Option<&std::path::Path>,
+        opener: Arc<FakeOpener>,
+        log_file: Option<crate::log_file::LogFile>,
+    ) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>, Arc<FakeOpener>) {
         let profile_repo: Arc<MemProfileRepository> = Arc::new(MemProfileRepository::new());
         let core_repo: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
         let proxy_repo: Arc<MemProxyRepository> = Arc::new(MemProxyRepository::new());
@@ -2228,7 +2332,15 @@ mod tests {
             Some(config) => crate::state::testing::settings_at(config),
             None => crate::state::testing::settings(),
         };
-        let state = AppState::new(profiles, runtime_service, cores, proxies, settings);
+        let state = AppState::with_log(
+            profiles,
+            runtime_service,
+            cores,
+            proxies,
+            settings,
+            log_file,
+            None,
+        );
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
 
         let view = cx.new(|cx| {
@@ -2352,24 +2464,38 @@ mod tests {
 
     /// Drives the verification channel until the worker reports, so the test
     /// never depends on the tick timer firing.
-    fn wait_for_verification(cx: &mut gpui_kit::App, view: &gpui_kit::Entity<AppView>) {
+    fn wait_for_verification<C: gpui_kit::AppContext>(
+        cx: &mut C,
+        view: &gpui_kit::Entity<AppView>,
+    ) {
+        wait_for_state(cx, view, |state| {
+            state
+                .selected()
+                .and_then(|row| state.verification(row.profile.id))
+                .is_some_and(|verification| !verification.is_running())
+        });
+    }
+
+    /// Drives every background queue until the state says what the test is
+    /// waiting for. A background action reports on a later tick, and a test
+    /// should not have to wait for the timer to fire to see it.
+    fn wait_for_state<C: gpui_kit::AppContext>(
+        cx: &mut C,
+        view: &gpui_kit::Entity<AppView>,
+        done: impl Fn(&AppState) -> bool,
+    ) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let done = view.read_with(cx, |view, _| {
-                view.state
-                    .selected()
-                    .and_then(|row| view.state.verification(row.profile.id))
-                    .is_some_and(|verification| !verification.is_running())
-            });
-            if done {
+            if view.read_with(cx, |view, _| done(view.state())) {
                 return;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the verification never reported back"
+                "the background action never reported back"
             );
             view.update(cx, |view, cx| {
                 view.drain_verifications();
+                view.drain_open_results();
                 cx.notify();
             });
             std::thread::sleep(Duration::from_millis(10));
@@ -3205,6 +3331,78 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn the_log_page_filter_can_be_narrowed(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        cx.update(|window, cx| window.click("nav-Log", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("log-0").is_some()),
+            "the created profile is an info line"
+        );
+
+        cx.update(|window, cx| window.click("log-filter-errors", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("log-0").is_none()),
+            "an info line is hidden by the error filter"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().log_filter()),
+            crate::state::LogFilter::Errors
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().log_len()),
+            1,
+            "the line is hidden, not dropped"
+        );
+
+        cx.update(|window, cx| window.click("log-filter-all", cx));
+        settle(cx);
+        assert!(cx.update(|window, _| window.try_find("log-0").is_some()));
+    }
+
+    /// The page has to say where the log is being kept, and the file has to
+    /// really hold what the page shows.
+    #[gpui_kit::test]
+    fn the_log_page_names_the_file_it_writes_to(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = std::env::temp_dir().join(format!("fp-ui-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = crate::log_file::LogFile::open(&dir).expect("open the log file");
+        let path = log.path().to_path_buf();
+        let (view, _runtime, _opener) = view_with_log(
+            cx,
+            Arc::new(FakeVerifier::passing()),
+            None,
+            Arc::new(FakeOpener::working()),
+            Some(log),
+        );
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("new-profile", cx));
+        cx.update(|window, cx| window.click("nav-Log", cx));
+        settle(cx);
+
+        let label = cx
+            .update(|window, _| {
+                window
+                    .find("log-file-status")
+                    .label()
+                    .map(|label| label.to_string())
+            })
+            .expect("the page says where the log is");
+        assert!(label.contains(&path.display().to_string()), "{label}");
+
+        let text = std::fs::read_to_string(&path).expect("the file was written");
+        assert!(text.contains("Created Profile 1"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
     fn a_profile_data_directory_can_be_opened(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let opener = Arc::new(FakeOpener::working());
@@ -3219,12 +3417,25 @@ mod tests {
         });
 
         cx.update(|window, cx| window.click(format!("open-dir-{id}"), cx));
-        settle(cx);
+        wait_for_state(cx, &view, |state| {
+            state
+                .log_rows()
+                .iter()
+                .any(|row| row.message.contains("Opened"))
+        });
 
         assert_eq!(
             opener.opened(),
             vec![path.clone()],
             "the button opens the data directory of the selected profile"
+        );
+        let toast = view
+            .read_with(cx, |view, _| view.state().toasts().last().cloned())
+            .expect("the open is acknowledged");
+        assert!(
+            toast.message.contains(&path.display().to_string()),
+            "{}",
+            toast.message
         );
         assert!(
             cx.update(|window, cx| window.notifications(cx).len()) == 0,
@@ -3243,7 +3454,7 @@ mod tests {
         cx.update(|window, cx| window.click("new-profile", cx));
         let id = view.read_with(cx, |view, _| view.state().rows()[0].profile.id);
         cx.update(|window, cx| window.click(format!("open-dir-{id}"), cx));
-        settle(cx);
+        wait_for_state(cx, &view, |state| state.notice().is_some());
 
         let notice = view
             .read_with(cx, |view, _| view.state().notice().cloned())
@@ -3398,7 +3609,7 @@ mod tests {
         let proxies: Arc<dyn ProxyService> =
             Arc::new(DefaultProxyService::new(proxy_repo, profile_repo));
         let settings = crate::state::testing::settings();
-        let state = AppState::new(profiles, runtime_service, cores, proxies, settings);
+        let state = AppState::for_test(profiles, runtime_service, cores, proxies, settings);
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
         let view = cx.new(|cx| {
             let mut view = AppView::new(
