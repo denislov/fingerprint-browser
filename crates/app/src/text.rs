@@ -445,8 +445,8 @@ catalog! {
     no_activity_log => "no activity log is being kept" => "没有保存活动日志";
     no_core_registered => "no browser core is registered yet; add one on the Browser Cores page before creating a profile"
         => "还没有注册浏览器内核；请先到「浏览器内核」页添加一个，然后再新建档案";
-    no_core_found => "No browser core found. Set FP_BROWSER_CHROMIUM_BIN to a fingerprint-chromium (or Chromium) executable and restart."
-        => "没有找到浏览器内核。请把 FP_BROWSER_CHROMIUM_BIN 指向 fingerprint-chromium（或 Chromium）可执行文件，然后重启。";
+    no_core_found => "No browser core yet. Add a fingerprint-chromium binary on the Browser Cores page, or point FP_BROWSER_CHROMIUM_BIN at one and restart."
+        => "还没有浏览器内核。请在「浏览器内核」页添加一个 fingerprint-chromium 可执行文件，或把 FP_BROWSER_CHROMIUM_BIN 指向它并重启。";
     add_browser_core => "Add a browser core" => "添加浏览器内核";
 
     a_removed_profile => "a removed profile" => "已删除的档案";

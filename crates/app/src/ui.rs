@@ -4805,6 +4805,133 @@ mod tests {
         );
     }
 
+    /// The walk a fresh installation asks for, in one test.
+    ///
+    /// Every step of it is covered on its own elsewhere; what this pins is the
+    /// handover between them - that the button the empty state offers lands on
+    /// the page where a core can be added, that adding one stops the list asking
+    /// for it and lets a profile be created, and that the profile created that
+    /// way really starts. First-run guidance is a path, and a path is what a
+    /// per-step test cannot check.
+    #[gpui_kit::test]
+    fn a_fresh_installation_can_be_walked_from_no_core_to_a_running_profile(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (view, runtime) = view(cx);
+        let cx = window(cx, &view);
+        let binary =
+            crate::state::testing::CoreBinary::new("ui-first-run", Some("Chromium 148.0.7778.215"));
+
+        // A first start: no cores at all, which the fixture does not build.
+        view.update(cx, |view, _| {
+            let seeded = view.state().core_rows().expect("rows")[0].core.id;
+            view.state_mut().delete_core(seeded).expect("remove it");
+        });
+        settle(cx);
+
+        // 1. The list says what is missing and offers the way to fix it. The
+        //    sentence has to name both routes, because the button is only one.
+        let hint = cx.update(|window, _| {
+            window
+                .find("empty-hint")
+                .label()
+                .map(|label| label.to_string())
+        });
+        let hint = hint.expect("an empty state with no core says so");
+        assert!(hint.contains("FP_BROWSER_CHROMIUM_BIN"), "{hint}");
+        assert!(hint.contains("Browser Cores"), "{hint}");
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().rows().len()),
+            0,
+            "there is nothing to list yet"
+        );
+
+        // 2. The button the empty state offers goes where a core is added.
+        cx.update(|window, cx| window.click("empty-add-core", cx));
+        settle(cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().page()),
+            crate::state::Page::Cores
+        );
+
+        // 3. A core, through its own form, ending with a detected version.
+        cx.update(|window, cx| window.click("new-core", cx));
+        settle(cx);
+        let editor = view
+            .read_with(cx, |view, _| view.core_editor())
+            .expect("the Add Core button opens the form");
+        let executable = editor.read_with(cx, |editor, _| editor.executable_input());
+        cx.update(|window, cx| {
+            executable.update(cx, |state, cx| {
+                state.set_value(binary.path_buf().to_string_lossy().to_string(), window, cx)
+            });
+        });
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+        let rows = view.read_with(cx, |view, _| view.state().core_rows().expect("rows"));
+        assert_eq!(rows.len(), 1, "the installation has a core now");
+        assert_eq!(rows[0].core.major, 148);
+
+        // 4. Back on the list, the same hint now says something else, and the
+        //    button that could not work before is offered.
+        cx.update(|window, cx| window.click("nav-Profiles", cx));
+        settle(cx);
+        let hint = cx
+            .update(|window, _| {
+                window
+                    .find("empty-hint")
+                    .label()
+                    .map(|label| label.to_string())
+            })
+            .expect("the list is still empty, and now for the other reason");
+        assert!(!hint.contains("FP_BROWSER_CHROMIUM_BIN"), "{hint}");
+
+        // 5. And a profile can be created with the core that was just added.
+        cx.update(|window, cx| window.click("new-profile", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click("ok", cx));
+        settle(cx);
+        let ids: Vec<ProfileId> = view.read_with(cx, |view, _| {
+            view.state()
+                .rows()
+                .iter()
+                .map(|row| row.profile.id)
+                .collect()
+        });
+        assert_eq!(ids.len(), 1, "the form was accepted");
+        let id = ids[0];
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().profile(id).map(|p| p.core_id)),
+            Some(rows[0].core.id),
+            "the profile was created with the core the walk added"
+        );
+
+        // 6. And it starts, which is the end of the path this test is about.
+        cx.update(|window, cx| window.click(format!("start-{id}"), cx));
+        settle(cx);
+        // `Running` rather than `Starting`: the fake façade applies a launch as
+        // soon as it is asked, where the real one would publish `Starting` and
+        // the browser later. What this asserts is that the click reached it.
+        assert_eq!(
+            view.read_with(cx, |view, _| view
+                .state()
+                .rows()
+                .first()
+                .and_then(|row| row.snapshot.as_ref())
+                .map(|snapshot| snapshot.state.clone())),
+            Some(domain::RuntimeState::Running),
+            "the launch reached the runtime"
+        );
+        let commands = runtime.commands.lock().expect("command log").clone();
+        assert_eq!(
+            commands.len(),
+            1,
+            "one launch was asked for, through the supervisor channel"
+        );
+        assert!(commands[0].starts_with("start:"), "{commands:?}");
+    }
+
     #[gpui_kit::test]
     fn a_refused_core_form_says_why_and_stays_open(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -5747,15 +5874,17 @@ mod tests {
             window.render_frame(cx);
 
             // The situation is legible where it matters, without a click: the
-            // list says there is no core, and the button that would open a form
-            // the service refuses is disabled rather than describing the refusal
-            // after it happens.
+            // list says there is no core, it names both of the ways to supply
+            // one, and the button that would open a form the service refuses is
+            // disabled rather than describing the refusal after it happens.
             let hint = window
                 .find("empty-hint")
                 .label()
                 .map(str::to_string)
                 .expect("the empty state says what is missing");
-            assert!(hint.contains("No browser core found"), "{hint}");
+            assert!(hint.contains("No browser core yet"), "{hint}");
+            assert!(hint.contains("Browser Cores"), "{hint}");
+            assert!(hint.contains("FP_BROWSER_CHROMIUM_BIN"), "{hint}");
             window.click("new-profile", cx);
             assert!(
                 window.try_find("editor-name").is_none(),
@@ -5822,9 +5951,13 @@ mod tests {
     }
 
     /// The card's whole job: one press, one file, and the window says where.
-    /// The destination is asked for before the press because the card names it
-    /// rather than taking a path, so this is also what pins that the name on the
-    /// card is the file that gets written.
+    ///
+    /// The file it looks for is the one the window says it wrote, not the one the
+    /// card named before the press. The name carries the second, and the card
+    /// computes it while it is being drawn, so a press that lands in the next
+    /// second writes a different name - which is not worth a mechanism in the
+    /// card, but is worth not asserting on in a test that runs for hours next to
+    /// a hundred others.
     #[gpui_kit::test]
     fn writing_a_diagnostics_report_from_the_settings_page_says_where_it_went(
         cx: &mut TestAppContext,
@@ -5836,31 +5969,48 @@ mod tests {
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
         scroll_settings_to(cx, "diagnostics-run");
-        let destination = view.read_with(cx, |view, _| view.state().diagnostics_destination());
-        let _ = std::fs::remove_file(&destination);
+        // The folder is the card's claim that does not move: one report per
+        // press, in `diagnostics` under the data directory.
+        let folder = view
+            .read_with(cx, |view, _| view.state().diagnostics_destination())
+            .parent()
+            .expect("a diagnostics folder")
+            .to_path_buf();
+        let _ = std::fs::remove_dir_all(&folder);
 
         cx.update(|window, cx| window.click("diagnostics-run", cx));
         settle(cx);
 
+        let written: Vec<PathBuf> = std::fs::read_dir(&folder)
+            .expect("the card's folder exists")
+            .map(|entry| entry.expect("an entry").path())
+            .collect();
+        assert_eq!(written.len(), 1, "one press writes one report");
+        let written = &written[0];
         assert!(
-            destination.exists(),
-            "{} should exist",
-            destination.display()
+            written
+                .file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .starts_with("fp-browser-diagnostics-"),
+            "{}",
+            written.display()
         );
-        let text = std::fs::read_to_string(&destination).expect("read back");
+
+        let text = std::fs::read_to_string(written).expect("read back");
         assert!(text.contains(crate::version::VERSION), "{text}");
         assert!(text.contains("Fingerprint Browser diagnostics"), "{text}");
 
         let message = last_message(cx, &view);
         assert!(
-            message.contains(&destination.display().to_string()),
+            message.contains(&written.display().to_string()),
             "the window names the file it wrote: {message}"
         );
 
         // The report is the only thing this test leaves, and it leaves nothing:
         // the fixture's data directory is shared with the rest of the suite.
-        std::fs::remove_file(&destination).expect("clean up");
-        let _ = std::fs::remove_dir(destination.parent().expect("parent"));
+        std::fs::remove_file(written).expect("clean up");
+        let _ = std::fs::remove_dir(&folder);
     }
 
     #[gpui_kit::test]

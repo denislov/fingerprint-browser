@@ -70,6 +70,18 @@ this repository does not bundle or fork them.
   that never contains proxy credentials or browser data. The same report is one
   button on the Settings page; see [diagnostics](docs/diagnostics.md).
 
+## Getting started
+
+This program does not download a browser or a proxy engine; you supply both. A
+first run therefore has one step before anything can be launched: add a
+fingerprint-chromium binary on the **Browser Cores** page, or start the program
+with `FP_BROWSER_CHROMIUM_BIN` pointing at one. The empty profile list says so
+and carries the button that leads there. Xray is only needed for a profile that
+uses a proxy.
+
+The whole walk - what the window says at each step, where the files go, and what
+to look at when something is wrong - is in [first run](docs/first-run.md).
+
 ## Proxy testing
 
 An open loopback port is not a working proxy. The launcher only ever learns that
