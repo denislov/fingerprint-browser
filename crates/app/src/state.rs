@@ -1413,6 +1413,37 @@ impl AppState {
         self.import_path = path.into();
     }
 
+    /// Where a diagnostics report would write now.
+    ///
+    /// Recomputed like [`AppState::export_default_path`] and for the same
+    /// reason: a window left open overnight still proposes the current second,
+    /// and two reports in a row do not aim at the same file.
+    pub fn diagnostics_destination(&self) -> PathBuf {
+        crate::paths::default_diagnostics_file(self.settings.data_dir(), SystemTime::now())
+    }
+
+    /// Writes a report about this installation and says where it went.
+    ///
+    /// What it collects is in [`crate::diagnostics`]: the build, the settings in
+    /// force with the source each came from, the state of every file this
+    /// installation keeps, and the end of the activity log. It reads files and
+    /// writes one, both locally and quickly, so it runs on the calling thread.
+    ///
+    /// The database is deliberately not among the files it reads: the proxy
+    /// credentials are in it, and a report is meant to be sent to someone.
+    pub fn write_diagnostics(&mut self) -> Result<PathBuf, String> {
+        let t = self.text();
+        let destination = self.diagnostics_destination();
+        let result = crate::diagnostics::write_for(&self.settings, &destination, t);
+        match &result {
+            Ok(()) => self.set_notice(Notice::info(
+                t.diag_written(&destination.display().to_string()),
+            )),
+            Err(message) => self.set_notice(Notice::error(message.clone())),
+        }
+        result.map(|()| destination)
+    }
+
     /// Where an import would read from, or `None` when nothing was typed.
     pub fn import_source(&self) -> Option<PathBuf> {
         let typed = self.import_path.trim();

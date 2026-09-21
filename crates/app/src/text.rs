@@ -354,6 +354,12 @@ catalog! {
     diag_log_empty => "nothing has been written to this log yet" => "这个日志里还没有任何内容";
     diag_missing => "missing" => "缺失";
 
+    // The card on the Settings page that writes the same report.
+    diag_card_title => "Diagnostics" => "诊断";
+    diag_card_body => "Writes one file about this installation - the build, the settings in force and where each came from, the state of every file it keeps, and the end of the activity log - for a problem report. It never opens the database and never reads browser data."
+        => "把本安装的情况写成一个文件——构建信息、当前设置及其来源、各个文件的状态、以及日志的末尾——用于问题反馈。它不会打开数据库，也不会读取浏览器数据。";
+    diag_write => "Write report" => "写出报告";
+
     // ---- the profile editor ----
     name_field => "Name" => "名称";
     profile_name => "Profile name" => "档案名称";
@@ -1850,6 +1856,16 @@ impl Text {
         match self.lang {
             Lang::En => format!("Wrote a diagnostics report to {path}."),
             Lang::Zh => format!("诊断报告已写入 {path}。"),
+        }
+    }
+
+    /// The line under the diagnostics button, naming the exact file this press
+    /// would write - the button has no path field, so this is where the reader
+    /// finds out where the file goes.
+    pub fn diag_card_note(&self, path: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Writes to {path}."),
+            Lang::Zh => format!("将写入 {path}。"),
         }
     }
 

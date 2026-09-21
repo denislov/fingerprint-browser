@@ -1206,6 +1206,15 @@ impl AppView {
         cx.notify();
     }
 
+    /// Writes a report about this installation, to the file the card named.
+    ///
+    /// Nothing is typed and nothing is confirmed: the destination is a new file
+    /// under the data directory every second, and the report says where it went.
+    fn on_write_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let _ = self.state.write_diagnostics();
+        cx.notify();
+    }
+
     /// Builds the Settings page's import path field on first use, the way the
     /// export one is built.
     fn ensure_import_input(
@@ -1394,6 +1403,7 @@ impl Render for AppView {
         let restore_input = self.ensure_restore_input(window, cx);
         let browser_data_input = self.ensure_browser_data_input(window, cx);
         let export_destination = self.state.export_destination();
+        let diagnostics_destination = self.state.diagnostics_destination();
         let export_includes_credentials = self.state.export_includes_credentials();
         let filter = self.state.profile_filter().to_string();
         let total = self.state.rows().len();
@@ -1498,6 +1508,7 @@ impl Render for AppView {
                                         import: import_input.clone(),
                                         restore: restore_input.clone(),
                                         browser_data: browser_data_input.clone(),
+                                        diagnostics: diagnostics_destination.clone(),
                                         theme: self.state.theme(),
                                         language: self.state.language(),
                                     },
@@ -2135,6 +2146,10 @@ struct SettingsCards {
     import: Entity<InputState>,
     restore: Entity<InputState>,
     browser_data: Entity<InputState>,
+    /// Where the diagnostics card's button would write. Computed while
+    /// rendering, so the line under the button names the file this press would
+    /// produce rather than one named a minute ago.
+    diagnostics: PathBuf,
     theme: ThemeChoice,
     language: Lang,
 }
@@ -2157,6 +2172,8 @@ fn settings_body(
     let restore_card: AnyElement = restore_card(&cards.restore, cx, t).into_any_element();
     let browser_data_card: AnyElement =
         browser_data_card(&cards.browser_data, cx, t).into_any_element();
+    let diagnostics_card: AnyElement =
+        diagnostics_card(&cards.diagnostics, cx, t).into_any_element();
     div()
         .id("settings-scroll")
         .flex()
@@ -2257,6 +2274,7 @@ fn settings_body(
         .child(import_card)
         .child(restore_card)
         .child(browser_data_card)
+        .child(diagnostics_card)
 }
 
 /// The appearance card, first on the page.
@@ -2528,6 +2546,43 @@ fn browser_data_card(
                 ),
         )
         .child(card_note(t.browser_data_note.to_string(), p))
+}
+
+/// The diagnostics card, last on the Settings page.
+///
+/// Last because it is about none of the settings above it: it is the file you
+/// write when one of them is not doing what you expect. One button and no path
+/// field, unlike the export above it - the destination is the data directory's
+/// own `diagnostics` folder, the line under the button names the exact file, and
+/// the report says where it went. A path to type would be a second way to say
+/// something the program already knows.
+// `std::path::Path` spelled out: `gpui_kit::*` brings its own `Path`, and the
+// two are unrelated - one is a file path, the other a drawing primitive.
+fn diagnostics_card(
+    destination: &std::path::Path,
+    cx: &mut Context<AppView>,
+    t: &Text,
+) -> impl IntoElement {
+    let p = palette(cx);
+    settings_card(p)
+        .id("diagnostics")
+        .test_support()
+        .child(settings_card_heading(
+            t.diag_card_title,
+            t.diag_card_body,
+            p,
+        ))
+        .child(
+            div().flex().items_center().gap_2().child(
+                Button::new("diagnostics-run")
+                    .label(t.diag_write)
+                    .on_click(cx.listener(|this, _, _, cx| this.on_write_diagnostics(cx))),
+            ),
+        )
+        .child(card_note(
+            t.diag_card_note(&destination.display().to_string()),
+            p,
+        ))
 }
 
 /// A card's path field with room for the buttons beside it.
@@ -5054,7 +5109,7 @@ mod tests {
 
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
-        scroll_settings_to_the_cards(cx);
+        scroll_settings_to(cx, "language-zh");
         assert!(
             cx.update(|window, _| window.try_find("language-zh").is_some()),
             "the language sits beside the appearance"
@@ -5741,9 +5796,8 @@ mod tests {
 
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
-        // The export card is the second card on the page, below the fold of the
-        // test window.
-        scroll_settings_to_the_cards(cx);
+        // The export card is below the fold of the test window.
+        scroll_settings_to(cx, "export-run");
         // The field exists only after the page has been rendered, which is where
         // an `InputState` gets the window it needs.
         type_export_path(cx, &view, path.to_string_lossy().as_ref());
@@ -5765,6 +5819,48 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// The card's whole job: one press, one file, and the window says where.
+    /// The destination is asked for before the press because the card names it
+    /// rather than taking a path, so this is also what pins that the name on the
+    /// card is the file that gets written.
+    #[gpui_kit::test]
+    fn writing_a_diagnostics_report_from_the_settings_page_says_where_it_went(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (view, _runtime) = view(cx);
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        scroll_settings_to(cx, "diagnostics-run");
+        let destination = view.read_with(cx, |view, _| view.state().diagnostics_destination());
+        let _ = std::fs::remove_file(&destination);
+
+        cx.update(|window, cx| window.click("diagnostics-run", cx));
+        settle(cx);
+
+        assert!(
+            destination.exists(),
+            "{} should exist",
+            destination.display()
+        );
+        let text = std::fs::read_to_string(&destination).expect("read back");
+        assert!(text.contains(crate::version::VERSION), "{text}");
+        assert!(text.contains("Fingerprint Browser diagnostics"), "{text}");
+
+        let message = last_message(cx, &view);
+        assert!(
+            message.contains(&destination.display().to_string()),
+            "the window names the file it wrote: {message}"
+        );
+
+        // The report is the only thing this test leaves, and it leaves nothing:
+        // the fixture's data directory is shared with the rest of the suite.
+        std::fs::remove_file(&destination).expect("clean up");
+        let _ = std::fs::remove_dir(destination.parent().expect("parent"));
     }
 
     #[gpui_kit::test]
@@ -5805,29 +5901,111 @@ mod tests {
         settle(cx);
     }
 
-    /// Brings the Settings page's cards into view.
+    /// The band along the bottom edge of the window where a click does not reach
+    /// what is under it.
     ///
-    /// The page scrolls and its cards sit below the fold of the test window; a
-    /// click on an off-screen element is refused. The wheel event is dispatched
-    /// over the first setting row, which is the one element guaranteed to be on
-    /// screen whatever the page holds above or below it (the scrolling container
-    /// is not a leaf the helpers can aim at, so the event is aimed at a child and
-    /// bubbles up). Aiming it at a card instead is what made this fragile: adding
-    /// a card above that one moved the aim point off screen and the scroll simply
-    /// failed, which reads as a broken card rather than a broken helper.
-    fn scroll_settings_to_the_cards(cx: &mut gpui_kit::VisualTestContext) {
-        cx.update(|window, cx| {
-            window.scroll(
-                "setting-data-dir",
-                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
-                    gpui_kit::px(0.),
-                    gpui_kit::px(-4000.),
-                )),
-                cx,
+    /// Measured rather than read out of the component library: a button whose
+    /// middle is inside the window and whose bounds are inside the viewport is
+    /// still not clickable once it has scrolled to within about forty pixels of
+    /// the bottom - the library's window border keeps a resize band and an
+    /// overlay layer there, and a click that lands in it is swallowed without an
+    /// error. So a target has to be this clear of the bottom before it counts.
+    const CLICKABLE_BOTTOM_MARGIN: f32 = 48.;
+
+    /// Whether an element is fully on screen and clickable.
+    ///
+    /// `visible()` alone is not enough, twice over. It is true for an element
+    /// with one pixel showing at the edge of the scrolled area, and a click is
+    /// aimed at the middle of the element and hit-tested there: an element that
+    /// has just scrolled into view by one step reports visible while half of it
+    /// is still past the bottom of the page, so the click lands on the scroll
+    /// view instead of on the button - and nothing reports an error, because the
+    /// window simply received a click somewhere else. And an element in the
+    /// bottom band above is swallowed even when it is entirely inside the
+    /// viewport. Requiring the whole element to be clear of both is what tells
+    /// those states apart from a click that will land.
+    ///
+    /// The id is copied because `try_find` wants an owned one: the ids here are
+    /// built at the call site (`setting-data-dir`, and so on) rather than being
+    /// the `&'static str` the lookup asks for.
+    fn is_clickable(cx: &mut gpui_kit::VisualTestContext, id: &str) -> bool {
+        let id = id.to_string();
+        cx.update(|window, _| {
+            let Some(found) = window.try_find(id) else {
+                return false;
+            };
+            if !found.visible() {
+                return false;
+            }
+            let size = window.viewport_size();
+            let usable = gpui_kit::Bounds::new(
+                gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)),
+                gpui_kit::Size {
+                    width: size.width,
+                    height: size.height - gpui_kit::px(CLICKABLE_BOTTOM_MARGIN),
+                },
             );
-        });
-        settle(cx);
+            found.bounds().is_contained_within(&usable)
+        })
     }
+
+    /// Scrolls the Settings page until `target` is on screen.
+    ///
+    /// The page is longer than the test window and its cards sit below the fold,
+    /// and a click on an off-screen element is refused. The wheel event has to be
+    /// dispatched over a child of the scrolling container - the container is not
+    /// something the helpers can aim at - and that child has to be on screen
+    /// itself. A single long scroll aimed at one row stops working the moment the
+    /// page grows past it, which is what happened when a card was added at the
+    /// bottom; so each step aims at whichever row or card is on screen now, which
+    /// is also where the wheel would really land.
+    fn scroll_settings_to(cx: &mut gpui_kit::VisualTestContext, target: &str) {
+        let mut previous = None;
+        for _ in 0..40 {
+            if is_clickable(cx, target) {
+                return;
+            }
+            let now =
+                cx.update(|window, _| window.try_find(target.to_string()).map(|id| id.bounds()));
+            if now.is_some() && now == previous {
+                // The page is at its end: the element is as far into view as it
+                // is going to get, and another wheel event would only spin.
+                panic!("{target} cannot be scrolled clear of the bottom of the window");
+            }
+            previous = now;
+            let aim = crate::settings::SettingKey::ALL
+                .iter()
+                .map(|key| format!("setting-{}", key.id()))
+                .chain(SETTINGS_CARDS.iter().map(|id| (*id).to_string()))
+                .find(|id| is_clickable(cx, id))
+                .unwrap_or_else(|| {
+                    panic!("nothing on the Settings page is on screen to scroll from")
+                });
+            cx.update(|window, cx| {
+                window.scroll(
+                    aim,
+                    gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                        gpui_kit::px(0.),
+                        gpui_kit::px(-200.),
+                    )),
+                    cx,
+                );
+            });
+            settle(cx);
+        }
+        panic!("{target} never came into view");
+    }
+
+    /// The Settings cards, in the order they appear, for the scroll helper to aim
+    /// at once the setting rows above them have scrolled away.
+    const SETTINGS_CARDS: [&str; 6] = [
+        "appearance",
+        "export-configuration",
+        "import-configuration",
+        "restore-configuration",
+        "browser-data",
+        "diagnostics",
+    ];
 
     #[gpui_kit::test]
     fn importing_from_the_settings_page_reads_the_file_and_says_what_it_did(
@@ -5863,7 +6041,7 @@ mod tests {
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
         type_import_path(cx, &view, path.to_string_lossy().as_ref());
-        scroll_settings_to_the_cards(cx);
+        scroll_settings_to(cx, "import-run");
         cx.update(|window, cx| window.click("import-run", cx));
         settle(cx);
 
@@ -5888,7 +6066,7 @@ mod tests {
 
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
-        scroll_settings_to_the_cards(cx);
+        scroll_settings_to(cx, "import-run");
         cx.update(|window, cx| window.click("import-run", cx));
         settle(cx);
 
@@ -5929,7 +6107,7 @@ mod tests {
         settle(cx);
         // The restore card sits below the import one; the same downward scroll
         // brings it into view.
-        scroll_settings_to_the_cards(cx);
+        scroll_settings_to(cx, "restore-run");
         cx.update(|window, cx| window.click("restore-run", cx));
         settle(cx);
 
@@ -5972,7 +6150,7 @@ mod tests {
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
         type_restore_path(cx, &view, path.to_string_lossy().as_ref());
-        scroll_settings_to_the_cards(cx);
+        scroll_settings_to(cx, "restore-run");
         cx.update(|window, cx| window.click("restore-run", cx));
         settle(cx);
 
@@ -6048,7 +6226,7 @@ mod tests {
         });
         settle(cx);
 
-        scroll_settings_to_the_cards(cx);
+        scroll_settings_to(cx, "browser-data-out");
         cx.update(|window, cx| window.click("browser-data-out", cx));
         wait_for_state(cx, &view, |state| {
             state
@@ -6082,7 +6260,7 @@ mod tests {
 
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
-        scroll_settings_to_the_cards(cx);
+        scroll_settings_to(cx, "browser-data-out");
         cx.update(|window, cx| window.click("browser-data-out", cx));
         settle(cx);
 

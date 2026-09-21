@@ -42,6 +42,12 @@ before anyone has to guess.
 on an earlier report by accident, so the default destination is always safe to
 write over, and a report that replaces one is one the user pointed at.
 
+The Settings page's **Diagnostics** card is the same report behind one button,
+and it has no path field: it writes the same default, the line under the button
+names the exact file, and the window says where it went. A path to type there
+would be a second way to say something the program already knows - `--out` is
+that second way, and it is for scripts.
+
 The report is markdown, and reads as plain text: headings and `- label: value`
 lines, so it renders in an issue and greps in a terminal.
 
