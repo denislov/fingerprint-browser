@@ -105,7 +105,7 @@ impl SettingKey {
 
     /// Whether the window may change it.
     pub fn editable(self) -> bool {
-        matches!(self, Self::DataDir | Self::XrayExecutable | Self::EchoUrl)
+        matches!(self, Self::XrayExecutable | Self::EchoUrl)
     }
 
     /// When a change takes effect.
@@ -201,6 +201,11 @@ impl SettingRow {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Stored {
+    /// Where the data directory used to be chosen. Read once, during the move
+    /// of the config file into the data directory, and never written back: the
+    /// file now lives inside the directory it used to name, so a value here
+    /// could not decide where to look for it.
+    #[serde(skip_serializing)]
     data_dir: Option<String>,
     xray_executable: Option<String>,
     echo_url: Option<String>,
@@ -242,11 +247,109 @@ impl Environment {
     }
 }
 
-/// Where the config file lives when nothing overrides it.
-fn default_config_path(host: &paths::Host) -> PathBuf {
+/// Where the config file used to live: the platform's config directory.
+///
+/// Kept as a migration source. A file here is read once, folded into the data
+/// directory, and removed; nothing writes here any more.
+fn legacy_config_path(host: &paths::Host) -> PathBuf {
     paths::config_dir(host)
         .unwrap_or_else(|| PathBuf::from(".").join(paths::CONFIG_DIR))
-        .join("config.json")
+        .join(paths::CONFIG_FILE)
+}
+
+/// The data directory this run uses.
+///
+/// The environment, or the platform's own directory, and nothing else. The
+/// config file lives *inside* this directory, so a value read from that file
+/// could not decide where to find it - and the one field that used to move it is
+/// now a migration source instead. Moving the directory is done by setting
+/// `FP_BROWSER_DATA_DIR`, which is also what makes it a decision about the whole
+/// process rather than about the contents of a file inside it.
+fn resolve_data_dir(env: &Environment) -> PathBuf {
+    env.data_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| paths::data_dir_or_fallback(&env.host))
+}
+
+/// Where the config file lives: the environment's path, or the data directory.
+///
+/// The environment override stays, because a test and a script both need to aim
+/// the program at a file without inventing a data directory for it.
+fn resolve_config_path(env: &Environment, data_dir: &Path) -> PathBuf {
+    env.config
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join(paths::CONFIG_FILE))
+}
+
+/// What happened to a config file that was not already in the data directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Migration {
+    /// An old file named a data directory this run does not use.
+    IgnoredDataDir(String),
+    /// The settings were read, and could not be written to the new location.
+    NotWritten(String),
+}
+
+/// Reads the stored settings, moving a config file out of the old location.
+///
+/// Returns the settings, an error to report, and what the move did - if it did
+/// anything at all. The move has two endings that need a sentence: an old file
+/// that named a data directory of its own, which cannot be honoured without
+/// leaving the file that names it somewhere the next start does not look, and a
+/// write that failed.
+fn read_stored(
+    config_path: &Path,
+    env: &Environment,
+    data_dir: &Path,
+    t: &Text,
+) -> (Stored, Option<String>, Option<Migration>) {
+    if config_path.exists() {
+        return match read_config(config_path, t) {
+            Ok(stored) => (stored, None, None),
+            Err(error) => (Stored::default(), Some(error), None),
+        };
+    }
+    // An explicit path is not ours to migrate into: the caller said where it is.
+    if env.config.is_some() {
+        return (Stored::default(), None, None);
+    }
+
+    let legacy = legacy_config_path(&env.host);
+    if !legacy.exists() {
+        return (Stored::default(), None, None);
+    }
+    let stored = match read_config(&legacy, t) {
+        Ok(stored) => stored,
+        // Left where it is: a file that cannot be read is not one to move.
+        Err(error) => return (Stored::default(), Some(error), None),
+    };
+    let ignored = stored
+        .data_dir
+        .clone()
+        .filter(|old| Path::new(old) != data_dir);
+    if let Some(old) = ignored {
+        // Not moved either, and deliberately: the file is the only record of
+        // where that directory is. Setting the environment variable to it makes
+        // the next start resolve that directory and migrate the file there.
+        return (stored, None, Some(Migration::IgnoredDataDir(old)));
+    }
+
+    let mut moved = stored.clone();
+    // Read, and not carried over: the next start resolves the same directory
+    // from the environment or the platform, so a stored copy would be a second
+    // answer to a question that now has one.
+    moved.data_dir = None;
+    if let Err(error) = write_config(config_path, &moved, t) {
+        // The values read are still the ones in force and the old file stays
+        // where it is, so nothing is lost - but the next start will not find
+        // them at the new location, and the banner has to say so rather than
+        // leaving a settings page that looks like it worked.
+        return (moved, None, Some(Migration::NotWritten(error)));
+    }
+    let _ = std::fs::remove_file(&legacy);
+    (moved, None, None)
 }
 
 /// The endpoint the proxy diagnostic asks what address it left from.
@@ -283,23 +386,12 @@ impl Settings {
     /// A broken config file is reported and the defaults are used, so the app
     /// still starts; saving is refused until it is fixed.
     pub fn load(env: Environment) -> (Self, Option<Notice>) {
-        let config_path = env
-            .config
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| default_config_path(&env.host));
-
-        let (stored, config_error) = match read_config(&config_path, text(Lang::En)) {
-            Ok(stored) => (stored, None),
-            Err(error) => (Stored::default(), Some(error)),
-        };
-
-        let data_dir = env
-            .data_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .or_else(|| stored.data_dir.as_ref().map(PathBuf::from))
-            .unwrap_or_else(|| paths::data_dir_or_fallback(&env.host));
+        let data_dir = resolve_data_dir(&env);
+        let config_path = resolve_config_path(&env, &data_dir);
+        // English here: the language is one of the things this read is trying to
+        // find, so a file that fails to parse can only complain in the default.
+        let (stored, config_error, migration) =
+            read_stored(&config_path, &env, &data_dir, text(Lang::En));
         let xray_executable = env
             .xray_executable
             .as_ref()
@@ -315,9 +407,31 @@ impl Settings {
         // file that failed to parse still says which language to complain in.
         let lang = Lang::from_code(stored.lang.as_deref().unwrap_or(""));
 
+        // An error is worth more than the migration note, and only one of them
+        // can be set: the move either read the old file or it did not.
         let notice = config_error
             .as_ref()
-            .map(|error| (text(lang).settings_unreadable(error), true));
+            .map(|error| (text(lang).settings_unreadable(error), true))
+            .or_else(|| {
+                migration.as_ref().map(|migration| match migration {
+                    Migration::IgnoredDataDir(old) => (
+                        text(lang).data_dir_no_longer_in_config(
+                            old,
+                            DATA_DIR_ENV,
+                            &data_dir.display().to_string(),
+                        ),
+                        true,
+                    ),
+                    Migration::NotWritten(error) => (
+                        text(lang).settings_not_moved(
+                            &legacy_config_path(&env.host).display().to_string(),
+                            &config_path.display().to_string(),
+                            error,
+                        ),
+                        true,
+                    ),
+                })
+            });
 
         let settings = Self {
             config_path,
@@ -411,10 +525,13 @@ impl Settings {
             SettingRow {
                 key: SettingKey::DataDir,
                 value: self.rendered(&self.data_dir, t),
-                source: self.source_of(self.env.data_dir.is_some(), self.stored.data_dir.is_some()),
+                source: self.source_of(self.env.data_dir.is_some(), false),
                 env: self.env.data_dir.as_ref().map(|_| DATA_DIR_ENV),
-                shadowed: shadowed(&self.stored.data_dir, self.env.data_dir.is_some()),
-                note: None,
+                // An old config file may still name a directory this build does
+                // not read; the row says so with the sentence used for any value
+                // the environment is overriding, because that is what happened.
+                shadowed: self.stored.data_dir.clone(),
+                note: Some(t.help_data_dir.to_string()),
             },
             SettingRow {
                 key: SettingKey::XrayExecutable,
@@ -533,7 +650,6 @@ impl Settings {
 
         let mut stored = self.stored.clone();
         match key {
-            SettingKey::DataDir => stored.data_dir = Some(value.to_string()),
             SettingKey::XrayExecutable => stored.xray_executable = Some(value.to_string()),
             SettingKey::EchoUrl => stored.echo_url = Some(value.to_string()),
             _ => return Err(t.setting_not_editable(key.label(t))),
@@ -543,13 +659,6 @@ impl Settings {
         self.stored = stored;
         // Re-resolve, so the page shows the new value without a restart even
         // though the process keeps using the old one until it starts again.
-        self.data_dir = self
-            .env
-            .data_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .or_else(|| self.stored.data_dir.as_ref().map(PathBuf::from))
-            .unwrap_or_else(|| paths::data_dir_or_fallback(&self.env.host));
         self.xray_executable = self
             .env
             .xray_executable
@@ -572,8 +681,6 @@ impl Settings {
     #[cfg(test)]
     pub fn pending(&self, key: SettingKey) -> Option<String> {
         match key {
-            SettingKey::DataDir if self.env.data_dir.is_some() => None,
-            SettingKey::DataDir => self.stored.data_dir.clone(),
             SettingKey::XrayExecutable if self.env.xray_executable.is_some() => None,
             SettingKey::XrayExecutable => self.stored.xray_executable.clone(),
             _ => None,
@@ -744,17 +851,166 @@ mod tests {
     #[test]
     fn a_stored_value_is_used_and_says_where_it_came_from() {
         let config = TempConfig::new("stored");
-        config.write(r#"{"data_dir": "/srv/fp", "xray_executable": "/opt/xray"}"#);
+        config.write(r#"{"xray_executable": "/opt/xray"}"#);
         let (settings, notice) = Settings::load(env(&config));
 
         assert!(notice.is_none());
-        assert_eq!(settings.data_dir(), Path::new("/srv/fp"));
         assert_eq!(settings.xray_executable(), Path::new("/opt/xray"));
-        let rows = settings.rows(en());
-        assert_eq!(rows[0].source, Source::ConfigFile);
-        assert_eq!(rows[0].source_label(en()), "from the config file");
-        assert_eq!(rows[0].value, "/srv/fp");
-        assert_eq!(rows[1].value, "/opt/xray");
+        let row = settings.rows(en())[1].clone();
+        assert_eq!(row.key, SettingKey::XrayExecutable);
+        assert_eq!(row.source, Source::ConfigFile);
+        assert_eq!(row.source_label(en()), "from the config file");
+        assert_eq!(row.value, "/opt/xray");
+    }
+
+    /// The config file lives in the data directory, so everything a run needs is
+    /// under one path - and a file left in the old location is folded in once,
+    /// then removed, rather than being read for ever from two places.
+    #[test]
+    fn a_config_file_in_the_old_location_is_moved_into_the_data_directory() {
+        let home =
+            std::env::temp_dir().join(format!("fp-settings-home-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let host = paths::Host {
+            home: Some(home.clone()),
+            ..paths::Host::default()
+        };
+        // Taken from the platform rule rather than spelled out, so a test cannot
+        // pass while the directory the program uses has moved somewhere else.
+        let data = paths::data_dir(&host).expect("a data directory");
+        let legacy = home.join(".config/fp-browser/config.json");
+        std::fs::create_dir_all(legacy.parent().expect("parent")).expect("legacy dir");
+        std::fs::write(
+            &legacy,
+            r#"{"xray_executable": "/opt/xray", "theme": "light", "lang": "zh"}"#,
+        )
+        .expect("legacy config");
+
+        let environment = Environment {
+            host: host.clone(),
+            ..Environment::default()
+        };
+        let (settings, notice) = Settings::load(environment);
+
+        assert!(notice.is_none(), "a plain move needs no explanation");
+        assert_eq!(settings.data_dir(), data, "the platform's own directory");
+        assert_eq!(settings.xray_executable(), Path::new("/opt/xray"));
+        assert_eq!(settings.theme(), ThemeChoice::Light);
+        assert_eq!(settings.language(), Lang::Zh);
+        let moved = data.join(paths::CONFIG_FILE);
+        assert!(moved.exists(), "the file is where the next start looks");
+        assert!(!legacy.exists(), "and it is not in two places");
+        let written = std::fs::read_to_string(&moved).expect("read moved file");
+        assert!(!written.contains("data_dir"), "{written}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A move that cannot be written says so, and keeps reading the old file:
+    /// the values are in force either way, and the alternative is a settings
+    /// page that looks like it saved.
+    #[test]
+    fn a_move_that_cannot_be_written_keeps_reading_the_old_file() {
+        let home =
+            std::env::temp_dir().join(format!("fp-settings-home-blocked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("temp dir");
+        let legacy = home.join(".config/fp-browser/config.json");
+        std::fs::create_dir_all(legacy.parent().expect("parent")).expect("legacy dir");
+        std::fs::write(&legacy, r#"{"theme": "light"}"#).expect("legacy config");
+        // A file where the data directory would have to go: creating it fails,
+        // which is what a full disk or a read-only home looks like from here.
+        let blocked = home.join("blocked");
+        std::fs::write(&blocked, b"not a directory").expect("a file in the way");
+
+        let environment = Environment {
+            data_dir: Some(blocked.join("data").to_string_lossy().to_string()),
+            host: paths::Host {
+                home: Some(home.clone()),
+                ..paths::Host::default()
+            },
+            ..Environment::default()
+        };
+        let (settings, notice) = Settings::load(environment);
+
+        let (message, is_error) = notice.expect("a notice");
+        assert!(is_error, "{message}");
+        assert!(message.contains("could not be moved"), "{message}");
+        assert!(
+            legacy.exists(),
+            "the settings are still only here, so the file has to stay"
+        );
+        assert_eq!(
+            settings.theme(),
+            ThemeChoice::Light,
+            "and they are in force"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The one case the move cannot decide: an old file that named a data
+    /// directory of its own. It is left alone - it is the only record of where
+    /// that directory is - and the banner says how to get back to it.
+    #[test]
+    fn a_config_file_naming_another_data_directory_is_left_where_it_is() {
+        let home =
+            std::env::temp_dir().join(format!("fp-settings-home-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let host = paths::Host {
+            home: Some(home.clone()),
+            ..paths::Host::default()
+        };
+        let data = paths::data_dir(&host).expect("a data directory");
+        let elsewhere = home.join("elsewhere");
+        let legacy = home.join(".config/fp-browser/config.json");
+        std::fs::create_dir_all(legacy.parent().expect("parent")).expect("legacy dir");
+        std::fs::write(
+            &legacy,
+            format!(
+                r#"{{"data_dir": "{}", "theme": "light"}}"#,
+                elsewhere.display()
+            ),
+        )
+        .expect("legacy config");
+
+        let environment = Environment {
+            host,
+            ..Environment::default()
+        };
+        let (settings, notice) = Settings::load(environment);
+
+        let (message, is_error) = notice.expect("a notice");
+        assert!(is_error, "the profile list is about to look empty");
+        assert!(
+            message.contains(&elsewhere.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains(DATA_DIR_ENV), "{message}");
+        assert!(
+            legacy.exists(),
+            "the file that knows where that directory is was not moved"
+        );
+        assert_eq!(
+            settings.data_dir(),
+            data,
+            "this run uses the directory it resolved, not the one in the file"
+        );
+        assert_eq!(
+            settings.rows(en())[0].shadowed_label(en()).as_deref(),
+            Some(
+                format!(
+                    "the config file holds {}, which this overrides",
+                    elsewhere.display()
+                )
+                .as_str()
+            ),
+            "the row says what was ignored"
+        );
+        assert_eq!(
+            settings.theme(),
+            ThemeChoice::Light,
+            "the rest still applies"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A stored setting the environment overrides must be visible, not silently
@@ -902,9 +1158,6 @@ mod tests {
         let (mut settings, _) = Settings::load(env(&config));
 
         settings
-            .set(SettingKey::DataDir, "/srv/fp")
-            .expect("save data dir");
-        settings
             .set(SettingKey::XrayExecutable, "/opt/xray")
             .expect("save xray");
         settings
@@ -912,7 +1165,6 @@ mod tests {
             .expect("save the endpoint");
 
         let text = config.read();
-        assert!(text.contains("/srv/fp"), "{text}");
         assert!(text.contains("/opt/xray"), "{text}");
         assert!(
             text.contains("http://echo.example/ip"),
@@ -922,7 +1174,6 @@ mod tests {
 
         // And a fresh load agrees.
         let (reloaded, _) = Settings::load(env(&config));
-        assert_eq!(reloaded.data_dir(), Path::new("/srv/fp"));
         assert_eq!(reloaded.xray_executable(), Path::new("/opt/xray"));
         assert_eq!(reloaded.echo_url(), "http://echo.example/ip");
     }
@@ -933,15 +1184,15 @@ mod tests {
     #[test]
     fn the_appearance_is_stored_and_an_absent_one_means_dark() {
         let config = TempConfig::new("theme");
-        config.write(r#"{"data_dir": "/srv/fp"}"#);
+        config.write(r#"{"xray_executable": "/srv/xray"}"#);
         let (mut settings, _) = Settings::load(env(&config));
         assert_eq!(settings.theme(), ThemeChoice::Dark, "absent means dark");
 
         settings.set_theme(ThemeChoice::Light).expect("save");
         assert_eq!(settings.theme(), ThemeChoice::Light);
         assert_eq!(
-            settings.data_dir(),
-            Path::new("/srv/fp"),
+            settings.xray_executable(),
+            Path::new("/srv/xray"),
             "kept across the rewrite"
         );
 
@@ -955,15 +1206,15 @@ mod tests {
     #[test]
     fn the_language_is_stored_and_an_unknown_one_means_english() {
         let config = TempConfig::new("language");
-        config.write(r#"{"data_dir": "/srv/fp"}"#);
+        config.write(r#"{"xray_executable": "/srv/xray"}"#);
         let (mut settings, _) = Settings::load(env(&config));
         assert_eq!(settings.language(), Lang::En, "absent means English");
 
         settings.set_language(Lang::Zh).expect("save");
         assert_eq!(settings.language(), Lang::Zh);
         assert_eq!(
-            settings.data_dir(),
-            Path::new("/srv/fp"),
+            settings.xray_executable(),
+            Path::new("/srv/xray"),
             "kept across the rewrite"
         );
 
@@ -1007,18 +1258,22 @@ mod tests {
     fn a_saved_value_is_the_pending_one_even_while_the_process_uses_the_old() {
         let config = TempConfig::new("pending");
         let (mut settings, _) = Settings::load(env(&config));
-        assert_eq!(settings.pending(SettingKey::DataDir), None);
+        assert_eq!(settings.pending(SettingKey::XrayExecutable), None);
 
-        settings.set(SettingKey::DataDir, "/srv/fp").expect("save");
+        settings
+            .set(SettingKey::XrayExecutable, "/opt/xray")
+            .expect("save");
 
-        assert_eq!(
-            settings.rows(en())[0].value,
-            "/srv/fp",
+        assert!(
+            settings
+                .rows(en())
+                .iter()
+                .any(|row| row.key == SettingKey::XrayExecutable && row.value == "/opt/xray"),
             "the page shows what the next start will use"
         );
         assert_eq!(
-            settings.pending(SettingKey::DataDir).as_deref(),
-            Some("/srv/fp")
+            settings.pending(SettingKey::XrayExecutable).as_deref(),
+            Some("/opt/xray")
         );
     }
 
@@ -1026,13 +1281,15 @@ mod tests {
     fn an_environment_override_has_no_pending_value() {
         let config = TempConfig::new("pending-env");
         let mut environment = env(&config);
-        environment.data_dir = Some("/tmp/other".to_string());
+        environment.xray_executable = Some("/tmp/other".to_string());
         let (mut settings, _) = Settings::load(environment);
 
         // Stored, but overridden: it is not what the next start will use.
-        settings.set(SettingKey::DataDir, "/srv/fp").expect("save");
-        assert_eq!(settings.pending(SettingKey::DataDir), None);
-        assert_eq!(settings.data_dir(), Path::new("/tmp/other"));
+        settings
+            .set(SettingKey::XrayExecutable, "/opt/xray")
+            .expect("save");
+        assert_eq!(settings.pending(SettingKey::XrayExecutable), None);
+        assert_eq!(settings.xray_executable(), Path::new("/tmp/other"));
     }
 
     #[test]
@@ -1097,7 +1354,7 @@ mod tests {
     #[test]
     fn the_settings_page_names_every_source() {
         let config = TempConfig::new("sources");
-        config.write(r#"{"data_dir": "/srv/fp"}"#);
+        config.write(r#"{"xray_executable": "/opt/xray"}"#);
         let mut environment = env(&config);
         environment.chromium_bin = Some("/opt/chrome".to_string());
         let (settings, _) = Settings::load(environment);
@@ -1109,11 +1366,14 @@ mod tests {
                 .expect("the row exists")
                 .clone()
         };
-        assert_eq!(by_key(SettingKey::DataDir).source, Source::ConfigFile);
+        assert_eq!(
+            by_key(SettingKey::DataDir).source,
+            Source::Default,
+            "nothing but the environment can move the data directory now"
+        );
         assert_eq!(
             by_key(SettingKey::XrayExecutable).source,
-            Source::Default,
-            "the xray path has no stored value"
+            Source::ConfigFile
         );
         assert_eq!(by_key(SettingKey::ChromiumBin).source, Source::Environment);
         assert_eq!(

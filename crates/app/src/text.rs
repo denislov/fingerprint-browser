@@ -199,8 +199,12 @@ catalog! {
         => "由它发现的内核会列在「浏览器内核」页";
     help_chromium_major => "used only for binaries that answer nothing to --version"
         => "仅用于对 --version 无输出的可执行文件";
-    help_config_file => "the data directory and Xray executable are stored here, outside the data directory, so changing the data directory cannot lose them"
-        => "数据目录与 Xray 可执行文件记录在这里，位于数据目录之外，因此更改数据目录不会丢失它们";
+    help_config_file => "lives in the data directory, beside the database, the logs and the profiles, so one directory holds the whole installation"
+        => "位于数据目录内，与数据库、日志和档案放在一起，因此整个安装只在一个目录里";
+    help_data_dir => "where the database, logs, profiles and this config file live; set FP_BROWSER_DATA_DIR before starting to use another directory"
+        => "数据库、日志、档案与本配置文件所在的位置；想换目录请在启动前设置 FP_BROWSER_DATA_DIR";
+    help_xray_executable_field => "Used when a profile has a proxy. The running process keeps the executable it started with."
+        => "档案使用代理时会用到它。正在运行的进程仍使用它启动时的那一个。";
     help_runtime_dir => "temporary launch files; Xray configs are removed on shutdown"
         => "临时启动文件；Xray 配置在退出时删除";
 
@@ -1651,6 +1655,31 @@ impl Text {
         match self.lang {
             Lang::En => format!("could not write {path}: {error}"),
             Lang::Zh => format!("无法写入 {path}：{error}"),
+        }
+    }
+
+    /// An old config file that named a data directory this build no longer
+    /// reads, and the one way to keep using it.
+    pub fn data_dir_no_longer_in_config(&self, old: &str, env: &str, resolved: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "the config file used to say the data directory is {old}; this build keeps its config inside the data directory, so it uses {resolved} - set {env}={old} to go back"
+            ),
+            Lang::Zh => format!(
+                "配置文件里记录的数据目录是 {old}；本版本把配置文件放在数据目录内，因此使用 {resolved} —— 若要回到原目录，请设置 {env}={old}"
+            ),
+        }
+    }
+
+    /// Settings were read from the old location but could not be written to the
+    /// new one. Not "unreadable": the values in force are the ones that were
+    /// read, and nothing is lost while the old file stays where it is.
+    pub fn settings_not_moved(&self, from: &str, to: &str, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "the settings in {from} could not be moved to {to}, so they are still being read from the old file: {error}"
+            ),
+            Lang::Zh => format!("{from} 里的设置无法搬到 {to}，目前仍从旧文件读取：{error}"),
         }
     }
 

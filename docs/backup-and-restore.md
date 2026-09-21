@@ -49,14 +49,19 @@ Measured from the code, not assumed:
 | `<data dir>/profiles/<profile uuid>/` | One Chromium user-data directory per profile: cookies, Local Storage, IndexedDB, caches | The browser data. Large, session-bearing, and locked while the profile runs. |
 | `<data dir>/logs/activity.log` (+ `.log.1`) | The activity log, rotating at 512 KiB | Not part of any backup. |
 | `<data dir>/runtime/<profile id>/config.json` | The Xray config written at start, holding upstream credentials | **Never exported.** See below. |
-| `<config dir>/fp-browser/config.json` | `data_dir`, `xray_executable`, `echo_url` | Machine-local, and deliberately outside the data directory. |
+| `<data dir>/config.json` | `xray_executable`, `echo_url`, plus the appearance and language | Machine-local, and inside the data directory with everything else. |
 
 Two consequences follow from the layout rather than from taste:
 
-- The config file lives **outside** the data directory precisely so it can say
-  where the data directory is. A backup of the data directory therefore never
-  carries the pointer to itself, and restoring one does not require rewriting a
-  setting. What it also means is that "settings" are not part of a backup at all.
+- The config file lives **inside** the data directory, so one directory holds the
+  whole installation: the settings, the database, the logs and the profiles. What
+  it therefore cannot do is say where the data directory is - that is the
+  environment's (`FP_BROWSER_DATA_DIR`) or the platform's to decide - which is
+  what keeps "one directory" true rather than aspirational. A file left in the old
+  location (`<config dir>/fp-browser/config.json`) is carried across on the first
+  start and then removed; if it named a data directory of its own it is left where
+  it is and the banner says how to get back to it. What none of this changes is
+  that "settings" are not part of a backup at all.
 - `profiles.user_data_dir` is stored as an **absolute path**, and profile, core
   and proxy identifiers are UUIDv4. A backup restored on the same machine can line
   browser data back up; a backup carried to another machine cannot, because the
@@ -326,8 +331,10 @@ which is the file's own context, not its content.
 
 - `<data dir>/runtime/` - transient, and holds live credentials.
 - `<data dir>/logs/` - a record, not configuration.
-- `<config dir>/fp-browser/config.json` - machine-local by design.
-- `data_dir`, `xray_executable`, `echo_url` - settings, as above.
+- `<data dir>/config.json` - machine-local by design, and not configuration in
+  the sense this document means: it says where this machine keeps things.
+- `xray_executable`, `echo_url`, the appearance and the language - settings, as
+  above.
 - `schema_migrations` - a property of the database, not of the user's
   configuration. The document's own `version` is what a reader checks.
 

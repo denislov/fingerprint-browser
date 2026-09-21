@@ -3319,8 +3319,16 @@ mod tests {
             .expect("the data directory row");
         assert_eq!(data_dir.source, crate::settings::Source::Default);
         assert_eq!(data_dir.source_label(en()), "from the default");
-        assert!(data_dir.key.editable());
+        assert!(
+            !data_dir.key.editable(),
+            "the config file lives in the data directory, so the directory is \
+             chosen by the environment or the platform, not from inside it"
+        );
         assert_eq!(data_dir.key.effect().label(en()), "next start");
+        assert!(
+            data_dir.note.is_some(),
+            "the row says how to move it, because the row cannot do it"
+        );
 
         let chromium = rows
             .iter()
@@ -3358,11 +3366,11 @@ mod tests {
 
         fixture
             .state
-            .update_setting(SettingKey::DataDir, "/srv/fp")
+            .update_setting(SettingKey::XrayExecutable, "/opt/xray")
             .expect("save");
 
         let stored = std::fs::read_to_string(&config).expect("the config file was written");
-        assert!(stored.contains("/srv/fp"), "{stored}");
+        assert!(stored.contains("/opt/xray"), "{stored}");
         let toast = fixture
             .state
             .toasts()
@@ -3382,10 +3390,10 @@ mod tests {
                 .state
                 .setting_rows()
                 .iter()
-                .find(|row| row.key == SettingKey::DataDir)
+                .find(|row| row.key == SettingKey::XrayExecutable)
                 .expect("the row")
                 .value,
-            "/srv/fp",
+            "/opt/xray",
             "the page shows what the next start will use"
         );
         let _ = std::fs::remove_dir_all(&dir);

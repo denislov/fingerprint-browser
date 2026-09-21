@@ -676,7 +676,7 @@ impl AppView {
                             div()
                                 .text_xs()
                                 .text_color(rgb(p.muted))
-                                .child(key_help(key)),
+                                .child(key_help(key, t)),
                         ),
                 )
                 .footer(
@@ -2081,18 +2081,13 @@ fn cores_body(rows: &[CoreRow], cx: &mut Context<AppView>, t: &Text) -> impl Int
 }
 
 /// What a setting does, in one line, under its field.
-fn key_help(key: SettingKey) -> String {
+///
+/// The rows that cannot be edited have no field, so this covers the editable
+/// ones - and the help a row carries on the page is its own (`SettingRow::note`),
+/// because a page has room for a sentence a dialog does not.
+fn key_help(key: SettingKey, t: &Text) -> String {
     match key {
-        SettingKey::DataDir => {
-            "Where profiles, cores and the database live. A new directory starts empty; \
-             the current one keeps being used until the next start."
-                .to_string()
-        }
-        SettingKey::XrayExecutable => {
-            "Used when a profile has a proxy. The running process keeps the executable \
-             it started with."
-                .to_string()
-        }
+        SettingKey::XrayExecutable => t.help_xray_executable_field.to_string(),
         _ => String::new(),
     }
 }
@@ -4935,13 +4930,14 @@ mod tests {
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
 
-        for key in ["data-dir", "xray-executable"] {
+        for key in ["xray-executable", "echo-url"] {
             assert!(
                 cx.update(|window, _| window.try_find(format!("edit-setting-{key}")).is_some()),
                 "{key} can be changed"
             );
         }
         for key in [
+            "data-dir",
             "chromium-bin",
             "chromium-major",
             "config-file",
@@ -4965,14 +4961,14 @@ mod tests {
 
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
-        cx.update(|window, cx| window.click("edit-setting-data-dir", cx));
+        cx.update(|window, cx| window.click("edit-setting-xray-executable", cx));
         settle(cx);
         assert!(
-            cx.update(|window, _| window.try_find("setting-field-data-dir").is_some()),
+            cx.update(|window, _| window.try_find("setting-field-xray-executable").is_some()),
             "the field is open"
         );
         assert!(
-            cx.update(|window, _| window.try_find("setting-data-dir").is_some()),
+            cx.update(|window, _| window.try_find("setting-xray-executable").is_some()),
             "the row it belongs to is still there"
         );
 
@@ -4980,21 +4976,21 @@ mod tests {
             .read_with(cx, |view, _| view.setting_editor())
             .expect("the settings field");
         cx.update(|window, cx| {
-            field.update(cx, |state, cx| state.set_value("/srv/fp", window, cx));
+            field.update(cx, |state, cx| state.set_value("/opt/xray", window, cx));
         });
         cx.update(|window, cx| window.click("ok", cx));
         settle(cx);
 
         let stored = std::fs::read_to_string(&config).expect("the config file was written");
-        assert!(stored.contains("/srv/fp"), "{stored}");
+        assert!(stored.contains("/opt/xray"), "{stored}");
         let row = view.read_with(cx, |view, _| {
             view.state()
                 .setting_rows()
                 .into_iter()
-                .find(|row| row.key == crate::settings::SettingKey::DataDir)
+                .find(|row| row.key == crate::settings::SettingKey::XrayExecutable)
                 .expect("the row")
         });
-        assert_eq!(row.value, "/srv/fp");
+        assert_eq!(row.value, "/opt/xray");
         assert_eq!(row.source, crate::settings::Source::ConfigFile);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5139,7 +5135,7 @@ mod tests {
         // stays in the banner and is toasted while it happens.
         cx.update(|window, cx| window.click("nav-Settings", cx));
         settle(cx);
-        cx.update(|window, cx| window.click("edit-setting-data-dir", cx));
+        cx.update(|window, cx| window.click("edit-setting-echo-url", cx));
         settle(cx);
         let field = view
             .read_with(cx, |view, _| view.setting_editor())

@@ -14,13 +14,46 @@ statements there are not current TODOs.
 | Xray | Per-profile process, six outbound builders, transport/TLS settings, fail-closed cleanup |
 | Proxy diagnostics | One real request per test: exit address or a classified fault, through a temporary engine or one already running |
 | Fingerprints | Version/capability checks, warnings, live read-back; Linux 142/144/148 measured; the read-back also reports the address a running browser's own traffic leaves from |
-| Desktop UI | Profile forms, core/proxy management, link import, proxy tests, settings, runtime details, logs, a profile-list filter and a dark/light appearance switch |
+| Desktop UI | Profile forms, core/proxy management, link import, proxy tests, settings, runtime details, logs, a profile-list filter, a dark/light appearance switch and an English/Chinese language switch |
+| Layout | One directory per installation: the config file lives in the data directory beside the database, the logs, the runtime files and the profiles |
 | Windows lifecycle | Atomic job assignment, kill-on-close containment, native identity, recovery with retained failure records |
 | Backup | Configuration export, import and restore are in, from the Settings page, along with the browser-data copy for stopped profiles - see below |
 | Validation | Linux/Windows CI configuration, native process tests, opt-in real Windows Chromium/Xray acceptance |
 
 The desktop workflow is implemented. “Phase 5 has started” is outdated, and
 “only two proxy protocols” describes the manual form, not the importer/runtime.
+
+## One directory
+
+The configuration file lives in the data directory, with the database, the logs,
+the runtime files and the profiles. One directory is the whole installation: it is
+what to look at when something is wrong, what to copy when moving machines, and
+what to delete to start over. It used to live in the platform's config directory
+(`~/.config/fp-browser/config.json`), which meant two places to know about and two
+places a stale file could hide.
+
+The cost is stated plainly because it is a real one: **the config file can no
+longer say where the data directory is.** A file stored inside a directory cannot
+decide where to look for itself, so `FP_BROWSER_DATA_DIR` (or the platform's own
+directory) decides, and the Settings row for the data directory is now read-only -
+its note says how to move it instead of offering a field that could not work.
+
+- A config file left in the old location is **carried across on the first start**:
+  its settings are written to `<data dir>/config.json`, the `data_dir` key is
+  dropped from what is written (the next start resolves the same directory from
+  the environment or the platform, and a second copy of that answer is how the two
+  disagree), and the old file is removed. Nothing is written to the old location
+  again.
+- The one case the move cannot settle is an old file that named a **different**
+  data directory. Honouring it would leave the file that names it somewhere the
+  next start does not look, so it is left where it is, the run uses the directory
+  it resolved, and the banner says which environment variable to set to go back.
+  The row shows the ignored value as well, in the same sentence used for any value
+  the environment overrides.
+- `FP_BROWSER_CONFIG` still aims the program at an explicit file. That is an
+  override rather than a location: a test, or a script, needs to point at a file
+  without inventing a data directory for it, and an explicit path is not ours to
+  migrate into.
 
 ## Proxy diagnostics
 

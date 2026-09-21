@@ -18,11 +18,13 @@ pub const APP_DIR: &str = "FpBrowser";
 
 /// The directory the config file lives in.
 ///
-/// Outside the data directory on purpose: the config file is what remembers
-/// which data directory to use, so it cannot live inside one (see
-/// [`crate::settings`]). The name is the one this program has always used rather
-/// than [`APP_DIR`] - renaming it would move the file and forget the settings it
-/// holds.
+/// This is where the config file *used* to live, outside the data directory, so
+/// that it could remember which data directory to use. It lives inside the data
+/// directory now (see [`crate::settings`]) and this is read once, to carry an
+/// older installation's settings across; nothing writes here any more. The name
+/// is the one this program has always used rather than [`APP_DIR`], because a
+/// file that is being migrated still has to be found under the name it was
+/// written with.
 pub const CONFIG_DIR: &str = "fp-browser";
 
 /// The data directory used when the host has no home directory to put it under.
@@ -86,7 +88,14 @@ pub fn data_dir(host: &Host) -> Option<PathBuf> {
     Some(base.join(APP_DIR))
 }
 
+/// The config file's name, inside whichever directory holds it.
+pub const CONFIG_FILE: &str = "config.json";
+
 /// Where this host keeps the config file, or `None` when it cannot be told.
+///
+/// The config file lives in the data directory now; this is where it used to
+/// live, and is read once so an installation that predates the move keeps its
+/// settings.
 pub fn config_dir(host: &Host) -> Option<PathBuf> {
     let base = match host.os {
         "windows" => host.app_data.clone(),
