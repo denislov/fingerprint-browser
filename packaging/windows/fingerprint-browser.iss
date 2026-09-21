@@ -45,11 +45,10 @@ LicenseFile={#SourceRoot}\LICENSE
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; `x64` and not the `x64compatible` that replaced it in Inno Setup 6.3: the
-; compiler here is whatever the machine has, and an identifier an older one does
-; not know fails the build over a word. This spelling still builds and warns.
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+; `x64compatible` replaces the deprecated `x64` in Inno Setup 6.3+
+; and also allows x64 emulation on Windows 11 ARM64.
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 

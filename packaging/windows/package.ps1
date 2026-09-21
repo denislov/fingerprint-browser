@@ -62,7 +62,8 @@ Write-Host "resource section: $($info.ProductName) $($info.ProductVersion)"
 $iscc = @(
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
     "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
-    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+    "$env:SCOOP\apps\innosetup-np\current\ISCC.exe"
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) {
     $found = Get-Command ISCC.exe -ErrorAction SilentlyContinue
