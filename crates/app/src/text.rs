@@ -350,6 +350,7 @@ catalog! {
     diag_database => "Database" => "数据库";
     diag_activity_log => "Activity log" => "日志文件";
     diag_activity_log_rotated => "Rotated activity log" => "轮转的日志文件";
+    diag_instance_lock => "Instance lock" => "实例锁";
     diag_log => "The end of the activity log" => "日志的末尾";
     diag_log_empty => "nothing has been written to this log yet" => "这个日志里还没有任何内容";
     diag_missing => "missing" => "缺失";
@@ -1806,6 +1807,44 @@ impl Text {
         }
     }
 
+    /// Another copy of this program already holds the data directory.
+    ///
+    /// The pid and the build are what the holding run wrote about itself, and are
+    /// missing when that line could not be read - which does not change the
+    /// refusal, only how much of it can be said.
+    pub fn instance_busy(&self, holder: Option<(u32, &str)>) -> String {
+        let tail_en = "Use its window: this one will not start, because two windows would \
+             share one data directory - the same database, the same profiles, and one of \
+             them would stop the browsers the other is running.";
+        let tail_zh = "请使用它的窗口：本副本不会启动，因为两个窗口会共用同一个数据目录\
+             ——同一个数据库、同一批档案，其中一个还会停掉另一个正在运行的浏览器。";
+        match (self.lang, holder) {
+            (Lang::En, Some((pid, build))) => {
+                format!(
+                    "Another copy of this program is already running (pid {pid}, {build}). {tail_en}"
+                )
+            }
+            (Lang::En, None) => {
+                format!("Another copy of this program is already running. {tail_en}")
+            }
+            (Lang::Zh, Some((pid, build))) => {
+                format!("本程序已有一个副本在运行（pid {pid}，{build}）。{tail_zh}")
+            }
+            (Lang::Zh, None) => format!("本程序已有一个副本在运行。{tail_zh}"),
+        }
+    }
+
+    /// The data directory could not be locked at all, which is a fact about the
+    /// directory rather than about another copy of the program.
+    pub fn instance_unavailable(&self, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "the data directory could not be locked, so this run will not start: {error}"
+            ),
+            Lang::Zh => format!("无法锁定数据目录，因此本次运行不会启动：{error}"),
+        }
+    }
+
     /// The first line of the activity log: what this run is and where it keeps
     /// its files, which is what a problem report is asked for first.
     pub fn run_started(&self, build: &str, platform: &str, data_dir: &str) -> String {
@@ -1968,6 +2007,33 @@ mod tests {
         assert_ne!(en.nav_settings, zh.nav_settings);
         assert_ne!(en.save, zh.save);
         assert_ne!(en.language_title, zh.language_title);
+    }
+
+    /// The refusal a second copy of the program reads. It is built from a pid and
+    /// a build string rather than being one fixed line, so it is not in the
+    /// catalog and is pinned here instead: both halves have to be present, and
+    /// both languages have to say them.
+    #[test]
+    fn the_second_instance_refusal_names_the_holder_where_it_can() {
+        for lang in Lang::ALL {
+            let named = text(lang).instance_busy(Some((4242, "Fingerprint Browser 0.1.0 (abc)")));
+            assert!(named.contains("4242"), "{named}");
+            assert!(named.contains("0.1.0"), "{named}");
+
+            // An unreadable line still refuses; it just cannot say who.
+            let anonymous = text(lang).instance_busy(None);
+            assert!(!anonymous.contains("4242"), "{anonymous}");
+            assert!(!anonymous.trim().is_empty(), "{anonymous}");
+
+            assert_ne!(
+                named, anonymous,
+                "a refusal that names the holder is not the same sentence as one that cannot"
+            );
+        }
+        assert_ne!(
+            text(Lang::En).instance_busy(None),
+            text(Lang::Zh).instance_busy(None)
+        );
     }
 
     /// The sentences are methods rather than fields, so they need their own

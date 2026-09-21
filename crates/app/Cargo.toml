@@ -26,6 +26,17 @@ tracing-subscriber = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The Windows half of the data-directory lock is `LockFileEx`, which is declared
+# under the file-system feature; the other two are what the call and its error
+# code need. The same crate and version the runtime already uses for its job
+# objects, so a Windows build resolves one copy.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
+
 # Only for a Windows host, because it is only used by `build.rs` there: it puts
 # the icon and the version into the executable's resource section, which is what
 # Explorer, the taskbar and the installer's properties page read. A Linux build

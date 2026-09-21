@@ -166,6 +166,10 @@ fingerprint-browser/
 - views；
 - dialogs；
 - state binding；
+- 单实例（`instance`）：数据目录上的内核级互斥锁——Unix 用 `flock`、Windows 用
+  `LockFileEx`。第二个副本拿不到锁就报出持有者并以退出码 3 结束，因此不会打开同一个数据
+  库，也不会把第一个副本正在运行的浏览器当成遗留进程回收。锁由内核在进程结束时释放，所以
+  没有需要判定陈旧的锁文件（见 implementation-plan 的 One instance）；
 - 外观（`theme`）：两套语义调色板 + `ThemeChoice`，以及从组件主题读回当前配色的
   `palette(cx)`。设置持久化在 `settings`，启动时在画第一帧之前应用（见 10d）。
 

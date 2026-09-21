@@ -5,12 +5,14 @@ in a habit because three of them are load-bearing: the version a user reports ha
 to identify a commit, the binary a user runs has to be built the same way twice,
 and nothing may be downloaded on the user's behalf.
 
-**Status: the scripts and the workflow are in; nothing has been released yet.**
-The version policy, the release profile, the identity surfaces, the icons, the
-Linux archive and the Windows installer script all exist, and the release
-workflow that drives them is written. What has been *run* is the Linux side, on
-Linux; the Windows installer and the workflow file have not run anywhere, and the
-last section says what that means.
+**Status: the scripts, the workflow and the changelog section are in; nothing has
+been published yet.** The version policy, the release profile, the identity
+surfaces, the icons, the Linux archive and the Windows installer script all
+exist, and the release workflow that drives them is written. The changelog now
+has a `## [0.1.0]` section, which is the one thing the workflow checks before it
+will take a tag. What has been *run* is the Linux side, on Linux; the Windows
+installer and the workflow file have not run anywhere, and the last section says
+what that means.
 
 ## Versioning
 
@@ -153,4 +155,25 @@ file itself have **not** been run anywhere yet: this repository has no Windows
 machine, and a workflow only runs on GitHub. Treat the first release as the thing
 that verifies them - and if the Windows job fails, the failure is in
 `packaging/windows/`, which is the one file here written blind.
+
+## Cutting a release
+
+1. **Fold `Unreleased` into the version's section and date it.** The workflow
+   refuses a tag the changelog says nothing about, and the notes *are* that
+   section - so work that landed after the section was written has to be moved
+   into it first, or the release notes describe a smaller change than the release.
+2. **Agree on the version.** `[workspace.package] version`, the changelog's
+   newest section and the tag have to be the same string (`scripts/version.sh`
+   prints the first).
+3. **Run the gate on the commit that will be tagged** - `scripts/check.sh` on
+   Linux, `scripts/check.ps1` on Windows.
+4. **Exercise the packaging without publishing.** Run `Release` from the Actions
+   tab (`workflow_dispatch`): it runs `manifest`, `linux` and `windows` and skips
+   `publish`. This is the only way the Windows installer and the workflow file
+   themselves are ever run, and a failure here costs nothing.
+5. **Tag and push.** `git tag v<version>` on that commit, then push the tag.
+   `publish` attaches both artifacts with their checksums and takes the release
+   notes from the changelog section for the version.
+6. **Read the release page.** Two artifacts, two checksum files, and notes that
+   are the changelog's section - not the whole changelog, and not empty.
 

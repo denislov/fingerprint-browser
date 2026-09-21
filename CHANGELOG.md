@@ -5,14 +5,24 @@ Notable changes to this program. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and the rules for
 both are in [release.md](docs/release.md).
 
-Nothing has been released yet: `0.1.0` is the version in `Cargo.toml` and the
-first artifact is not published. Everything below is under `Unreleased` until
-it is.
+Nothing has been published yet. `0.1.0` is the version in `Cargo.toml`, and the
+section for it below is what the `v0.1.0` tag will publish - the release workflow
+refuses a tag the changelog says nothing about. Work that lands after this point
+goes under `Unreleased`, and is folded into the version's section before the tag
+is cut.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-21
+
 ### Added
 
+- One window per data directory. A second copy cannot take the lock on the data
+  directory, prints which process holds it, and exits 3 - instead of opening the
+  same database and reading the first copy's running browsers as orphans to stop.
+  The lock belongs to the operating system, so a crash cannot strand it, and
+  `--help`, `--version` and `--diagnostics` are still answered while a copy runs.
+  The lock file is one more row in the diagnostics report's file list.
 - `--version` prints the version, the commit the binary was built from and the
   platform; the same version is in the window's title bar, and the build, the
   platform and the data directory are the first line of the activity log.
@@ -49,9 +59,15 @@ it is.
 
 ### Fixed
 
+- A build made after a commit no longer reports the commit before it. The build
+  script relied on cargo's default rule - run again when a file in this package
+  changes - and a commit changes what `git describe` answers without touching any
+  file, so a clean tree could produce a binary that named an older commit and
+  called itself `-dirty`. It now watches the git files that answer is read from.
 - A configuration file left in the old per-platform directory is folded into the
   data directory at the next start, and the README no longer claims settings live
   outside the data directory - which stopped being true when the config file
   moved in beside the database.
 
 [Unreleased]: https://github.com/denislov/fingerprint-browser/commits/master
+[0.1.0]: https://github.com/denislov/fingerprint-browser/releases/tag/v0.1.0

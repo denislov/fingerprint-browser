@@ -69,6 +69,11 @@ this repository does not bundle or fork them.
   language you chose, and `--diagnostics` writes one file about this installation
   that never contains proxy credentials or browser data. The same report is one
   button on the Settings page; see [diagnostics](docs/diagnostics.md).
+- Run one window per data directory. A second copy cannot take the lock and is
+  refused by name - it prints which process holds the directory and exits 3 -
+  instead of opening the same database and stopping the browsers the first copy
+  is running. The lock is the kernel's, so a crash cannot strand it; `--help`,
+  `--version` and `--diagnostics` still work while a copy runs.
 
 ## Getting started
 
@@ -271,12 +276,20 @@ CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
   is why the exit address is read back out of the browser as well.
 - Runtime events are bounded and best-effort; snapshots are authoritative and the
   UI reconciles periodically. CDP is loopback-only, not an automation API.
+- One instance per data directory, and that is the whole of the guarantee: two
+  data directories are two installations that know nothing about each other, and
+  a refused copy cannot raise the window that already exists - it says which
+  process holds the directory and stops.
 
-Next: Windows fingerprint acceptance, and distribution - a repeatable Windows
-release build, first-run executable setup and packaging. The backup and restore
-work is complete; see the [current plan](docs/implementation-plan.md). A profile
-filter is in; batch operations and multi-select are not planned, for the reasons
-recorded there.
+Next: the first release. The installer, the Linux archive and the workflow that
+builds them are written and the Linux side has been run; nothing has been
+published, so cutting `v0.1.0` is what turns the Windows installer and the
+workflow from read into run. Windows fingerprint acceptance - measuring the
+surfaces on Windows rather than inferring them from Linux evidence, and
+reproducing remote upstream forwarding there - is the remaining acceptance work
+and needs a Windows machine. See the
+[current plan](docs/implementation-plan.md). Batch operations and multi-select are
+not planned, for the reasons recorded there.
 
 ## Design and evidence
 

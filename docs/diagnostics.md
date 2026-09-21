@@ -12,7 +12,7 @@ them should have to be asked for.
 | --- | --- |
 | Build | The version, the commit the binary was built from, `os arch (profile)` and the time the report was written |
 | Settings in force | Every row of the Settings page: the value in force, where it came from (environment, config file, default), and any stored value the environment is overriding |
-| Files | For each of the data directory, the config file, the database, both activity logs, the runtime directory, the browser-data directory and the Xray executable: whether it is there, and - where it is - its size or entry count and its permission bits |
+| Files | For each of the data directory, the config file, the database, the instance lock, both activity logs, the runtime directory, the browser-data directory and the Xray executable: whether it is there, and - where it is - its size or entry count and its permission bits |
 | The end of the activity log | The last 40 lines of `logs/activity.log`, oldest first, with how many lines the file holds |
 
 ## What it deliberately leaves out
@@ -63,7 +63,9 @@ fingerprint-browser [option]
 ```
 
 With no option the window opens. Exit codes: `0` for an answer, `1` for a report
-that could not be written, `2` for an argument that was refused.
+that could not be written, `2` for an argument that was refused, `3` for a second
+copy finding the data directory already locked (`--diagnostics` is answered
+before the lock, so it works either way).
 
 Two rules are worth stating because they are the difference between a tool you
 can put in a script and one you cannot:

@@ -10,6 +10,7 @@ mod core_detect;
 mod core_editor;
 mod diagnostics;
 mod editor;
+mod instance;
 mod log_file;
 mod open_dir;
 mod paths;
@@ -119,6 +120,32 @@ fn main() {
         }
         return;
     }
+
+    // One window per data directory. Taken here - after the questions that are
+    // answered without touching the installation, and before the database opens -
+    // because the two things below are what a second copy must not do: open the
+    // same database, and read the first copy's session records as orphans and
+    // stop the browsers it is running. The binding lives until `main` returns, so
+    // the lock is held for as long as the window is; the kernel releases it on
+    // every path out, including the ones that never return here.
+    let _instance = match instance::InstanceLock::acquire(&data_dir) {
+        Ok(lock) => lock,
+        Err(instance::Busy::Held(holder)) => {
+            eprintln!(
+                "{}",
+                t.instance_busy(
+                    holder
+                        .as_ref()
+                        .map(|holder| (holder.pid, holder.build.as_str()))
+                )
+            );
+            std::process::exit(3);
+        }
+        Err(instance::Busy::Unavailable(error)) => {
+            eprintln!("{}", t.instance_unavailable(&error));
+            std::process::exit(1);
+        }
+    };
 
     // What this run is and where it keeps its files, in the one log that outlives
     // the window and in the one a headless run has.

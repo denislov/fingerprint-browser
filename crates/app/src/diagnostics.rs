@@ -134,13 +134,21 @@ fn files_section(settings: &Settings, t: &Text) -> Section {
     // The same `<data dir>/profiles` the profile service creates
     // (`application::DefaultProfileService`): the report names the directory it
     // is about, and counts it rather than listing what is inside.
-    let described: [(String, PathBuf); 8] = [
+    let described: [(String, PathBuf); 9] = [
         (t.setting_data_dir.to_string(), data.to_path_buf()),
         (
             t.setting_config_file.to_string(),
             settings.config_path().to_path_buf(),
         ),
         (t.diag_database.to_string(), data.join("app.db")),
+        // The file the lock is taken on. It outlives the run that made it - the
+        // lock is the kernel's and goes with the process, while the file stays -
+        // so its presence in a report says where the lock is, not that one is
+        // held. See `instance`.
+        (
+            t.diag_instance_lock.to_string(),
+            crate::instance::InstanceLock::path(data),
+        ),
         (
             t.diag_activity_log.to_string(),
             data.join(log_file::LOG_DIR).join(log_file::LOG_FILE),

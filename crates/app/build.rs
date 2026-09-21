@@ -15,18 +15,24 @@
 //! rather than a failed build - the icon is not worth not being able to compile
 //! the program.
 //!
-//! No `cargo:rerun-if-changed` is emitted, so cargo's default rule applies and
-//! this runs again whenever a file in this package changes - which is the only
-//! moment the commit can change. Watching `.git` instead would rerun it every
-//! time a git command touched the index, and rebuild the crate for nothing. The
-//! icon lives outside this package, so a change to it is picked up on the next
-//! source change rather than immediately; that is the cost of keeping the default
-//! rule, and it is one a developer regenerating the icon can always pay by
-//! touching a source file.
+//! No `cargo:rerun-if-changed` is emitted for this package's sources, so cargo's
+//! default rule applies and this runs again whenever a file here changes. That
+//! default is not enough on its own, though: `git commit`, `git checkout` and
+//! `git tag` all change what `git describe` answers without touching a file in
+//! this package, which is how a committed tree came to report the commit before
+//! it - with `-dirty` in it, on a clean working tree. [`watch_git_head`] names the
+//! files the answer is actually read from.
+//!
+//! The icon lives outside this package, so a change to it is picked up on the
+//! next source change rather than immediately; that is the cost of keeping the
+//! default rule, and it is one a developer regenerating the icon can always pay
+//! by touching a source file.
 
 use std::process::Command;
 
 fn main() {
+    watch_git_head();
+
     let commit = Command::new("git")
         // `--dirty` marks a build that is not the commit it names, which is the
         // difference between a report that can be reproduced and one that
@@ -41,6 +47,51 @@ fn main() {
     println!("cargo:rustc-env=FP_BUILD_COMMIT={commit}");
 
     embed_windows_resource();
+}
+
+/// Asks cargo to re-run this script when the commit it reports could have
+/// changed.
+///
+/// The answer comes from `git describe`, so the files that matter are the ones
+/// git writes it to: the `HEAD` symref, the ref that symref names, and the
+/// packed refs a clone or a tag checkout resolves through. The index is
+/// deliberately not one of them - every `git status` touches it, and rebuilding
+/// this crate on each of those is what keeping the default rule was avoiding.
+///
+/// A source tree with no `.git` - an unpacked tarball, a vendored copy - watches
+/// nothing and keeps the default rule, which is right there: there is no commit
+/// to become stale, and naming a path that does not exist would make cargo
+/// rebuild on every run for the one answer that is constant.
+fn watch_git_head() {
+    // Read from the environment rather than with `env!`: cargo sets the manifest
+    // directory in the build script's environment, and `env!` at compile time
+    // finds nothing there. `embed_windows_resource` exists partly because that
+    // mistake compiles on Linux and fails on Windows.
+    let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") else {
+        return;
+    };
+    let git = std::path::Path::new(&manifest).join("../..").join(".git");
+    if !git.is_dir() {
+        return;
+    }
+
+    let head = git.join("HEAD");
+    println!("cargo:rerun-if-changed={}", head.display());
+
+    // A symref is what a working checkout has, and a commit moves the file it
+    // names rather than `HEAD` itself. A detached `HEAD` - a tag checkout, which
+    // is what a release is - holds the commit directly, and the line above
+    // covers that case.
+    if let Ok(contents) = std::fs::read_to_string(&head)
+        && let Some(name) = contents.trim().strip_prefix("ref:")
+    {
+        println!("cargo:rerun-if-changed={}", git.join(name.trim()).display());
+    }
+
+    let packed = git.join("packed-refs");
+    if packed.exists() {
+        println!("cargo:rerun-if-changed={}", packed.display());
+    }
 }
 
 /// The icon and the version in the executable's resource section.

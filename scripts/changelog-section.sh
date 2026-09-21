@@ -29,8 +29,19 @@ awk -v want="$section" '
         for (i = first; i <= last; i++) print lines[i]
     }
 
+    # The document ends with its link definitions (`[0.1.0]: https://...`). They
+    # belong to the changelog rather than to its last section, so the notes of
+    # whichever section is last stop here instead of ending with them.
+    /^\[[^]]+\]:[[:space:]]/ {
+        if (printing) { flush(); printing = 0 }
+        next
+    }
+
     /^## \[/ {
-        if (printing) { flush(); exit }
+        # `printing` is cleared before leaving, because `exit` runs END and a
+        # second flush there would print the body twice - which is what a section
+        # that is not the last one used to do.
+        if (printing) { flush(); printing = 0; exit }
         name = $0
         sub(/^## \[/, "", name)
         sub(/\].*$/, "", name)

@@ -16,6 +16,7 @@ statements there are not current TODOs.
 | Fingerprints | Version/capability checks, warnings, live read-back; Linux 142/144/148 measured; the read-back also reports the address a running browser's own traffic leaves from |
 | Desktop UI | Profile forms, core/proxy management, link import, proxy tests, settings, runtime details, logs, a profile-list filter, a dark/light appearance switch and an English/Chinese language switch |
 | Layout | One directory per installation: the config file lives in the data directory beside the database, the logs, the runtime files and the profiles |
+| One instance | A kernel-held lock on the data directory; a second copy refuses by name, exits 3, and never reaches the database or the startup reclaim |
 | Windows lifecycle | Atomic job assignment, kill-on-close containment, native identity, recovery with retained failure records |
 | Backup | Configuration export, import and restore are in, from the Settings page, along with the browser-data copy for stopped profiles - see below |
 | Delivery | The program is named and versioned where it is seen: `--version` (version, commit, platform), `--help` in the chosen language, and `--diagnostics`, which writes one report about the installation for a bug report - see [diagnostics.md](diagnostics.md) |
@@ -131,6 +132,59 @@ the one this project exists to prevent. So verification asks the browser too.
 
 Not established, and deliberately not claimed: that a page the user opened
 takes the same path; this reads one document, in one tab, once.
+
+## One instance
+
+The lock that stops a second copy of the window from opening on the same data
+directory, and the decision the plan left open: it **refuses** rather than
+handing anything over.
+
+- **What it prevents, precisely.** Both copies open the same database, and the
+  second one's startup reclaim reads the first one's session records, finds the
+  children they name alive, and stops them. The browsers someone is looking at,
+  closed by a second launch. Packaging is what makes it easy to hit: a menu entry
+  and a desktop shortcut are two ways to launch a program that is already
+  running.
+- **Refusing, not handing over.** Handing the arguments over has nothing to hand:
+  the only invocation that opens a window carries no arguments, and the three
+  that carry something - `--help`, `--version`, `--diagnostics` - are answered
+  before the lock and keep working while a copy runs, which is exactly what makes
+  them useful when the window will not open. Raising the existing window instead
+  would be window-manager code per platform, for a menu entry that is only ever
+  clicked once.
+- **The lock is the kernel's, not a file this program interprets.**
+  `flock(LOCK_EX | LOCK_NB)` on Unix and `LockFileEx` on Windows, both released
+  when the process ends however it ends - a clean exit, a panic, a `SIGKILL`.
+  There is no stale lock to age out, no pid to trust and no identity check to get
+  wrong, which is the whole reason this is not a pid file. See
+  `crates/app/src/instance.rs`.
+- **It is taken after `--diagnostics` and before the database opens**, and held
+  until `main` returns: `let _instance` in `crates/app/src/main.rs` is a named
+  binding on purpose, because `let _ =` would drop the lock on the spot. A report
+  about a running installation is the thing someone asks for when the window will
+  not open, so it must not need the lock.
+- **The holder writes a line** - pid, build, start time - that the refused run
+  reads back so the refusal can name it. Nothing decides anything from that line:
+  one that cannot be read still refuses, it only cannot say who. On Windows the
+  lock is taken on a byte far past that line, because a Windows byte-range lock
+  is mandatory and locking byte 0 would stop the refused run reading it.
+- **The file outlives the run.** The lock goes with the process; `instance.lock`
+  stays and the next run replaces the line. It is in the diagnostics report's
+  file list, which is where a maintainer reads that a lock file's presence is not
+  what holding the lock means.
+- **A refused copy exits 3**, which is neither the refused-argument status nor a
+  general failure, so a script can tell "already running" from "started badly".
+- **What it does not cover: `Settings::load`.** The lock is taken after the config
+  file has been read, because that is the call that resolves the data directory
+  being locked. It is also where an installation upgraded from the old layout has
+  its config file folded into the data directory - a one-time write of the same
+  bytes by whichever copy gets there first, upstream of the two things the lock
+  exists to protect: the database and the children.
+
+**Not established, and deliberately not claimed:** nothing here makes two copies
+on one data directory safe; it makes the second one not start. And a data
+directory whose filesystem cannot hold a lock refuses the run rather than letting
+it proceed unguarded.
 
 ## Language
 
@@ -429,14 +483,13 @@ Commands and limits: [windows-acceptance.md](windows-acceptance.md).
      script, the icon and version in the executable's resource section, and a
      `v*`-tag workflow that builds both, refuses a tag or a changelog that
      disagrees with the version, and attaches the artifacts with their checksums.
-4. **Two instances at once.** Nothing stops a second copy of the window from
-   opening: both would open the same database, and the second one's startup
-   reclaim would look at the first one's children and could stop them. Not a
-   problem anyone has hit yet, and packaging makes it much easier to hit - a menu
-   entry and a desktop shortcut are two ways to launch something already running.
-   The bounded fix is a lock file in the data directory that the second instance
-   reads and hands its arguments to, or refuses on; the decision to make first is
-   which of those it does.
+4. **Two instances at once.** A second copy of the window would open the same
+   database, and its startup reclaim would look at the first one's children and
+   could stop them - and packaging makes it much easier to hit, since a menu entry
+   and a desktop shortcut are two ways to launch something already running.
+   **Done:** the data directory is locked with the kernel's own lock, taken after
+   the command-line questions and before the database opens, and a refused copy
+   says who holds it and exits 3. See [One instance](#one-instance).
 5. **The first release.** Nothing here has been published, so the Windows
    installer, the release workflow and the artifact names have been read but not
    run. Cutting `v0.1.0` - after the changelog has a section for it, which the
