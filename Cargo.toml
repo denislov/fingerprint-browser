@@ -36,3 +36,26 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # accepts the connection and then says nothing. See runtime::diagnostic.
 ureq = "3.4"
 gpui-kit = "0.6.4"
+
+# The profile a distributed binary is built with. Cargo's release defaults
+# favour build speed, which is the wrong trade for the one artifact a user runs
+# and nobody rebuilds.
+[profile.release]
+# Across crates, so inlining reaches the domain, storage and runtime layers
+# rather than stopping at their boundaries. Thin rather than fat: this is one
+# small binary, and the difference between the two is minutes of link time for
+# a few percent.
+lto = "thin"
+# One unit for the whole graph, which is what LTO needs to do its job.
+codegen-units = 1
+# Symbols without DWARF. A panic still names its function in a backtrace, and
+# for a program that manages other processes a readable backtrace is worth more
+# than the size of the debug info: measured on this workspace, dropping the
+# symbol table as well takes the binary from 48 MB to 41 MB, and what it buys
+# is a crash report that is a list of addresses.
+strip = "debuginfo"
+# Deliberately absent: `panic = "abort"`, the other way to shrink a binary. The
+# supervisor thread reclaims child browsers when it unwinds, and a panic in the
+# window would take that cleanup with it and leave the browsers it started
+# orphaned - the exact failure this program exists to prevent. A smaller binary
+# is not worth a leak.

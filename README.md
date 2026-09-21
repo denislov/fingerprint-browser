@@ -1,5 +1,7 @@
 # Fingerprint Browser
 
+<img src="assets/icon.png" alt="" width="96" align="right">
+
 Personal Rust desktop browser-profile manager built with GPUI Kit, SQLite,
 fingerprint-chromium and Xray. Chromium and Xray are external executables;
 this repository does not bundle or fork them.
@@ -194,6 +196,10 @@ is detected and reported, not automatically moved; a config file left in the old
 per-platform location is folded into the data directory once, at the next start.
 Environment values override saved settings, and the Settings page says which
 value won.
+
+For a build to give to someone else, [releases](docs/release.md) has the version
+policy, what `[profile.release]` does and why, how the icon is generated, and
+what packaging still has to cover. There is no released artifact yet.
 
 ## Validation
 
