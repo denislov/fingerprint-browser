@@ -5,10 +5,12 @@ in a habit because three of them are load-bearing: the version a user reports ha
 to identify a commit, the binary a user runs has to be built the same way twice,
 and nothing may be downloaded on the user's behalf.
 
-**Status: partly implemented.** The version policy, the release profile, the
-identity surfaces and the icons are in. Packaging - an installer, a Linux
-archive and a workflow that produces them - is the next step and is described at
-the end rather than pretended.
+**Status: the scripts and the workflow are in; nothing has been released yet.**
+The version policy, the release profile, the identity surfaces, the icons, the
+Linux archive and the Windows installer script all exist, and the release
+workflow that drives them is written. What has been *run* is the Linux side, on
+Linux; the Windows installer and the workflow file have not run anywhere, and the
+last section says what that means.
 
 ## Versioning
 
@@ -40,9 +42,10 @@ the end rather than pretended.
 | Artifact | Where it comes from | Who it is for |
 | --- | --- | --- |
 | `fingerprint-browser` (release binary) | `cargo build --release -p app` | Running from a checkout or an unpacked archive |
-| Windows installer | the packaging step below | The first install on Windows |
-| Linux archive (`.tar.zst` or AppImage) | the packaging step below | The first install on Linux |
-| `CHANGELOG.md` section for the version | this repository | Finding out what changed |
+| Windows installer (`...-setup.exe`) | `packaging/windows/package.ps1` | The first install on Windows |
+| Linux archive (`.tar.gz`) | `packaging/linux/package.sh` | The first install on Linux |
+| `<artifact>.sha256` | both packaging scripts | Checking that the download arrived intact |
+| `CHANGELOG.md` section for the version | this repository | Finding out what changed, and the release notes |
 
 Deliberately **not** in a release: Chromium, Xray, and any installer that offers
 to fetch them. They are the user's binaries; see
@@ -80,22 +83,74 @@ python3 scripts/make-icon.py
 
 It is deterministic: the same numbers produce the same bytes.
 
-## Packaging (next)
+## Packaging
 
-Not done yet, and the shape it is going to take:
+Two scripts, one per platform, and both write into `dist/` - which is ignored by
+git, because an artifact is built rather than committed. Each produces one file
+plus a `<file>.sha256` beside it.
 
-- **Windows**: an Inno Setup script that installs the binary, uses
-  `assets/icon.ico` for the setup and the shortcuts, optionally adds the
-  install directory to `PATH`, and ships an uninstaller. The executable's own
-  embedded icon and version resource also belong here, and need a resource
-  compiler at build time - which is a Windows-only build dependency, so it
-  should not be the reason a Linux build breaks.
-- **Linux**: a `.tar.zst` with the binary, the icon, a `.desktop` entry and the
-  licence, plus the checkout's `README.md` and `docs/`.
-- **A release workflow** (`.github/workflows/release.yml`) that builds on a
-  Windows and an Ubuntu runner for a `v*` tag, attaches the artifacts and a
-  checksum file, and fails if `Cargo.toml` and the tag disagree.
-- **First run**: what the window says when there is no browser core and no Xray.
-  The empty states exist; the walk from an installer to a first launched profile
-  is not yet written down as one path with a test, which is the last part of the
-  delivery task in [the plan](implementation-plan.md#next-bounded-tasks).
+**Linux** - `packaging/linux/package.sh`:
+
+```sh
+packaging/linux/package.sh
+# dist/fingerprint-browser-0.1.0-linux-x86_64.tar.gz
+```
+
+One directory inside the archive: the binary, `install.sh`, the `.desktop` entry
+and the icon, the README, the changelog, the licence and `docs/`. `install.sh`
+puts the binary under `~/.local/bin` (or `$PREFIX`), the icon where the icon theme
+looks, and the entry where the application menu looks, with the absolute path
+written into `Exec=` so the menu does not depend on the user's `PATH`. It needs
+no root, and it says so when `~/.local/bin` is not on `PATH` - which is a fact
+about the user's shell, not a reason to refuse.
+
+The script reads the version with `scripts/version.sh` and compares it against
+what the binary itself reports, so an artifact cannot be named for a version the
+binary does not claim.
+
+**Windows** - `packaging/windows/package.ps1`, over
+`packaging/windows/fingerprint-browser.iss`:
+
+```powershell
+pwsh -File packaging\windows\package.ps1 -Version 0.1.0
+# dist\fingerprint-browser-0.1.0-windows-x86_64-setup.exe
+```
+
+Inno Setup 6, per-user by default (`PrivilegesRequired=lowest`, with the
+override dialog for an administrator who wants `Program Files`). It installs the
+binary, the documentation and the licence, makes a Start-menu entry, offers a
+desktop shortcut, and leaves the uninstaller in Add/Remove Programs. It does not
+touch `PATH`: this is a window with four command-line options for support, not a
+command-line tool, and editing a user's `PATH` is a change nothing here needs.
+
+The icon and the version are in the executable's own resource section, written by
+`crates/app/build.rs` through `winresource` - a Windows-only build dependency, so
+a Linux build neither downloads it nor breaks if a resource compiler is missing.
+That build script degrades a missing resource compiler to a warning, which means
+a machine without one produces an executable with no icon and no error; the
+packaging script is what refuses it, by checking the resource section before
+building the installer.
+
+## The release workflow
+
+`.github/workflows/release.yml`, on a `v*` tag or by hand:
+
+| Job | What it does |
+| --- | --- |
+| `manifest` | Reads the version once (`scripts/version.sh`), refuses a tag that disagrees with it, and refuses a release the changelog says nothing about |
+| `linux` | Builds the archive, then unpacks it, installs it into a scratch home, runs `--version` from the installed path and verifies the checksum |
+| `windows` | Installs Inno Setup (the runner image comes and goes on this), builds the installer, and has the packaging script check the resource section first |
+| `publish` | Only for a tag: downloads both artifacts and attaches them, with their checksums, to a release whose notes are the changelog's section for that version |
+
+The manual trigger runs every job except `publish`, which is how the Windows path
+gets exercised without cutting a release for it. A release whose changelog has no
+section for the version is refused rather than published with empty notes.
+
+**What has been verified where.** The Linux job's commands have been run on
+Linux, including the archive, the install into a scratch home, running the
+installed binary and the checksum check. The Windows installer and the workflow
+file itself have **not** been run anywhere yet: this repository has no Windows
+machine, and a workflow only runs on GitHub. Treat the first release as the thing
+that verifies them - and if the Windows job fails, the failure is in
+`packaging/windows/`, which is the one file here written blind.
+

@@ -1,0 +1,149 @@
+name: Release
+
+# A release starts from a tag, because the tag is the one thing that has to agree
+# with the version in Cargo.toml - and a build whose tag and manifest disagree
+# cannot be reproduced from either. The manual trigger runs the same packaging
+# jobs without publishing, which is how the Windows path gets exercised without
+# cutting a release for it.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # One reader for the version, and one place the rules about it are applied, so
+  # neither packaging job can disagree with the other about what is being built.
+  manifest:
+    name: the version, the tag and the changelog
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: read
+        name: Read the version and compare it with the tag
+        run: |
+          version="$(./scripts/version.sh)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml says $version"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$version" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match the manifest version $version"
+              exit 1
+            fi
+          fi
+
+      - name: The changelog says something about this version
+        run: |
+          version="$(./scripts/version.sh)"
+          if ./scripts/changelog-section.sh "$version" > /dev/null 2>&1; then
+            echo "CHANGELOG.md has a section for $version"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section, and the release notes come from it"
+            exit 1
+          else
+            echo "::warning::CHANGELOG.md has no '## [$version]' section yet, which a tag would refuse"
+          fi
+
+  linux:
+    name: the Linux archive
+    needs: manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same two system libraries the gate installs: freetype-sys and
+      # yeslogic-fontconfig-sys are the only linked system libraries, and the
+      # rest of the UI stack dlopens.
+      - name: Install the system libraries the workspace links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libfontconfig1-dev libfreetype-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and package
+        run: ./packaging/linux/package.sh
+
+      # The archive and its checksum, unpacked and installed for real: this is
+      # the job that would catch a packaging script that only works on the
+      # machine it was written on.
+      - name: Unpack it and install it into a fake home
+        run: |
+          set -eu
+          scratch="$(mktemp -d)"
+          tar xzf dist/fingerprint-browser-*-linux-*.tar.gz -C "$scratch"
+          unpacked="$(find "$scratch" -maxdepth 1 -type d -name 'fingerprint-browser-*')"
+          ( cd "$unpacked" && HOME="$scratch/home" PREFIX="$scratch/home/.local" ./install.sh )
+          "$scratch/home/.local/bin/fingerprint-browser" --version
+          test -f "$scratch/home/.local/share/applications/fingerprint-browser.desktop"
+          ( cd dist && sha256sum -c ./*.sha256 )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  windows:
+    name: the Windows installer
+    needs: manifest
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The image usually has Inno Setup; installing it is idempotent, and the
+      # script fails with the command to run if it is still not there.
+      - name: Inno Setup
+        run: choco install innosetup --no-progress --yes
+
+      - name: Build and package
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Version ${{ needs.manifest.outputs.version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*setup.exe*
+          if-no-files-found: error
+
+  # Only a tag publishes. The artifacts are attached as they are - the checksum
+  # file beside each - so what was verified in the job above is what is
+  # downloadable.
+  publish:
+    name: attach the artifacts to the release
+    # `github.ref` rather than `github.ref_type`: the ref is the value every
+    # version of the runner has had, and the prefix says the same thing.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [manifest, linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release notes from the changelog section for this version
+        run: ./scripts/changelog-section.sh "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Fingerprint Browser ${{ needs.manifest.outputs.version }}" \
+            --notes-file RELEASE_NOTES.md

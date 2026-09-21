@@ -402,8 +402,9 @@ Commands and limits: [windows-acceptance.md](windows-acceptance.md).
    following the rules in [backup-and-restore.md](backup-and-restore.md).
    **Done.**
 3. Distribution: repeatable Windows release build, first-run executable setup,
-   diagnostics and packaging. Do not silently download binaries. This is the
-   remaining item that does not need another machine.
+   diagnostics and packaging. Do not silently download binaries. **Done, except
+   for the part only a release can prove** - the Windows installer and the
+   workflow that builds it have not been run anywhere yet.
    - [x] **Self-description.** `--version` (version, injected commit, platform),
      `--help` in the language the config file names, the version in the window
      title, and the same line as the first line of the activity log.
@@ -423,10 +424,25 @@ Commands and limits: [windows-acceptance.md](windows-acceptance.md).
      in [first-run.md](first-run.md) and pinned end to end by a UI test that
      deletes the seeded core, adds one through its own form, creates a profile
      with it and starts it.
-   - [ ] **Packaging.** A repeatable Windows build that produces an installer
-     (using the icon, and embedding it in the executable), a Linux archive with a
-     `.desktop` entry, and a release workflow that attaches the artifacts rather
-     than only running the gate.
+   - [x] **Packaging.** `packaging/linux/package.sh` (an archive with an installer
+     for the current user), `packaging/windows/package.ps1` over an Inno Setup
+     script, the icon and version in the executable's resource section, and a
+     `v*`-tag workflow that builds both, refuses a tag or a changelog that
+     disagrees with the version, and attaches the artifacts with their checksums.
+4. **Two instances at once.** Nothing stops a second copy of the window from
+   opening: both would open the same database, and the second one's startup
+   reclaim would look at the first one's children and could stop them. Not a
+   problem anyone has hit yet, and packaging makes it much easier to hit - a menu
+   entry and a desktop shortcut are two ways to launch something already running.
+   The bounded fix is a lock file in the data directory that the second instance
+   reads and hands its arguments to, or refuses on; the decision to make first is
+   which of those it does.
+5. **The first release.** Nothing here has been published, so the Windows
+   installer, the release workflow and the artifact names have been read but not
+   run. Cutting `v0.1.0` - after the changelog has a section for it, which the
+   workflow insists on - is the task that turns all of that from written to
+   verified.
+
 
 ### Why distribution is a task and not a paragraph
 
@@ -492,6 +508,12 @@ scripts/check.ps1 (Windows) and scripts/check.sh (Linux) run:
 2. cargo check --workspace
 3. cargo test --workspace
 4. cargo clippy --workspace --all-targets -- -D warnings
+
+Linux additionally parses the packaging scripts (`sh -n`) and reads the
+changelog's `Unreleased` section, so a syntax error in a packaging script or a
+broken changelog pattern is caught on the push that introduced it rather than on
+the day of a release. Building a release artifact is deliberately not in the
+gate: it takes minutes, and the release workflow is where it belongs.
 
 CI is configured for Windows and Ubuntu. Real browser/Xray acceptance remains
 opt-in and is reported separately from the gate.

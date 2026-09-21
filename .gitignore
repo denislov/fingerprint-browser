@@ -1,3 +1,5 @@
 /target
 data/
 *.log
+# Packaging output: artifacts are built, never committed.
+/dist

@@ -210,8 +210,11 @@ Environment values override saved settings, and the Settings page says which
 value won.
 
 For a build to give to someone else, [releases](docs/release.md) has the version
-policy, what `[profile.release]` does and why, how the icon is generated, and
-what packaging still has to cover. There is no released artifact yet.
+policy, what `[profile.release]` does and why, how the icon is generated, and the
+two packaging scripts - a Windows installer and a Linux archive with an installer
+of its own - with the workflow that drives them. Nothing has been released yet:
+there is no published artifact, and the Windows half of that path has not been
+run anywhere.
 
 ## Validation
 
@@ -221,7 +224,7 @@ what packaging still has to cover. There is no released artifact yet.
 ```
 
 ```sh
-# Linux: the same four checks
+# Linux: the same four checks, plus a parse check of the packaging scripts
 ./scripts/check.sh
 ```
 

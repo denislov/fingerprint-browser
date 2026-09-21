@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Fingerprint Browser
+GenericName=Browser profile manager
+Comment=Browser profiles for fingerprint-chromium, each with its own data and proxy
+Exec=fingerprint-browser
+Icon=fingerprint-browser
+Terminal=false
+Categories=Network;WebBrowser;
+Keywords=browser;profile;fingerprint;privacy;proxy;

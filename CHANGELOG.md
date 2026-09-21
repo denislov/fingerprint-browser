@@ -24,7 +24,15 @@ it is.
   activity log. The same report is behind a button on the Settings page. It
   never opens the database and never reads browser data.
 - A program icon, generated from `scripts/make-icon.py`: a PNG, an ICO with
-  seven sizes, and an SVG.
+  seven sizes, and an SVG. On Windows it also goes into the executable's resource
+  section, with the product name and version.
+- A Linux archive (`packaging/linux/package.sh`) with the binary, an installer
+  for the current user, a menu entry and the documentation, and a Windows
+  installer (`packaging/windows/package.ps1`) built with Inno Setup. Each ships
+  with a checksum, and neither ships or downloads a browser or a proxy engine.
+- `.github/workflows/release.yml`, which builds both artifacts for a `v*` tag,
+  refuses a tag or a changelog that disagrees with the version, and attaches the
+  artifacts to the release. Nothing has been released yet.
 
 ### Changed
 
@@ -33,6 +41,11 @@ it is.
 - The distributed build is built with `[profile.release]`: thin LTO, one codegen
   unit, and symbols kept so a crash can be read. Not `panic = "abort"`, which
   would take the supervisor's child-process cleanup with it.
+- An empty profile list says how to get a browser core in the order a reader can
+  act on it: the page inside the window first, then `FP_BROWSER_CHROMIUM_BIN` and
+  a restart. It used to name only the second, while offering a button for the
+  first. The whole first run is now written down in
+  [first run](docs/first-run.md).
 
 ### Fixed
 
