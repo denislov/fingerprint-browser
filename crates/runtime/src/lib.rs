@@ -33,8 +33,8 @@ pub use events::{RuntimeCommand, RuntimeComponent, RuntimeEvent, StartParams};
 pub use facade::{RuntimeFacade, RuntimeSnapshot};
 pub use fingerprint_args::serialize_fingerprint_args;
 pub use journal::{
-    ProcessRecord, ReclaimReport, Reclaimed, SessionRecord, Unresolved as UnresolvedSession,
-    reclaim as reclaim_orphans,
+    Adopted, ProcessRecord, ReclaimReport, Reclaimed, SessionRecord,
+    Unresolved as UnresolvedSession, recover as recover_orphans,
 };
 pub use planner::{DefaultLaunchPlanner, LaunchContext, LaunchPlanner};
 pub use ports::{PortAllocator, PortReservation, TcpPortAllocator};

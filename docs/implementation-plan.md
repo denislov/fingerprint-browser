@@ -17,6 +17,7 @@ statements there are not current TODOs.
 | Desktop UI | Profile forms, core/proxy management, link import, proxy tests, settings, runtime details, logs, a profile-list filter, a dark/light appearance switch and an English/Chinese language switch |
 | Layout | One directory per installation: the config file lives in the data directory beside the database, the logs, the runtime files and the profiles |
 | One instance | A kernel-held lock on the data directory; a second copy refuses by name, exits 3, and never reaches the database or the startup reclaim |
+| Exit modes | Keep running in the background, leave with the browsers and tunnels running, or stop everything - asked, remembered, and switchable; a start adopts what was deliberately left |
 | Windows lifecycle | Atomic job assignment, kill-on-close containment, native identity, recovery with retained failure records |
 | Backup | Configuration export, import and restore are in, from the Settings page, along with the browser-data copy for stopped profiles - see below |
 | Delivery | The program is named and versioned where it is seen: `--version` (version, commit, platform), `--help` in the chosen language, and `--diagnostics`, which writes one report about the installation for a bug report - see [diagnostics.md](diagnostics.md) |
@@ -185,6 +186,44 @@ handing anything over.
 on one data directory safe; it makes the second one not start. And a data
 directory whose filesystem cannot hold a lock refuses the run rather than letting
 it proceed unguarded.
+
+## Exit modes
+
+What closing the window does, and the one rule underneath it. Implemented, tray
+icon included, and described in [exit modes](exit-modes.md).
+
+- **Three answers and a question.** Keep running in the background, leave the
+  program with the browsers and tunnels still running, or stop everything. "Ask
+  every time" is the default and is a Settings-page choice rather than something a
+  close can decide.
+- **The hard case is the next start, not this one.** A start has always reclaimed
+  what a previous run left, because a browser that survived a crash still holds its
+  profile directory and its debugging port. A browser left *on purpose* holds the
+  same things, so the answer is neither "leave it" nor "stop it" but **adopt it**:
+  the session record carries a `left_running` marker, written at exit, and a marked
+  record that is still alive becomes a running profile again. Unmarked records -
+  a crash, and every record written before the field existed - are reclaimed
+  exactly as before.
+- **Adoption needs a second kind of child.** `Held::Owned` is a handle, which is
+  the authority on everything; `Held::Adopted` is a record, so liveness is
+  `journal::verdict` and stopping rechecks the recorded identity and stops the tree
+  by pid. On Windows the job's `KILL_ON_JOB_CLOSE` limit is cleared before the
+  handle is dropped, because that limit is what makes a manager that died take its
+  browsers with it.
+- **The question is asked before the window closes**, through
+  `Window::on_window_should_close` - the hook is installed on the first frame,
+  because the view is built before there is a window. A signal still means stop
+  everything: there is nobody to ask.
+- **The background mode needs the tray.** GPUI has no tray API and cannot hide a
+  window (`App::hide` is a no-op on both backends), so "in the background" is
+  minimize plus a tray icon that says so and brings the window back. Two
+  implementations: `ksni` on Linux (StatusNotifierItem over D-Bus, pure Rust, so
+  no GTK and no libdbus enter the packages) and `tray-icon` on Windows (created on
+  the window's own thread, its messages dispatched by the loop the window already
+  runs). Both post into a queue the window's tick drains, so nothing calls into
+  the UI from another thread. Its **Quit…** item always asks rather than obeying
+  the remembered answer: a tray that could only re-enter "keep running" would be a
+  program nobody could leave.
 
 ## Language
 

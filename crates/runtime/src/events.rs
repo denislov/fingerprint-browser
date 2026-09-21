@@ -34,6 +34,10 @@ pub enum RuntimeCommand {
     Start(StartParams),
     Stop(ProfileId),
     Restart(StartParams),
+    /// End this run and leave every running session running, marked so the next
+    /// run adopts it rather than stopping it.
+    ReleaseAll,
+    /// End this run and stop everything it started.
     ShutdownAll,
 }
 

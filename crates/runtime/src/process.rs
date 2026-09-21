@@ -11,6 +11,31 @@ pub(crate) use windows::ManagedChild;
 #[cfg(not(windows))]
 pub(crate) type ManagedChild = Child;
 
+/// Prepares a child to be left running when this process ends, without stopping
+/// it.
+///
+/// On Unix there is nothing to do: a child is not signalled when its handle is
+/// dropped, and its process group outlives the manager that made it. On Windows
+/// there is, and it is the whole mechanism: every child is created inside a job
+/// whose limit is "kill everything in it when the last handle closes", which is
+/// what makes a manager that dies take its browsers with it. Leaving them on
+/// purpose means clearing that limit first, after which the job handle may close.
+///
+/// Nothing here stops anything, so a caller that gets this wrong leaks processes
+/// rather than killing them - the safe direction, and the one the exit dialog is
+/// explicit about.
+pub(crate) fn release_child(child: &mut ManagedChild) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        child.release()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child;
+        Ok(())
+    }
+}
+
 /// Unix children lead their own process group. Windows children are created
 /// atomically inside a private kill-on-close job (see the runtime-only contract
 /// of windows::spawn for the supported Command fields).

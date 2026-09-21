@@ -79,6 +79,12 @@ pub struct SessionRecord {
     /// Milliseconds since the Unix epoch, kept as a number so the record reads
     /// the same everywhere.
     pub started_at: u64,
+    /// Set when the run that wrote this record was told to leave its children
+    /// running. Absent - and so false - is what every record written before this
+    /// field existed means, and what a record left by a crash means. The
+    /// difference decides whether the next start adopts the session or stops it.
+    #[serde(default)]
+    pub left_running: bool,
     pub browser: ProcessRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xray: Option<ProcessRecord>,
@@ -159,6 +165,26 @@ pub fn remove(runtime_dir: &Path, profile_id: ProfileId) {
     }
 }
 
+/// Marks a session as one its run was told to leave running.
+///
+/// Written when the program leaves rather than when the session starts, because
+/// at start there is no answer yet to what closing the window will mean. The
+/// rewrite goes through the same temporary-file dance as [`write`], so a crash in
+/// the middle cannot leave half a record where the next start expects a whole one.
+///
+/// A record that cannot be marked is a session that will be reclaimed rather than
+/// adopted at the next start - the safe direction for a file that may not have
+/// been written, and the same answer a crash gets. Nothing here removes anything:
+/// the record is the only trace of the processes still running.
+pub fn mark_left_running(runtime_dir: &Path, profile_id: ProfileId) -> Result<(), JournalError> {
+    let Some(mut record) = read(runtime_dir, profile_id)? else {
+        return Ok(());
+    };
+    record.left_running = true;
+    write(runtime_dir, &record)?;
+    Ok(())
+}
+
 /// Every record under the runtime directory. A record that cannot be read is
 /// returned as an error rather than skipped: it is the only trace of a session
 /// that may still be running.
@@ -195,8 +221,26 @@ pub struct Unresolved {
     pub reason: String,
 }
 
+/// A session a previous run was told to leave running.
+///
+/// The next run takes it over rather than stopping it: the pids, their creation
+/// times and the ports they were launched with are all in the record, which is
+/// everything a stop or a restart needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Adopted {
+    pub profile_id: ProfileId,
+    pub cdp_port: u16,
+    pub socks_port: Option<u16>,
+    pub started_at: u64,
+    pub browser: ProcessRecord,
+    pub xray: Option<ProcessRecord>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ReclaimReport {
+    /// Sessions left running on purpose, which this run takes over. Their records
+    /// are kept: they describe live sessions again.
+    pub adopted: Vec<Adopted>,
     /// Sessions whose children were still alive and have been stopped.
     pub reclaimed: Vec<Reclaimed>,
     /// Records nothing was done about, because the process they name is not the
@@ -209,12 +253,15 @@ pub struct ReclaimReport {
 
 impl ReclaimReport {
     pub fn is_empty(&self) -> bool {
-        self.reclaimed.is_empty() && self.unresolved.is_empty() && self.stale.is_empty()
+        self.adopted.is_empty()
+            && self.reclaimed.is_empty()
+            && self.unresolved.is_empty()
+            && self.stale.is_empty()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Verdict {
+pub(crate) enum Verdict {
     /// The pid is not in use, or holds a process that has already exited.
     Gone,
     /// Live, and still running the command line this record describes.
@@ -240,7 +287,7 @@ impl Verdict {
 /// `graceful` is how long a reclaimed process may take to exit after the polite
 /// request before it is killed. Anything that cannot be identified is reported
 /// and left running.
-pub fn reclaim(
+pub fn recover(
     runtime_dir: &Path,
     inspector: &dyn ProcessInspector,
     tree: &dyn ProcessTreeController,
@@ -296,6 +343,23 @@ pub fn reclaim(
             continue;
         }
 
+        // Alive, and identified as ours. Whether that means "stop it" or "take it
+        // over" is the one thing the marker decides: a run that was told to leave
+        // its children running wrote it down, and the answer to a browser left on
+        // purpose is not to stop it. The record stays where it is - it describes a
+        // live session again, and the next exit will mark it again or stop it.
+        if record.left_running {
+            report.adopted.push(Adopted {
+                profile_id: record.profile_id,
+                cdp_port: record.cdp_port,
+                socks_port: record.socks_port,
+                started_at: record.started_at,
+                browser: record.browser.clone(),
+                xray: record.xray.clone(),
+            });
+            continue;
+        }
+
         let mut forced = false;
         let mut failures = Vec::new();
         if browser_running {
@@ -336,7 +400,7 @@ pub fn reclaim(
     report
 }
 
-fn verdict(record: &ProcessRecord, inspector: &dyn ProcessInspector) -> Verdict {
+pub(crate) fn verdict(record: &ProcessRecord, inspector: &dyn ProcessInspector) -> Verdict {
     let live = match inspector.inspect(record.pid) {
         ProcessReading::Absent => return Verdict::Gone,
         ProcessReading::Unknown => {
@@ -400,7 +464,7 @@ fn command_line_matches(live: &crate::process::ProcessIdentity, record: &Process
 }
 
 /// Returns whether the process had to be killed.
-fn stop(
+pub(crate) fn stop(
     record: &ProcessRecord,
     inspector: &dyn ProcessInspector,
     tree: &dyn ProcessTreeController,
@@ -588,6 +652,7 @@ mod tests {
             cdp_port: 9222,
             socks_port: None,
             started_at: now_millis(),
+            left_running: false,
             browser: ProcessRecord {
                 pid: child.id(),
                 executable: "/bin/sleep".into(),
@@ -607,6 +672,7 @@ mod tests {
             cdp_port: 9222,
             socks_port: Some(51234),
             started_at: 1_700_000_000_000,
+            left_running: false,
             browser: ProcessRecord {
                 pid: 4321,
                 executable: "/opt/chrome".into(),
@@ -640,14 +706,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The rule the exit modes turn on: a record marked as deliberately left
+    /// running is adopted, and the process is left alone.
+    ///
+    /// The two halves matter equally. Adopting means the record is *kept* - it
+    /// describes a live session again - and that nothing was killed: a "keep
+    /// running" that stopped the browsers at the next start would be a lie the
+    /// user only discovers later.
     #[test]
-    fn a_session_left_running_is_stopped_and_its_record_removed() {
+    fn a_session_marked_as_left_running_is_adopted_and_not_stopped() {
+        let dir = runtime_dir("adopt");
+        let profile_id = ProfileId::new();
+        let mut child = spawn_sleep();
+        write(&dir, &record_for(profile_id, &child)).unwrap();
+        mark_left_running(&dir, profile_id).unwrap();
+
+        let report = recover(
+            &dir,
+            &DefaultProcessInspector,
+            &DefaultProcessTreeController,
+            Duration::from_millis(500),
+        );
+
+        assert_eq!(report.adopted.len(), 1, "{report:?}");
+        assert_eq!(report.adopted[0].profile_id, profile_id);
+        assert_eq!(report.adopted[0].browser.pid, child.id());
+        assert!(
+            report.reclaimed.is_empty(),
+            "an adopted session must not be stopped: {report:?}"
+        );
+        assert!(report.unresolved.is_empty(), "{report:?}");
+        assert!(report.stale.is_empty(), "{report:?}");
+
+        // Still alive, and still recorded - which is what makes it a session the
+        // next exit can mark again or stop.
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "it must still be running"
+        );
+        assert!(read(&dir, profile_id).unwrap().unwrap().left_running);
+
+        let _ = DefaultProcessTreeController.terminate_tree(child.id());
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Marking is idempotent and survives being read back, and a record that is
+    /// not there is not an error: the session may have stopped in between.
+    #[test]
+    fn marking_a_record_is_idempotent() {
+        let dir = runtime_dir("mark-twice");
+        let profile_id = ProfileId::new();
+        let mut child = spawn_sleep();
+        write(&dir, &record_for(profile_id, &child)).unwrap();
+
+        mark_left_running(&dir, profile_id).unwrap();
+        mark_left_running(&dir, profile_id).unwrap();
+        assert!(read(&dir, profile_id).unwrap().unwrap().left_running);
+
+        let absent = ProfileId::new();
+        mark_left_running(&dir, absent).expect("a record that is not there is nothing to mark");
+
+        let _ = DefaultProcessTreeController.terminate_tree(child.id());
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_left_by_a_crash_is_stopped_and_its_record_removed() {
         let dir = runtime_dir("reclaim");
         let profile_id = ProfileId::new();
         let mut child = spawn_sleep();
         write(&dir, &record_for(profile_id, &child)).unwrap();
 
-        let report = reclaim(
+        let report = recover(
             &dir,
             &DefaultProcessInspector,
             &DefaultProcessTreeController,
@@ -682,7 +814,7 @@ mod tests {
         assert_eq!(line.trim(), "ready");
         write(&dir, &record_for(profile_id, &child)).unwrap();
 
-        let report = reclaim(
+        let report = recover(
             &dir,
             &DefaultProcessInspector,
             &DefaultProcessTreeController,
@@ -710,7 +842,7 @@ mod tests {
         record.browser.start_time = None;
         write(&dir, &record).unwrap();
 
-        let report = reclaim(
+        let report = recover(
             &dir,
             &DefaultProcessInspector,
             &DefaultProcessTreeController,
@@ -750,7 +882,7 @@ mod tests {
         assert!(record.browser.start_time.is_some());
         write(&dir, &record).unwrap();
 
-        let report = reclaim(
+        let report = recover(
             &dir,
             &DefaultProcessInspector,
             &DefaultProcessTreeController,
@@ -789,7 +921,7 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
 
-        let report = reclaim(
+        let report = recover(
             &dir,
             &DefaultProcessInspector,
             &DefaultProcessTreeController,
@@ -814,7 +946,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{ not json").unwrap();
 
-        let report = reclaim(
+        let report = recover(
             &dir,
             &DefaultProcessInspector,
             &DefaultProcessTreeController,
@@ -833,7 +965,7 @@ mod tests {
 
     #[test]
     fn an_empty_runtime_directory_reclaims_nothing() {
-        let report = reclaim(
+        let report = recover(
             &std::env::temp_dir().join(format!("fp-journal-missing-{}", ProfileId::new())),
             &DefaultProcessInspector,
             &DefaultProcessTreeController,
@@ -866,6 +998,7 @@ mod tests {
             cdp_port: 9222,
             socks_port: None,
             started_at: now_millis(),
+            left_running: false,
             browser: ProcessRecord {
                 pid: child.id(),
                 executable: script,
@@ -880,7 +1013,7 @@ mod tests {
         assert_eq!(confirm(&record, &DefaultProcessInspector), None);
         write(&dir, &record).unwrap();
 
-        let report = reclaim(
+        let report = recover(
             &dir,
             &DefaultProcessInspector,
             &DefaultProcessTreeController,
@@ -944,7 +1077,7 @@ mod tests {
         let config = dir.join(profile_id.to_string()).join(XRAY_CONFIG_FILE);
         std::fs::write(&config, "{}").unwrap();
 
-        let report = reclaim(
+        let report = recover(
             &dir,
             &BlindInspector,
             &DefaultProcessTreeController,

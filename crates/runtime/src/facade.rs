@@ -24,5 +24,7 @@ pub trait RuntimeFacade: Send + Sync {
     fn start(&self, params: StartParams) -> Result<(), RuntimeCommandError>;
     fn stop(&self, profile_id: ProfileId) -> Result<(), RuntimeCommandError>;
     fn restart(&self, params: StartParams) -> Result<(), RuntimeCommandError>;
+    /// End this run with every running session left running.
+    fn release_all(&self) -> Result<(), RuntimeCommandError>;
     fn snapshot(&self, profile_id: ProfileId) -> Option<RuntimeSnapshot>;
 }

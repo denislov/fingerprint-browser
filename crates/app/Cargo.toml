@@ -26,6 +26,17 @@ tracing-subscriber = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The tray icon on Linux: a StatusNotifierItem over D-Bus. `blocking` is the API
+# that does not need an async runtime to spawn the service, and `async-io` is the
+# reactor underneath it. Deliberately built without its default features, which
+# pull in an async runtime this program does not have; what is left is pure Rust
+# through zbus, so no GTK and no libdbus enter the build or the packages.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", default-features = false, features = [
+    "blocking",
+    "async-io",
+] }
+
 # The Windows half of the data-directory lock is `LockFileEx`, which is declared
 # under the file-system feature; the other two are what the call and its error
 # code need. The same crate and version the runtime already uses for its job
@@ -36,6 +47,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
 ] }
+
+# The tray icon on Windows: the shell's notification area. Target-gated because
+# the same crate's Linux half links GTK and libappindicator, neither of which this
+# program uses - the Linux tray is `ksni`, above.
+tray-icon = "0.25"
 
 # Only for a Windows host, because it is only used by `build.rs` there: it puts
 # the icon and the version into the executable's resource section, which is what

@@ -7,6 +7,7 @@
 use crate::browser_data::BrowserDataCopier;
 use crate::core_editor::CoreEditor;
 use crate::editor::{ProfileEdit, ProfileEditor};
+use crate::exit::{Exit, ExitMode};
 use crate::open_dir::DirectoryOpener;
 use crate::proxy_editor::ProxyEditor;
 use crate::proxy_import::ProxyImport;
@@ -18,6 +19,7 @@ use crate::state::{
 };
 use crate::text::{Lang, Text};
 use crate::theme::{Palette, ThemeChoice, palette};
+use crate::tray::{Tray, TrayEvent};
 use crate::verifier::{FingerprintVerifier, VerificationReport};
 use application::{BrowserDataReport, Direction, RestoreMode};
 use crossbeam_channel::{Receiver, Sender};
@@ -102,6 +104,20 @@ pub struct AppView {
     events: Receiver<RuntimeEvent>,
     /// Kept alive: dropping a GPUI subscription unregisters the observer.
     window_closed: Option<Subscription>,
+    /// The tray icon, once "keep running" has put the window away. It is created
+    /// on the first request rather than at start, because a program with its
+    /// window open does not need one - and it is never removed, because the user
+    /// who put the window away once may do it again.
+    tray: Option<Tray>,
+    /// Whether the close hook has been registered on this window. The hook needs
+    /// a `Window`, and this view is built before there is one, so the first frame
+    /// is when it is installed - once.
+    close_hook: bool,
+    /// Whether the exit dialog's "remember" box is ticked. It lives here rather
+    /// than in the dialog because the dialog is rebuilt from a closure on every
+    /// frame, and a checkbox that forgot its own state between frames would be a
+    /// checkbox nobody could tick.
+    exit_remember: bool,
     /// The same, for the filter field's change events.
     filter_changed: Option<Subscription>,
 }
@@ -152,6 +168,9 @@ impl AppView {
             state,
             events,
             window_closed: None,
+            tray: None,
+            close_hook: false,
+            exit_remember: false,
             filter_changed: None,
         }
     }
@@ -242,6 +261,10 @@ impl AppView {
         let _ = self.state.load();
         // Quitting on the last closed window is the default on Windows/Linux but
         // not on macOS; make it uniform so the supervisor shutdown always runs.
+        //
+        // "Keep running" is the exception, and it is answered by the close
+        // request above: that path minimizes the window instead of closing it, so
+        // this never sees an empty window list.
         self.window_closed = Some(cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -265,7 +288,7 @@ impl AppView {
                     if cx.windows().is_empty() {
                         quit = true;
                         cx.quit();
-                        return (false, Vec::new(), Vec::new());
+                        return (false, Vec::new(), Vec::new(), Vec::new());
                     }
 
                     let notified = view.drain_events();
@@ -277,23 +300,39 @@ impl AppView {
                         view.state.refresh_runtime();
                         cx.notify();
                     }
-                    // The toasts are pushed from outside this update: showing
-                    // one updates the root view the notification layer lives
-                    // on, which is a different entity.
-                    (true, view.state.drain_toasts(), cx.windows())
+                    // The toasts and the tray's requests are both carried out
+                    // from outside this update: one updates the root view the
+                    // notification layer lives on, and the other needs a window,
+                    // and both are different objects from this entity.
+                    (
+                        true,
+                        view.state.drain_toasts(),
+                        view.drain_tray(),
+                        cx.windows(),
+                    )
                 });
 
                 // The entity is gone, or the last window was closed.
-                let Ok((alive, toasts, windows)) = updated else {
+                let Ok((alive, toasts, asked, windows)) = updated else {
                     break;
                 };
                 if !alive || quit {
                     break;
                 }
                 if !toasts.is_empty() {
-                    for window in windows {
-                        let _ = cx.update_window(window, |_, window, cx| {
+                    for window in &windows {
+                        let _ = cx.update_window(*window, |_, window, cx| {
                             push_toasts(&toasts, window, cx);
+                        });
+                    }
+                }
+
+                // The tray is another thread: what it noticed is carried out
+                // here, where there is a window to carry it out on.
+                for event in asked {
+                    for window in &windows {
+                        let _ = cx.update_window(*window, |_, window, cx| {
+                            let _ = this.update(cx, |view, cx| view.handle_tray(event, window, cx));
                         });
                     }
                 }
@@ -606,6 +645,16 @@ impl AppView {
         if self.state.set_theme(choice).is_ok() {
             Theme::change(choice.mode(), None, cx);
         }
+        cx.notify();
+    }
+
+    /// Stores what closing the window does.
+    ///
+    /// Nothing to apply: this choice is read when a window is closed, so there is
+    /// nothing on screen that has to move except the chip that is lit and the
+    /// sentence under it.
+    fn on_choose_exit_mode(&mut self, mode: ExitMode, cx: &mut Context<Self>) {
+        let _ = self.state.set_exit_mode(mode);
         cx.notify();
     }
 
@@ -1381,13 +1430,227 @@ impl AppView {
 
     /// Exit through the same path as closing the last window: `run` returns and
     /// `main` then asks the supervisor to reclaim every child process.
-    fn on_quit(&mut self, cx: &mut Context<Self>) {
-        cx.quit();
+    /// The window's Quit button, which is the close affordance the user can
+    /// reach without the title bar and therefore asks the same question.
+    fn on_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.decide_exit(window, cx);
+    }
+
+    /// The window's close button, as a question that can be refused.
+    ///
+    /// `false` keeps the window open, which is what two of the four modes mean:
+    /// "ask" has not been answered yet, and "keep running" is not a close at all.
+    fn on_close_requested(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match self.state.exit_mode().choice() {
+            // The one answer that is not a close: the window goes away and the
+            // program does not, so the close is refused.
+            Some(exit) if exit.stays_running() => {
+                self.enter_background(window, cx);
+                false
+            }
+            Some(exit) => {
+                self.leave(exit, window, cx);
+                true
+            }
+            None => {
+                self.open_exit_dialog(window, cx);
+                false
+            }
+        }
+    }
+
+    /// The one place the answer is read: a remembered mode is carried out, and
+    /// "ask" is asked.
+    fn decide_exit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.state.exit_mode().choice() {
+            Some(exit) if exit.stays_running() => self.enter_background(window, cx),
+            Some(exit) => self.leave(exit, window, cx),
+            None => self.open_exit_dialog(window, cx),
+        }
+    }
+
+    /// Carries out one of the three answers.
+    ///
+    /// "Keep running" tells the runtime before it quits: the supervisor is the
+    /// only thing that can mark the session records and give up the handles, and
+    /// it is about to be gone. "Stop everything" needs to say nothing - what this
+    /// program has always done at exit is stop its children, and `main` does it
+    /// after the window loop returns.
+    fn leave(&mut self, exit: Exit, window: &mut Window, cx: &mut Context<Self>) {
+        window.close_dialog(cx);
+        match exit {
+            Exit::Background => self.enter_background(window, cx),
+            Exit::KeepRunning => {
+                self.state.release_runtime();
+                cx.quit();
+            }
+            Exit::ExitAll => cx.quit(),
+        }
+    }
+
+    /// Stays, with no window.
+    ///
+    /// The window is minimized rather than closed because that is the only thing
+    /// this UI stack offers: GPUI's `hide` is a no-op on both backends and no
+    /// window can be asked to unmap itself. So "in the background" means the
+    /// window is out of the way and the program is still managing the profiles,
+    /// and the tray icon is what says so and what brings it back.
+    fn enter_background(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        // No banner: it would be painted into a window the user has just put
+        // away. The activity log is where this is recorded, because the log is
+        // what outlives the window.
+        tracing::info!("{}", self.state.text().exit_in_background);
+        if self.tray.is_none() {
+            // A desktop that will not take the icon is worth saying out loud and
+            // is not worth refusing: the window still minimizes, and the log is
+            // what says why there is no way back from the tray.
+            match Tray::start(self.state.text()) {
+                Ok(tray) => self.tray = Some(tray),
+                Err(error) => tracing::warn!("no tray icon: {error}"),
+            }
+        }
+        window.minimize_window();
+    }
+
+    /// What the tray asked for, if anything.
+    fn drain_tray(&self) -> Vec<TrayEvent> {
+        self.tray
+            .as_ref()
+            .map(|tray| tray.drain())
+            .unwrap_or_default()
+    }
+
+    /// Carries out one of those requests.
+    ///
+    /// The window is woken first in both cases: a question asked of a minimized
+    /// window is a question nobody sees.
+    fn handle_tray(&mut self, event: TrayEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.activate_window();
+        match event {
+            TrayEvent::Show => cx.notify(),
+            // The remembered mode is deliberately not consulted - the tray's way
+            // out is the question, always. A tray item that re-entered "keep
+            // running" would be a program nobody could leave.
+            TrayEvent::Quit => self.open_exit_dialog(window, cx),
+        }
+    }
+
+    /// The question itself: three answers, and whether to stop asking.
+    fn open_exit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.state.text();
+        let p = palette(cx);
+        let body = if self.state.any_profile_active() {
+            t.exit_dialog_body
+        } else {
+            t.exit_dialog_body_idle
+        };
+        let view = cx.entity().downgrade();
+        // The box's state is a cell rather than a field of the view, because the
+        // dialog is rebuilt from this closure on every frame and reading the view
+        // from inside a render is exactly what cannot be done. The view's own copy
+        // is what a *reopened* dialog starts from, and is written on every tick.
+        let remember = std::rc::Rc::new(std::cell::Cell::new(self.exit_remember));
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let ticked = remember.get();
+            let choices = [Exit::Background, Exit::KeepRunning, Exit::ExitAll]
+                .into_iter()
+                .map(|exit| {
+                    let view = view.clone();
+                    let remember = std::rc::Rc::clone(&remember);
+                    exit_choice(&exit, p, t)
+                        .test_support()
+                        .on_click(move |_, window, cx| {
+                            let ticked = remember.get();
+                            if let Some(view) = view.upgrade() {
+                                view.update(cx, |view, cx| {
+                                    if ticked {
+                                        // Written before it is acted on, like
+                                        // every other stored choice: a config
+                                        // file that cannot be written refuses
+                                        // the change, and the exit still
+                                        // happens - the answer was given.
+                                        let _ = view.state.set_exit_mode(exit.mode());
+                                    }
+                                    view.leave(exit, window, cx);
+                                });
+                            }
+                        })
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+
+            dialog
+                .title(t.exit_dialog_title)
+                .w(px(560.0))
+                // One child rather than three: the dialog puts its children in a
+                // `flex_1` box whose height does not come out equal to what it
+                // paints, so a stack of children is a stack of separate
+                // measurement problems. What is inside is one box that is either
+                // laid out or not.
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(div().text_xs().text_color(rgb(p.muted)).child(body))
+                        .children(choices)
+                        .child(
+                            Checkbox::new("exit-remember")
+                                .label(t.exit_remember)
+                                .checked(ticked)
+                                .on_click({
+                                    let view = view.clone();
+                                    let remember = std::rc::Rc::clone(&remember);
+                                    move |checked, window, cx| {
+                                        remember.set(*checked);
+                                        if let Some(view) = view.upgrade() {
+                                            // `Entity::update` is infallible
+                                            // here: the entity was just
+                                            // upgraded, so it is alive.
+                                            view.update(cx, |view, cx| {
+                                                view.exit_remember = *checked;
+                                                cx.notify();
+                                            });
+                                        }
+                                        // The dialog is rebuilt from the cell, so
+                                        // the box has to be redrawn for the tick to
+                                        // appear.
+                                        window.refresh();
+                                    }
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(p.muted))
+                                .child(t.exit_remember_note),
+                        ),
+                )
+                .footer(
+                    DialogFooter::new().child(
+                        DialogClose::new().trigger(|button| button.label(t.cancel).outline()),
+                    ),
+                )
+        });
     }
 }
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The close button asks before it closes, which is the one place that
+        // can: `on_window_closed` is told after the fact, and by then the window -
+        // and with it the chance to ask - is gone. The hook needs a window, and
+        // this view is built before there is one, so the first frame installs it.
+        if !self.close_hook {
+            self.close_hook = true;
+            let view = cx.entity().downgrade();
+            window.on_window_should_close(cx, move |window, cx| {
+                view.update(cx, |view, cx| view.on_close_requested(window, cx))
+                    // The view is gone, so there is nothing left to ask.
+                    .unwrap_or(true)
+            });
+        }
+
         let t = self.state.text();
         let p = palette(cx);
         // The overlay layers live above the view and are rendered by the view
@@ -1511,6 +1774,7 @@ impl Render for AppView {
                                         diagnostics: diagnostics_destination.clone(),
                                         theme: self.state.theme(),
                                         language: self.state.language(),
+                                        exit_mode: self.state.exit_mode(),
                                     },
                                     cx,
                                     p,
@@ -1594,7 +1858,7 @@ fn header(cx: &mut Context<AppView>, t: &Text) -> Div {
                     Button::new("quit")
                         .label(t.quit)
                         .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| this.on_quit(cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.on_quit(window, cx))),
                 ),
         )
 }
@@ -2152,6 +2416,7 @@ struct SettingsCards {
     diagnostics: PathBuf,
     theme: ThemeChoice,
     language: Lang,
+    exit_mode: ExitMode,
 }
 
 fn settings_body(
@@ -2167,6 +2432,7 @@ fn settings_body(
     // chain.
     let appearance: AnyElement =
         appearance_card(cards.theme, cards.language, cx, t).into_any_element();
+    let exit_card: AnyElement = exit_mode_card(cards.exit_mode, cx, t).into_any_element();
     let export_card: AnyElement = export_card(&cards.export, cx, t).into_any_element();
     let import_card: AnyElement = import_card(&cards.import, cx, t).into_any_element();
     let restore_card: AnyElement = restore_card(&cards.restore, cx, t).into_any_element();
@@ -2270,6 +2536,7 @@ fn settings_body(
                 )
         }))
         .child(appearance)
+        .child(exit_card)
         .child(export_card)
         .child(import_card)
         .child(restore_card)
@@ -2334,6 +2601,89 @@ fn appearance_card(
                 .on_click(cx.listener(move |this, _, _, cx| this.on_choose_language(option, cx)))
             })),
         )
+}
+
+/// What closing the window does, and the four answers to it.
+///
+/// Beside the appearance and the language because it is the same kind of setting:
+/// a standing choice about this installation, kept in the config file, read when
+/// it matters rather than when the page is drawn. The difference is *when* it
+/// matters - the appearance and the language change what is on screen, while this
+/// one is read at the moment a window is closed, which may be days later.
+///
+/// Four chips rather than a menu, for the reason the appearance has two: every
+/// answer is visible at once, and the one in force is the one that is lit. The
+/// sentence under them is the chosen mode's own, so what each answer costs is
+/// readable without hovering anything.
+fn exit_mode_card(mode: ExitMode, cx: &mut Context<AppView>, t: &Text) -> impl IntoElement {
+    let p = palette(cx);
+    settings_card(p)
+        .id("exit-mode")
+        .test_support()
+        .child(settings_card_heading(
+            t.exit_card_title,
+            t.exit_card_body,
+            p,
+        ))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .children(ExitMode::ALL.map(|option| {
+                    let active = option == mode;
+                    chip(
+                        format!("exit-{}", option.code()),
+                        option.label(t),
+                        active,
+                        p,
+                    )
+                    .test_support()
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.on_choose_exit_mode(option, cx)),
+                    )
+                })),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(p.muted))
+                .child(mode.note(t).to_string()),
+        )
+}
+
+/// One of the dialog's three answers: what it is, and what it does.
+///
+/// A row rather than a footer button, because the three answers need their
+/// sentences: "leave browsers running" and "stop everything" are one word apart
+/// and opposite in effect, and a button that only carried the word would be a
+/// decision made on a guess.
+fn exit_choice(exit: &Exit, p: Palette, t: &Text) -> Stateful<Div> {
+    // A given height, because the three answers have to look like three of the
+    // same thing. Left to itself the dialog's content box gave the last row a
+    // text line less than the two above it, and that row's own note then painted
+    // over where its bottom border was - the text, the order and the line height
+    // were each ruled out by measurement, so the box is what is pinned. The
+    // height leaves room for a note that wraps to two lines.
+    div()
+        .id(format!("exit-choice-{}", exit.code()))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap_1()
+        .h(px(84.0))
+        .px_3()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(p.dim))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .child(exit.label(t)),
+        )
+        .child(div().text_xs().text_color(rgb(p.muted)).child(exit.note(t)))
 }
 
 /// The frame the Settings cards share: a bordered column.
@@ -3560,6 +3910,7 @@ mod tests {
 
     use super::AppView;
     use crate::browser_data::testing::FakeBrowserDataCopier;
+    use crate::exit::ExitMode;
     use crate::open_dir::testing::FakeOpener;
     use crate::proxy_tester::testing::FakeProxyTester;
     use crate::state::AppState;
@@ -3822,6 +4173,175 @@ mod tests {
                 )
                 .expect("seed a proxy")
         })
+    }
+
+    /// The Settings card switches what closing the window does, and the choice is
+    /// written down rather than only shown.
+    #[gpui_kit::test]
+    fn the_exit_mode_card_switches_and_stores_the_choice(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        // A config file of this test's own: the choice is stored, and the shared
+        // one would make every other test that reads it see this test's answer.
+        let dir = std::env::temp_dir().join(format!("fp-ui-exit-card-{}", std::process::id()));
+        let (view, _) = view_with_config(cx, &dir.join("config.json"));
+        let cx = window(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+
+        assert!(
+            cx.update(|window, _| window.try_find("exit-keep-running").is_some()),
+            "the card offers the answers, not just the one in force"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().exit_mode()),
+            ExitMode::Ask,
+            "a fresh installation asks rather than deciding"
+        );
+
+        scroll_settings_to(cx, "exit-keep-running");
+        cx.update(|window, cx| window.click("exit-keep-running", cx));
+        settle(cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().exit_mode()),
+            ExitMode::KeepRunning,
+            "the chip stores the answer it names"
+        );
+
+        scroll_settings_to(cx, "exit-exit-all");
+        cx.update(|window, cx| window.click("exit-exit-all", cx));
+        settle(cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().exit_mode()),
+            ExitMode::ExitAll
+        );
+    }
+
+    /// "Ask" is answered with a question rather than a guess: a close request
+    /// while the mode is "ask" opens the three choices and refuses the close.
+    #[gpui_kit::test]
+    fn closing_the_window_asks_when_the_mode_is_ask(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = std::env::temp_dir().join(format!("fp-ui-exit-ask-{}", std::process::id()));
+        let (view, _) = view_with_config(cx, &dir.join("config.json"));
+        let cx = window(cx, &view);
+        let ask = |cx: &mut gpui_kit::VisualTestContext| {
+            cx.update(|window, cx| view.update(cx, |view, cx| view.on_close_requested(window, cx)))
+        };
+
+        assert!(!ask(cx), "an unanswered question must not close the window");
+        assert!(
+            cx.update(|window, _| window.try_find("exit-choice-exit-all").is_some()),
+            "the three answers are the dialog"
+        );
+
+        // Choosing one carries it out and takes the dialog away, and nothing is
+        // remembered unless the box was ticked. "Stop everything" is the answer
+        // this test presses because the harness window cannot be minimized, which
+        // is what "keep running" asks of it.
+        cx.update(|window, cx| window.click("exit-choice-exit-all", cx));
+        settle(cx);
+        assert!(
+            cx.update(|window, _| window.try_find("exit-choice-exit-all").is_none()),
+            "the answer closes the question"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().exit_mode()),
+            ExitMode::Ask,
+            "without the box ticked, nothing is remembered"
+        );
+    }
+
+    /// The three answers are three of the same thing, and the last one is whole.
+    ///
+    /// Both halves were wrong before this was a test: the last row came out a text
+    /// line shorter than the two above it and its own note painted over where its
+    /// bottom border was. The text, the order and the line height were each ruled
+    /// out by measuring, which is why the height is now given rather than derived.
+    #[gpui_kit::test]
+    fn the_exit_dialog_shows_three_equal_answers_inside_itself(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = std::env::temp_dir().join(format!("fp-ui-exit-equal-{}", std::process::id()));
+        let (view, _) = view_with_config(cx, &dir.join("config.json"));
+        let cx = window(cx, &view);
+
+        let _ =
+            cx.update(|window, cx| view.update(cx, |view, cx| view.on_close_requested(window, cx)));
+        settle(cx);
+
+        let bounds = |id: &str, cx: &mut gpui_kit::VisualTestContext| {
+            cx.update(|window, _| window.try_find(id.to_string()).expect(id).bounds())
+        };
+        let surface = cx.debug_bounds("dialog-0").expect("the dialog's surface");
+        let rows = [
+            "exit-choice-background",
+            "exit-choice-keep-running",
+            "exit-choice-exit-all",
+        ]
+        .map(|id| bounds(id, cx));
+
+        assert_eq!(rows[0].size.height, rows[1].size.height, "{rows:?}");
+        assert_eq!(rows[1].size.height, rows[2].size.height, "{rows:?}");
+        for (index, row) in rows.iter().enumerate() {
+            assert!(
+                row.bottom() <= surface.bottom(),
+                "answer {index} is outside the dialog: {row:?} in {surface:?}"
+            );
+            if let Some(next) = rows.get(index + 1) {
+                assert!(
+                    row.bottom() <= next.origin.y,
+                    "answer {index} overlaps the next one: {rows:?}"
+                );
+            }
+        }
+    }
+
+    /// A remembered mode is an answer, so no question is asked: the close is
+    /// allowed (or, for "keep running", refused) without a dialog.
+    #[gpui_kit::test]
+    fn a_remembered_exit_mode_is_carried_out_without_asking(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let dir = std::env::temp_dir().join(format!("fp-ui-exit-remember-{}", std::process::id()));
+        let (view, runtime) = view_with_config(cx, &dir.join("config.json"));
+        let cx = window(cx, &view);
+        let commands = || runtime.commands.lock().expect("commands").clone();
+
+        // "Stop everything" says nothing to the runtime: what this program has
+        // always done at exit is stop its children, and `main` does that after
+        // the window loop returns.
+        view.update(cx, |view, _| {
+            view.state_mut()
+                .set_exit_mode(ExitMode::ExitAll)
+                .expect("store the answer")
+        });
+        let allowed =
+            cx.update(|window, cx| view.update(cx, |view, cx| view.on_close_requested(window, cx)));
+        assert!(allowed, "a remembered answer closes the window");
+        assert!(
+            cx.update(|window, _| window.try_find("exit-remember").is_none()),
+            "and it was not asked about"
+        );
+        assert!(
+            !commands().iter().any(|command| command == "release-all"),
+            "stopping everything does not release anything: {:?}",
+            commands()
+        );
+
+        // "Leave browsers running" does: it is the one answer the runtime has to
+        // be told about, and the program is about to end.
+        view.update(cx, |view, _| {
+            view.state_mut()
+                .set_exit_mode(ExitMode::KeepRunning)
+                .expect("store the answer")
+        });
+        let allowed =
+            cx.update(|window, cx| view.update(cx, |view, cx| view.on_close_requested(window, cx)));
+        assert!(allowed);
+        assert!(
+            commands().iter().any(|command| command == "release-all"),
+            "leaving with the browsers running must tell the runtime: {:?}",
+            commands()
+        );
     }
 
     #[gpui_kit::test]

@@ -69,6 +69,13 @@ this repository does not bundle or fork them.
   language you chose, and `--diagnostics` writes one file about this installation
   that never contains proxy credentials or browser data. The same report is one
   button on the Settings page; see [diagnostics](docs/diagnostics.md).
+- Choose what closing the window does: **keep running** in the background (the
+  window is minimized and a tray icon brings it back or leaves),
+  **leave browsers running** while the program exits, or **stop everything** -
+  asked once with a "remember this choice" box, and changeable on the Settings
+  page. A start adopts the sessions a previous run deliberately left running, so
+  they are running profiles again; what a crash left is still reclaimed. See
+  [exit modes](docs/exit-modes.md).
 - Run one window per data directory. A second copy cannot take the lock and is
   refused by name - it prints which process holds the directory and exits 3 -
   instead of opening the same database and stopping the browsers the first copy

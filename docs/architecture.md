@@ -171,7 +171,11 @@ fingerprint-browser/
   库，也不会把第一个副本正在运行的浏览器当成遗留进程回收。锁由内核在进程结束时释放，所以
   没有需要判定陈旧的锁文件（见 implementation-plan 的 One instance）；
 - 外观（`theme`）：两套语义调色板 + `ThemeChoice`，以及从组件主题读回当前配色的
-  `palette(cx)`。设置持久化在 `settings`，启动时在画第一帧之前应用（见 10d）。
+  `palette(cx)`。设置持久化在 `settings`，启动时在画第一帧之前应用（见 10d）；
+- 退出模式（`exit`）：关窗的三种答法与"每次都问"，以及关闭请求的拦截点。模式一的窗口
+  最小化与托盘图标在 `tray`：Linux 走 `ksni`（D-Bus 上的 StatusNotifierItem，纯 Rust，
+  不引入 GTK/libdbus），Windows 走 `tray-icon`（复用窗口已有的消息泵）；两者都只把点击
+  投进队列，由窗口的 tick 处理（见 exit-modes）。
 
 ---
 

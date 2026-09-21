@@ -40,6 +40,29 @@ impl ManagedChild {
         check(unsafe { TerminateProcess(self.process.as_raw_handle(), 1) })
     }
 
+    /// Clears this job's kill-on-close limit, so the processes in it survive this
+    /// handle being closed - and therefore this process ending.
+    ///
+    /// The limit is what makes a manager that crashed take its browsers with it,
+    /// which is right by default and wrong when the user asked to leave them
+    /// running. Only the job's owner can change it, and this is the owner.
+    /// Everything else about the job is left alone: it still groups the tree, and
+    /// `terminate_tree` still stops it for as long as this handle is open.
+    pub(crate) fn release(&mut self) -> io::Result<()> {
+        // SAFETY: zeroed, correctly sized configuration for a live owned handle.
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags = 0;
+        // SAFETY: live job handle and correctly sized configuration.
+        check(unsafe {
+            SetInformationJobObject(
+                self.job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        })
+    }
+
     pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.wait_for(0)
     }

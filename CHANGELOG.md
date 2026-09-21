@@ -13,6 +13,23 @@ is cut.
 
 ## [Unreleased]
 
+### Added
+
+- Three ways to leave, and the question that picks between them. Closing the
+  window can keep the program running in the background, leave the program while
+  the browsers and proxy tunnels it started keep running, or stop everything -
+  and the choice can be remembered, or changed on the Settings page. "In the
+  background" means the window is minimized and a tray icon brings it back or
+  leaves: a StatusNotifierItem over D-Bus on Linux (`ksni`, pure Rust, so no GTK
+  or libdbus enters the packages) and the shell's notification area on Windows
+  (`tray-icon`); the tray's **Quit…** always asks rather than obeying the
+  remembered answer, so the tray cannot become a program nobody can leave.
+- A start **adopts** the sessions a previous run deliberately left running, so
+  they are running profiles again rather than leftovers to clean up. What a crash
+  left is reclaimed exactly as before, and a session record that cannot be marked
+  is released and logged rather than stranded. A signal still means stop
+  everything. See [exit modes](docs/exit-modes.md).
+
 ## [0.1.0] - 2026-09-21
 
 ### Added

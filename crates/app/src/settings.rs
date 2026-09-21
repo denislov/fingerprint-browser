@@ -18,6 +18,7 @@
 //! reported, the defaults are used, and saving is refused until it is fixed, so
 //! a typo cannot cost the user the settings it still holds.
 
+use crate::exit::ExitMode;
 use crate::paths;
 use crate::text::{Lang, Text, text};
 use crate::theme::ThemeChoice;
@@ -214,6 +215,9 @@ struct Stored {
     theme: Option<String>,
     /// The chosen language, the same way.
     lang: Option<String>,
+    /// What closing the window does, the same way. Absent means "ask", which is
+    /// also what a file written before the exit modes existed means.
+    exit_mode: Option<String>,
 }
 
 /// The environment, read once so a test can supply its own.
@@ -414,6 +418,10 @@ pub struct Settings {
     echo_url: String,
     theme: ThemeChoice,
     lang: Lang,
+    /// What closing the window does. Resolved once, like the appearance and the
+    /// language: it is read when the window is closed, which is a decision made
+    /// long after this read.
+    exit_mode: ExitMode,
 }
 
 impl Settings {
@@ -442,6 +450,9 @@ impl Settings {
         // Resolved before the notice below, which is written in it: a config
         // file that failed to parse still says which language to complain in.
         let lang = Lang::from_code(stored.lang.as_deref().unwrap_or(""));
+        // Like the appearance: a standing choice about this installation, not
+        // about what this process does, so no environment override.
+        let exit_mode = ExitMode::from_code(stored.exit_mode.as_deref().unwrap_or(""));
 
         // An error is worth more than the migration note, and only one of them
         // can be set: the move either read the old file or it did not.
@@ -479,6 +490,7 @@ impl Settings {
             echo_url,
             theme,
             lang,
+            exit_mode,
         };
         (settings, notice)
     }
@@ -555,6 +567,32 @@ impl Settings {
         write_config(&self.config_path, &stored, self.text())?;
         self.stored = stored;
         self.lang = lang;
+        Ok(())
+    }
+
+    /// What closing the window does.
+    pub fn exit_mode(&self) -> ExitMode {
+        self.exit_mode
+    }
+
+    /// Stores what closing the window does.
+    ///
+    /// Written before it is used, like the appearance and the language: a config
+    /// file that cannot be written refuses the choice rather than showing one that
+    /// would be gone by the next start. This one is read when the window is
+    /// closed rather than when it is drawn, so "before it is used" means before
+    /// any window is closed with it.
+    pub fn set_exit_mode(&mut self, mode: ExitMode) -> Result<(), String> {
+        if let Some(error) = &self.config_error {
+            return Err(self
+                .text()
+                .settings_cannot_write(&self.config_path.display().to_string(), error));
+        }
+        let mut stored = self.stored.clone();
+        stored.exit_mode = Some(mode.code().to_string());
+        write_config(&self.config_path, &stored, self.text())?;
+        self.stored = stored;
+        self.exit_mode = mode;
         Ok(())
     }
 
@@ -1243,6 +1281,34 @@ mod tests {
 
         let (reloaded, _) = Settings::load(env(&config));
         assert_eq!(reloaded.theme(), ThemeChoice::Light);
+    }
+
+    /// What closing the window does survives a restart, and a config file that
+    /// does not name it asks - which is also what a name from a later build
+    /// means, because the other three answer a question the user was never asked.
+    #[test]
+    fn the_exit_mode_is_stored_and_an_unknown_one_means_asking() {
+        let config = TempConfig::new("exit-mode");
+        config.write(r#"{"xray_executable": "/srv/xray"}"#);
+        let (mut settings, _) = Settings::load(env(&config));
+        assert_eq!(settings.exit_mode(), ExitMode::Ask, "absent means ask");
+
+        settings.set_exit_mode(ExitMode::KeepRunning).expect("save");
+        assert_eq!(settings.exit_mode(), ExitMode::KeepRunning);
+        assert_eq!(
+            settings.xray_executable(),
+            Path::new("/srv/xray"),
+            "kept across the rewrite"
+        );
+
+        let (reloaded, _) = Settings::load(env(&config));
+        assert_eq!(reloaded.exit_mode(), ExitMode::KeepRunning);
+
+        // A name this build does not know is not a reason to refuse to start,
+        // and it is not a guess at what the user meant either.
+        config.write(r#"{"exit_mode": "minimize-to-bathtub"}"#);
+        let (unknown, _) = Settings::load(env(&config));
+        assert_eq!(unknown.exit_mode(), ExitMode::Ask);
     }
 
     /// The language survives a restart, a region is not a different language,

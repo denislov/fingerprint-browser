@@ -16,10 +16,138 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
+/// A component the supervisor is responsible for, and how it came to be one.
+///
+/// A run that was told to leave its children running leaves no handle behind -
+/// the handle died with that run - so the next run has only the session record: a
+/// pid, the kernel start time that tells one process instance from the next, and
+/// the ports. That is enough to watch, to stop and to restart, and it is *all*
+/// there is, which is why the two cases are one type here rather than a special
+/// case in every method that touches a child.
+enum Held {
+    /// Started by this run. The handle is the authority: it knows whether the
+    /// process is alive without asking the kernel, and stopping it goes through
+    /// the job or the process group this run created.
+    Owned(crate::process::ManagedChild),
+    /// Started by a run that deliberately left it running. The record is the
+    /// authority, and every question about it is a question about identity -
+    /// which is why it is answered by the same rule the journal uses.
+    Adopted(ProcessRecord),
+}
+
+impl Held {
+    fn id(&self) -> u32 {
+        match self {
+            Self::Owned(child) => child.id(),
+            Self::Adopted(record) => record.pid,
+        }
+    }
+
+    /// Why it is no longer running, or `None` while it is.
+    ///
+    /// "Cannot be asked" is deliberately not "gone": a platform that cannot read
+    /// another process's identity must not turn into a crash report and a stopped
+    /// profile.
+    fn exited(&mut self, inspector: &dyn ProcessInspector) -> Option<Gone> {
+        match self {
+            Self::Owned(child) => match child.try_wait() {
+                Ok(None) => None,
+                Ok(Some(status)) => Some(Gone {
+                    detail: status.to_string(),
+                    succeeded: Some(status.success()),
+                }),
+                Err(error) => Some(Gone {
+                    detail: error.to_string(),
+                    succeeded: None,
+                }),
+            },
+            Self::Adopted(record) => match journal::verdict(record, inspector) {
+                journal::Verdict::Gone => Some(Gone {
+                    detail: "the process is gone".to_string(),
+                    // A process this run did not spawn has no exit status to
+                    // read, so whether it left cleanly cannot be known. It is
+                    // reported as a normal stop rather than guessed at as a
+                    // crash: the process being gone is the fact, and inventing
+                    // an alarm from it is the false report the clean flag exists
+                    // to prevent.
+                    succeeded: None,
+                }),
+                journal::Verdict::Ours => None,
+                journal::Verdict::Foreign(reason) => Some(Gone {
+                    detail: reason,
+                    succeeded: None,
+                }),
+                // Nothing could be learned, so nothing may be decided.
+                journal::Verdict::Unreadable(_) => None,
+            },
+        }
+    }
+
+    /// The handle behind an owned component, for a test that has to end a child
+    /// the way only its owner can. An adopted component has no handle - which is
+    /// the whole distinction - so asking for one is a mistake worth a panic.
+    #[cfg(test)]
+    fn owned_mut(&mut self) -> &mut crate::process::ManagedChild {
+        match self {
+            Self::Owned(child) => child,
+            Self::Adopted(_) => panic!("an adopted session has no handle"),
+        }
+    }
+
+    /// Stops it, and everything it started.
+    fn kill(&mut self, inspector: &dyn ProcessInspector, tree: &dyn ProcessTreeController) {
+        match self {
+            Self::Owned(child) => {
+                #[cfg(windows)]
+                if let Err(error) = child.terminate_tree() {
+                    tracing::error!("failed to terminate managed job: {error}");
+                }
+                if matches!(child.try_wait(), Ok(None)) {
+                    #[cfg(unix)]
+                    let _ = tree.terminate_tree(child.id());
+                    // A direct kill is a fallback if the platform tree controller
+                    // fails.
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+            }
+            // No handle, so the recorded identity is rechecked at the moment of
+            // termination and the tree is stopped by pid.
+            Self::Adopted(record) => {
+                if let Err(error) = journal::stop(record, inspector, tree, journal::DEFAULT_GRACE) {
+                    tracing::warn!("failed to stop adopted pid {}: {error}", record.pid);
+                }
+            }
+        }
+    }
+
+    /// Prepares to leave it running, and gives up the handle without stopping it.
+    ///
+    /// On Unix a child is not killed when its handle is dropped, so there is
+    /// nothing to do. On Windows there is: every child is in a job whose limit is
+    /// "kill everything in it when the last handle closes", which is exactly what
+    /// makes a crashed manager take its browsers with it. Leaving them on purpose
+    /// means clearing that limit first, and then the handle may close.
+    fn release(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Owned(child) => crate::process::release_child(child),
+            Self::Adopted(_) => Ok(()),
+        }
+    }
+}
+
+/// A component that is no longer running, and how much can be said about why.
+struct Gone {
+    detail: String,
+    /// The exit status, where there is one to read. `None` for a process this run
+    /// did not spawn, and for a status that could not be read.
+    succeeded: Option<bool>,
+}
+
 struct ActiveSession {
     _profile_id: ProfileId,
-    browser: crate::process::ManagedChild,
-    xray: Option<crate::process::ManagedChild>,
+    browser: Held,
+    xray: Option<Held>,
     xray_config: Option<std::path::PathBuf>,
     _cdp_port: u16,
     _socks_port: Option<u16>,
@@ -61,6 +189,12 @@ impl RuntimeFacade for ChannelRuntimeFacade {
     fn restart(&self, params: StartParams) -> Result<(), RuntimeCommandError> {
         self.command_tx
             .send(RuntimeCommand::Restart(params))
+            .map_err(|_| RuntimeCommandError::ChannelClosed)
+    }
+
+    fn release_all(&self) -> Result<(), RuntimeCommandError> {
+        self.command_tx
+            .send(RuntimeCommand::ReleaseAll)
             .map_err(|_| RuntimeCommandError::ChannelClosed)
     }
 
@@ -192,18 +326,118 @@ impl RuntimeSupervisor {
         }
     }
 
-    /// Stops what an earlier run left running, and clears the records it left.
+    /// Takes over what an earlier run deliberately left running, and stops what
+    /// it left by crashing.
     ///
     /// Call this before the supervisor accepts its first command: a start would
     /// otherwise race with a browser that still holds the profile's data
-    /// directory and its debugging port.
-    pub fn reclaim_orphans(&self) -> ReclaimReport {
-        journal::reclaim(
+    /// directory and its debugging port. That is just as true of a browser left on
+    /// purpose as of one left by a crash - the difference is the answer, not the
+    /// problem. An adopted session is a running profile again: it is in the
+    /// snapshots, it is stopped by an ordinary stop, and it is restarted by an
+    /// ordinary restart.
+    ///
+    /// The report it returns is the same one, whether anything was adopted.
+    pub fn recover_orphans(&mut self) -> ReclaimReport {
+        let report = journal::recover(
             &self.runtime_dir,
             self.process_inspector.as_ref(),
             self.process_tree.as_ref(),
             self.orphan_grace,
-        )
+        );
+        for adopted in &report.adopted {
+            self.install_adopted(adopted);
+        }
+        report
+    }
+
+    /// A session from a previous run, running again with no handle to it.
+    fn install_adopted(&mut self, adopted: &journal::Adopted) {
+        let profile_id = adopted.profile_id;
+        // The temporary Xray config is the adopted engine's and is still on disk -
+        // it holds the upstream credentials the engine is using. It is named here
+        // so that stopping this session removes it, and nothing else removes it
+        // while the engine runs.
+        let xray_config = adopted.xray.as_ref().map(|_| {
+            self.runtime_dir
+                .join(profile_id.to_string())
+                .join(crate::xray::XRAY_CONFIG_FILE)
+        });
+        self.active_sessions.insert(
+            profile_id,
+            ActiveSession {
+                _profile_id: profile_id,
+                browser: Held::Adopted(adopted.browser.clone()),
+                xray: adopted.xray.clone().map(Held::Adopted),
+                xray_config,
+                _cdp_port: adopted.cdp_port,
+                _socks_port: adopted.socks_port,
+                // What the previous run launched it with is not in the record:
+                // only the browser's own arguments are, and those are the ones
+                // Chromium was told. Nothing reads this for an adopted session.
+                _effective_args: Vec::new(),
+                stopping: false,
+            },
+        );
+        self.update_full_snapshot(RuntimeSnapshot {
+            profile_id,
+            state: RuntimeState::Running,
+            browser_pid: Some(adopted.browser.pid),
+            xray_pid: adopted.xray.as_ref().map(|process| process.pid),
+            cdp_port: Some(adopted.cdp_port),
+            socks_port: adopted.socks_port,
+            started_at: Some(std::time::UNIX_EPOCH + Duration::from_millis(adopted.started_at)),
+            effective_args: Vec::new(),
+            last_error: None,
+            last_warning: None,
+            dropped_events: 0,
+        });
+        self.emit(RuntimeEvent::StateChanged {
+            profile_id,
+            state: RuntimeState::Running,
+        });
+    }
+
+    /// Leaves every running session running, and ends the supervisor.
+    ///
+    /// This is the exit that is *not* a cleanup: the browsers and tunnels stay,
+    /// and the records are marked so that the next run adopts them rather than
+    /// treating them as a crash's leftovers. It is deliberately the last thing
+    /// this run does to them - after this there is no handle left to stop them
+    /// with, which is the point.
+    ///
+    /// A session whose record cannot be marked is still released: the processes
+    /// are the user's, and the worst a missing mark can do is make the next run
+    /// stop them, which is the safe direction. That failure is logged.
+    pub fn release_all(&mut self) -> usize {
+        let ids: Vec<ProfileId> = self.active_sessions.keys().copied().collect();
+        for profile_id in ids {
+            if let Err(error) = journal::mark_left_running(&self.runtime_dir, profile_id) {
+                tracing::warn!(
+                    "session {profile_id} was left running but its record could not be marked \
+                     ({error}); the next start will stop it"
+                );
+            }
+            if let Some(mut session) = self.active_sessions.remove(&profile_id) {
+                session.stopping = true;
+                if let Err(error) = session.browser.release() {
+                    tracing::warn!(
+                        "could not release browser {}: {error}",
+                        session.browser.id()
+                    );
+                }
+                if let Some(xray) = session.xray.as_mut()
+                    && let Err(error) = xray.release()
+                {
+                    tracing::warn!("could not release xray {}: {error}", xray.id());
+                }
+                // Dropping the handles here is what leaves them: on Unix a child
+                // is not killed when its handle goes, and on Windows the job's
+                // kill-on-close limit was just cleared.
+            }
+            self.set_snapshot_state(profile_id, RuntimeState::Stopped);
+        }
+        self.active_sessions.len()
     }
 
     pub fn spawn(mut self) -> std::thread::JoinHandle<()> {
@@ -251,6 +485,15 @@ impl RuntimeSupervisor {
                 self.stop_profile(id);
                 self.start_profile(params);
                 true
+            }
+            RuntimeCommand::ReleaseAll => {
+                // Before `shutting_down`, so the tail of the loop finds nothing
+                // to clean up: releasing *is* the exit, and a cleanup after it
+                // would undo it.
+                self.release_all();
+                self.shutting_down = true;
+                self.pending_commands.clear();
+                false
             }
             RuntimeCommand::ShutdownAll => {
                 self.shutting_down = true;
@@ -456,6 +699,7 @@ impl RuntimeSupervisor {
             cdp_port,
             socks_port,
             started_at: journal::now_millis(),
+            left_running: false,
             browser: ProcessRecord::captured(
                 browser_pid,
                 &plan.browser_executable,
@@ -542,8 +786,8 @@ impl RuntimeSupervisor {
             Ok(_info) => {
                 let session = ActiveSession {
                     _profile_id: profile_id,
-                    browser: child,
-                    xray,
+                    browser: Held::Owned(child),
+                    xray: xray.map(Held::Owned),
                     xray_config,
                     _cdp_port: cdp_port,
                     _socks_port: socks_port,
@@ -684,23 +928,33 @@ impl RuntimeSupervisor {
             });
 
             if graceful
-                && matches!(session.browser.try_wait(), Ok(None))
+                && session
+                    .browser
+                    .exited(self.process_inspector.as_ref())
+                    .is_none()
                 && self
                     .cdp_probe
                     .close_browser(session._cdp_port, Duration::from_millis(250))
                     .is_ok()
             {
                 let deadline = std::time::Instant::now() + Duration::from_secs(2);
-                while matches!(session.browser.try_wait(), Ok(None))
+                while session
+                    .browser
+                    .exited(self.process_inspector.as_ref())
+                    .is_none()
                     && std::time::Instant::now() < deadline
                 {
                     self.poll_active_sessions();
                     std::thread::sleep(Duration::from_millis(20));
                 }
             }
-            self.terminate_child(&mut session.browser);
+            // Borrowed before the two kills: the inspector and the tree are
+            // fields of `self`, which the session is being removed from.
+            let inspector = self.process_inspector.as_ref();
+            let tree = self.process_tree.as_ref();
+            session.browser.kill(inspector, tree);
             if let Some(child) = session.xray.as_mut() {
-                self.terminate_child(child);
+                child.kill(inspector, tree);
             }
             Self::remove_config(session.xray_config.as_deref());
             journal::remove(&self.runtime_dir, profile_id);
@@ -728,15 +982,16 @@ impl RuntimeSupervisor {
                 std::iter::once((RuntimeComponent::Browser, &mut session.browser))
                     .chain(session.xray.as_mut().map(|c| (RuntimeComponent::Xray, c)))
             {
-                let outcome = match child.try_wait() {
-                    Ok(None) => continue,
-                    Ok(Some(status)) => {
-                        let clean = component == RuntimeComponent::Browser && status.success();
-                        (component, status.to_string(), clean)
-                    }
-                    Err(e) => (component, e.to_string(), false),
+                let Some(gone) = child.exited(self.process_inspector.as_ref()) else {
+                    continue;
                 };
-                exited.push((*id, outcome));
+                // Only a browser that reported success is a normal exit - the
+                // user closing the browser window. An Xray that exits is always
+                // a problem, and a process that left no status is not evidence of
+                // one either way.
+                let clean =
+                    component == RuntimeComponent::Browser && gone.succeeded.unwrap_or(true);
+                exited.push((*id, (component, gone.detail, clean)));
                 break;
             }
         }
@@ -1059,7 +1314,7 @@ mod tests {
         );
         assert!(!f.config().exists());
         assert!(
-            f.supervisor.reclaim_orphans().is_empty(),
+            f.supervisor.recover_orphans().is_empty(),
             "a rolled back start leaves nothing to reclaim"
         );
     }
@@ -1091,7 +1346,7 @@ mod tests {
             "the browser should still be running for this test to mean anything"
         );
 
-        let report = f.supervisor.reclaim_orphans();
+        let report = f.supervisor.recover_orphans();
 
         assert_eq!(report.reclaimed.len(), 1, "{report:?}");
         assert_eq!(report.reclaimed[0].browser_pid, record.browser.pid);
@@ -1143,8 +1398,8 @@ mod tests {
             .xray
             .as_mut()
             .unwrap();
-        xray.kill().unwrap();
-        xray.wait().unwrap();
+        xray.owned_mut().kill().unwrap();
+        xray.owned_mut().wait().unwrap();
         f.supervisor.poll_active_sessions();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(f.snapshot().state, RuntimeState::Stopped);
@@ -1212,8 +1467,8 @@ mod tests {
             .xray
             .as_mut()
             .unwrap();
-        child.kill().unwrap();
-        child.wait().unwrap();
+        child.owned_mut().kill().unwrap();
+        child.owned_mut().wait().unwrap();
         f.supervisor.poll_active_sessions();
         assert_eq!(f.snapshot().state, RuntimeState::Stopped);
         assert!(f.snapshot().last_error.as_ref().unwrap().contains("Xray"));
@@ -1487,8 +1742,8 @@ mod tests {
             .xray
             .as_mut()
             .unwrap();
-        xray.kill().unwrap();
-        xray.wait().unwrap();
+        xray.owned_mut().kill().unwrap();
+        xray.owned_mut().wait().unwrap();
         f.supervisor.cdp_probe = Box::new(CheckingProbe {
             snapshots: f.supervisor.snapshots.clone(),
             crashed: id,
@@ -1513,8 +1768,8 @@ mod tests {
         let id = f.params.profile.id;
         let session = f.supervisor.active_sessions.get_mut(&id).unwrap();
         let browser_pid = session.browser.id();
-        session.xray.as_mut().unwrap().kill().unwrap();
-        session.xray.as_mut().unwrap().wait().unwrap();
+        session.xray.as_mut().unwrap().owned_mut().kill().unwrap();
+        session.xray.as_mut().unwrap().owned_mut().wait().unwrap();
         f.supervisor.poll_active_sessions();
         assert_eq!(f.snapshot().state, RuntimeState::Stopped);
         assert!(f.snapshot().browser_pid.is_none());
@@ -1573,8 +1828,8 @@ mod tests {
         let id = f.params.profile.id;
         let session = f.supervisor.active_sessions.get_mut(&id).unwrap();
         let xray_pid = session.xray.as_ref().unwrap().id();
-        session.browser.kill().unwrap();
-        session.browser.wait().unwrap();
+        session.browser.owned_mut().kill().unwrap();
+        session.browser.owned_mut().wait().unwrap();
         f.supervisor.poll_active_sessions();
         f.supervisor.stop_profile(id);
         assert_eq!(f.snapshot().state, RuntimeState::Stopped);

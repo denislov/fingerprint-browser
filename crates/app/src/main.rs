@@ -10,6 +10,7 @@ mod core_detect;
 mod core_editor;
 mod diagnostics;
 mod editor;
+mod exit;
 mod instance;
 mod log_file;
 mod open_dir;
@@ -26,6 +27,7 @@ mod signal;
 mod state;
 mod text;
 mod theme;
+mod tray;
 mod ui;
 mod verifier;
 mod version;
@@ -181,7 +183,7 @@ fn main() {
         ..SupervisorComponents::default()
     };
 
-    let supervisor = RuntimeSupervisor::with_components(
+    let mut supervisor = RuntimeSupervisor::with_components(
         channels.command_rx,
         channels.event_tx,
         Arc::clone(&snapshots),
@@ -190,7 +192,11 @@ fn main() {
     // Before the window opens and before any command can queue: a previous run
     // that was killed left browsers behind, and one of them may still hold the
     // profile and the debugging port this run is about to want.
-    let reclaim = supervisor.reclaim_orphans();
+    // Deliberately `mut`: recovering is not only a cleanup any more. A previous
+    // run that was told to leave its browsers running left records marked to say
+    // so, and those sessions are adopted - they become running profiles again
+    // rather than being stopped by the start that follows them.
+    let reclaim = supervisor.recover_orphans();
     // The supervisor thread is the only owner of the child handles, so the
     // shutdown that a signal asks for has to be able to take it from here.
     let supervisor_thread = Arc::new(Mutex::new(Some(supervisor.spawn())));

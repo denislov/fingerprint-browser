@@ -50,6 +50,9 @@ struct Harness {
     thread: Option<std::thread::JoinHandle<()>>,
     dir: PathBuf,
     core: BrowserCore,
+    /// Whether this run cleans up after itself. A test that hands the directory
+    /// to a second run owns the cleanup, because the second run is still using it.
+    cleanup: bool,
 }
 impl Harness {
     fn new() -> Self {
@@ -77,6 +80,7 @@ impl Harness {
             sender: channels.command_tx,
             thread: Some(supervisor.spawn()),
             dir,
+            cleanup: true,
             core: BrowserCore {
                 id: CoreId::new(),
                 name: "real Chromium".into(),
@@ -127,6 +131,18 @@ impl Harness {
             .unwrap();
         self.wait(profile.id, RuntimeState::Running)
     }
+
+    /// Ends this run the way the "leave browsers running" exit does: the
+    /// supervisor marks the sessions and lets its handles go, and this waits for
+    /// the thread so that what follows really is a second run.
+    fn release_and_end_run(&mut self) -> PathBuf {
+        let _ = self.sender.send(RuntimeCommand::ReleaseAll);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.cleanup = false;
+        self.dir.clone()
+    }
 }
 impl Drop for Harness {
     fn drop(&mut self) {
@@ -134,8 +150,19 @@ impl Drop for Harness {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if self.cleanup {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
+}
+
+/// Whether the kernel still has this pid, read the way the supervisor reads it
+/// rather than by a bare `kill(0)`.
+fn alive(pid: u32) -> bool {
+    matches!(
+        DefaultProcessInspector.inspect(pid),
+        ProcessReading::Live(_)
+    )
 }
 
 fn cdp(port: u16, method: &str, params: Value) -> Value {
@@ -440,6 +467,9 @@ fn a_browser_left_by_a_killed_run_is_reclaimed() {
         cdp_port,
         socks_port: None,
         started_at: journal::now_millis(),
+        // Unmarked: a crash's leftovers, which is what this test is about. A
+        // marked record would be adopted instead of reclaimed.
+        left_running: false,
         browser: ProcessRecord::captured(
             browser_pid,
             &plan.browser_executable,
@@ -453,7 +483,7 @@ fn a_browser_left_by_a_killed_run_is_reclaimed() {
     // what a killed supervisor leaves behind.
     drop(child);
 
-    let reclaimed = reclaim_orphans(
+    let reclaimed = recover_orphans(
         &runtime_dir,
         &DefaultProcessInspector,
         &DefaultProcessTreeController,
@@ -619,4 +649,104 @@ fn profiles_persist_cookies_and_xray_failure_closes_browser() {
     h.wait(first.id, RuntimeState::Stopped);
     h.thread.take().unwrap().join().unwrap();
     assert_group_stopped(restarted.browser_pid.unwrap());
+}
+
+/// The exit mode that leaves the browsers running, end to end with a real
+/// browser: released without being stopped, recorded as deliberately left, taken
+/// over by the next run as a running profile, and stoppable by it like any other.
+///
+/// This is the pair of claims the whole feature rests on. "Keep running" is only
+/// true if the browser is still there afterwards, and the next start is only safe
+/// if it adopts what it finds instead of either racing it or killing it.
+#[test]
+#[ignore = "requires CHROMIUM_BIN and XRAY_BIN; launches real sandboxed headless Chromium"]
+fn a_browser_left_running_by_one_run_is_adopted_by_the_next() {
+    let mut harness = Harness::new();
+    let profile = harness.profile(7);
+    let running = harness.start(&profile);
+    let pid = running.browser_pid.expect("a browser pid");
+    let cdp_port = running.cdp_port.expect("a debugging port");
+    assert_loopback_listener(cdp_port);
+
+    // The exit that is not a cleanup.
+    let dir = harness.release_and_end_run();
+    let runtime_dir = dir.join("runtime");
+
+    assert!(
+        alive(pid),
+        "\"leave browsers running\" must not stop the browser"
+    );
+    let record = journal::read(&runtime_dir, profile.id)
+        .unwrap()
+        .expect("a released session keeps its record");
+    assert!(
+        record.left_running,
+        "the record has to say it was left on purpose: {record:?}"
+    );
+    assert_eq!(record.browser.pid, pid);
+
+    // A second run over the same runtime directory.
+    let channels = RuntimeSupervisorChannels::new(128);
+    let snapshots = Arc::new(RwLock::new(HashMap::new()));
+    let facade = ChannelRuntimeFacade::new(channels.command_tx.clone(), snapshots.clone());
+    let mut supervisor = RuntimeSupervisor::with_components(
+        channels.command_rx,
+        channels.event_tx,
+        snapshots,
+        SupervisorComponents {
+            planner: Box::new(HeadlessPlanner),
+            xray_executable: std::env::var_os("XRAY_BIN").expect("set XRAY_BIN").into(),
+            runtime_dir: runtime_dir.clone(),
+            ..Default::default()
+        },
+    );
+    let report = supervisor.recover_orphans();
+    assert_eq!(report.adopted.len(), 1, "{report:?}");
+    assert!(
+        report.reclaimed.is_empty(),
+        "a marked session must not be reclaimed: {report:?}"
+    );
+    assert!(alive(pid), "adopting must not stop it either");
+
+    // And it is a running profile again, not a record on disk: the snapshots say
+    // so, with the ports and the pid the previous run used.
+    let adopted = facade
+        .snapshot(profile.id)
+        .expect("an adopted session is in the snapshots");
+    assert_eq!(adopted.state, RuntimeState::Running);
+    assert_eq!(adopted.browser_pid, Some(pid));
+    assert_eq!(adopted.cdp_port, Some(cdp_port));
+
+    let thread = supervisor.spawn();
+
+    // An ordinary stop stops it - the adopted session has no handle, so this is
+    // the path that rechecks the recorded identity and stops the tree by pid.
+    facade.stop(profile.id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if facade.snapshot(profile.id).map(|s| s.state) == Some(RuntimeState::Stopped) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "waiting for the adopted session to stop: {:?}",
+            facade.snapshot(profile.id)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !alive(pid),
+        "a stopped adopted session must not leave its browser running"
+    );
+    // The supervisor puts the browser in its own group, so the leader's pid is
+    // the group - which is what the other acceptance tests pass here too.
+    assert_group_stopped(pid);
+    assert!(
+        journal::read(&runtime_dir, profile.id).unwrap().is_none(),
+        "a stopped session leaves no record"
+    );
+
+    let _ = channels.command_tx.send(RuntimeCommand::ShutdownAll);
+    let _ = thread.join();
+    let _ = std::fs::remove_dir_all(&dir);
 }

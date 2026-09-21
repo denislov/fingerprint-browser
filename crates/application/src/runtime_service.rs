@@ -26,6 +26,15 @@ impl RuntimeService {
         }
     }
 
+    /// Ends this run with every running session left running.
+    ///
+    /// The one command that is not about a profile: "leave them all" is a
+    /// decision about this program, and the runtime is what knows which sessions
+    /// there are.
+    pub fn release_all(&self) -> Result<(), AppError> {
+        self.runtime.release_all().map_err(AppError::Runtime)
+    }
+
     pub fn start(&self, profile_id: ProfileId) -> Result<(), AppError> {
         let profile = self
             .profile_repo

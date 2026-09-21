@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Draws the program's icon: `assets/icon.png`, `assets/icon.ico` and the SVG.
+"""Draws the program's icon: `assets/icon.png`, `assets/icon.ico`, the SVG, and
+the raw pixels the tray icon hands to the desktop.
 
 The icon is generated rather than drawn by hand in an editor, because it is one
 design at six sizes and the assets are binary: a PNG in a repository with nothing
@@ -14,8 +15,15 @@ from the repository root:
 
     python3 scripts/make-icon.py
 
-and it writes the three files under `assets/`. The output is deterministic: the
-same numbers produce the same bytes, so re-running it is a no-op in git.
+and it writes the files under `assets/`. The output is deterministic: the same
+numbers produce the same bytes, so re-running it is a no-op in git.
+
+`assets/tray.rgba` is raw RGBA rows with no header, which is what both tray
+libraries want: `tray-icon` takes RGBA and `ksni` takes ARGB32, and the byte
+swap is four lines in the Linux backend rather than a second asset that could
+disagree with this one. It is committed like the others, and produced here like
+the others, for the same reason: a binary asset with nothing that made it is a
+file nobody can change later.
 """
 
 from __future__ import annotations
@@ -68,6 +76,10 @@ SAMPLES = 4
 #: these somewhere; 256 is the one the taskbar and Explorer use at large sizes.
 ICO_SIZES = (16, 24, 32, 48, 64, 128, 256)
 PNG_SIZE = 512
+#: The tray icon's size. Panels ask for 16-32 logical pixels and the desktop
+#: scales what it is given, so this is drawn large enough to be smooth when it
+#: is scaled down on a high-density display.
+TRAY_SIZE = 64
 
 
 def coverage(x: float, y: float) -> tuple[float, float, float, float]:
@@ -246,8 +258,10 @@ def main() -> None:
         handle.write(ico([(size, png(size)) for size in ICO_SIZES]))
     with open(os.path.join(assets, "icon.svg"), "w", encoding="utf-8") as handle:
         handle.write(svg())
+    with open(os.path.join(assets, "tray.rgba"), "wb") as handle:
+        handle.write(render(TRAY_SIZE))
 
-    for name in ("icon.png", "icon.ico", "icon.svg"):
+    for name in ("icon.png", "icon.ico", "icon.svg", "tray.rgba"):
         path = os.path.join(assets, name)
         print(f"wrote {os.path.relpath(path, root)} ({os.path.getsize(path)} bytes)")
 

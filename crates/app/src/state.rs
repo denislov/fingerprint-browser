@@ -6,6 +6,7 @@
 //! [`RuntimeService::snapshot`], which is the documented reconciliation path.
 
 use crate::browser_data::BrowserDataJob;
+use crate::exit::ExitMode;
 use crate::log_file::LogFile;
 use crate::proxy_tester::ProxyTestJob;
 use crate::settings::{SettingKey, SettingRow, Settings};
@@ -1317,6 +1318,56 @@ impl AppState {
         self.settings.theme()
     }
 
+    /// Ends this run with every running session left running.
+    ///
+    /// The browsers and the tunnels stay, and the runtime marks their records so
+    /// the next start adopts them. Nothing to report back: the program is
+    /// leaving, and the banner would go with it.
+    pub fn release_runtime(&self) {
+        if let Err(error) = self.runtime.release_all() {
+            tracing::warn!("could not leave the running sessions running: {error}");
+        }
+    }
+
+    /// Whether any profile is in a state the exit choice is about.
+    ///
+    /// Read when the dialog opens, so the sentence above the three choices can
+    /// say whether there is anything to decide about - the choices are the same
+    /// either way, but a sentence claiming browsers are running when none are
+    /// would be the window guessing.
+    pub fn any_profile_active(&self) -> bool {
+        self.rows().iter().any(|row| row.state().is_active())
+    }
+
+    /// What closing the window does: a stored answer, or the question.
+    ///
+    /// Read when the window is closed, which is why a caller must read it again at
+    /// that moment rather than hold onto a value from when the page was drawn.
+    pub fn exit_mode(&self) -> ExitMode {
+        self.settings.exit_mode()
+    }
+
+    /// Stores what closing the window does.
+    ///
+    /// Like the appearance and the language, the file is written before the choice
+    /// is accepted: a config file that cannot be written refuses the change rather
+    /// than accepting one that would be gone by the next start. Unlike them it
+    /// changes nothing on screen, so a caller that repaints does so only to move
+    /// the chip.
+    pub fn set_exit_mode(&mut self, mode: ExitMode) -> Result<(), AppError> {
+        let result = self
+            .settings
+            .set_exit_mode(mode)
+            .map_err(AppError::Conflict);
+        match &result {
+            Ok(()) => self.set_notice(Notice::info(
+                self.text().exit_mode_chosen(mode.label(self.text())),
+            )),
+            Err(error) => self.set_notice(Notice::error(error.to_string())),
+        }
+        result
+    }
+
     /// Stores the chosen appearance.
     ///
     /// The one setting whose effect is immediate, so the caller repaints rather
@@ -2281,6 +2332,11 @@ pub(crate) mod testing {
             let id = params.profile_id();
             self.set_state(id, RuntimeState::Running);
             self.record(&format!("restart:{id}"));
+            Ok(())
+        }
+
+        fn release_all(&self) -> Result<(), RuntimeCommandError> {
+            self.record("release-all");
             Ok(())
         }
 

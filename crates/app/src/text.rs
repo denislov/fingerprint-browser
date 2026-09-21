@@ -199,6 +199,40 @@ catalog! {
     theme_light => "Light" => "浅色";
     language_title => "Language" => "语言";
 
+    // ---- closing the window ----
+    //
+    // Three answers, asked once and remembered, and the question itself. The
+    // short labels are the chips on the Settings card and the headings of the
+    // dialog's rows, so they have to read as actions there and as names here.
+    tray_show => "Show window" => "显示窗口";
+    tray_quit => "Quit…" => "退出…";
+    exit_card_title => "On closing the window" => "关闭窗口时";
+    exit_card_body => "What the window's close button does. \"Ask\" shows the question every time; the other three answer it once and are kept for the next start."
+        => "窗口关闭按钮的行为。选“每次询问”则每次都问；其余三项等于预先作答，并保留到下次启动。";
+    exit_ask => "Ask every time" => "每次询问";
+    exit_ask_note => "Show the three choices whenever the window is closed."
+        => "每次关闭窗口时都显示这三个选项。";
+    exit_background => "Keep running" => "后台继续运行";
+    exit_background_note => "The window is minimized and the program keeps managing the profiles. A tray icon brings the window back or leaves."
+        => "窗口最小化，程序继续管理各档案；托盘图标可恢复窗口或退出。";
+    exit_keep_running => "Leave browsers running" => "仅退出程序";
+    exit_keep_running_note => "The program ends; the browsers and proxy tunnels it started keep running, and the next start takes them over."
+        => "程序结束；它启动的浏览器与代理隧道继续运行，下次启动会接管它们。";
+    exit_exit_all => "Stop everything" => "退出全部";
+    exit_exit_all_note => "The program ends and stops every browser and proxy tunnel it started."
+        => "程序结束，并停止它启动的所有浏览器与代理隧道。";
+
+    exit_in_background => "Still running in the background. The tray icon brings the window back, or leaves for good."
+        => "仍在后台运行。托盘图标可以恢复窗口，或彻底退出。";
+    exit_dialog_title => "Close Fingerprint Browser?" => "关闭 Fingerprint Browser？";
+    exit_dialog_body => "Browsers and proxy tunnels are running. Choose what happens to them."
+        => "当前有浏览器或代理隧道在运行。请选择它们的去向。";
+    exit_dialog_body_idle => "Choose what closing the window does."
+        => "请选择关闭窗口的行为。";
+    exit_remember => "Remember this choice" => "记住这个选择";
+    exit_remember_note => "The Settings page can change it again."
+        => "之后可在设置页更改。";
+
     // ---- the Settings rows ----
     setting_data_dir => "Data directory" => "数据目录";
     setting_xray_executable => "Xray executable" => "Xray 可执行文件";
@@ -635,6 +669,15 @@ impl Text {
         match self.lang {
             Lang::En => format!("Now showing the window in {label}."),
             Lang::Zh => format!("界面语言已切换为{label}。"),
+        }
+    }
+
+    /// The sentence a change to the exit mode reports. It is not "now showing",
+    /// because nothing about this choice is visible until a window is closed.
+    pub fn exit_mode_chosen(&self, label: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Closing the window will: {label}."),
+            Lang::Zh => format!("关闭窗口时：{label}。"),
         }
     }
 
