@@ -5,8 +5,10 @@
 //! the UI; commands go through [`RuntimeService`] into the supervisor channel.
 
 mod browser_data;
+mod cli;
 mod core_detect;
 mod core_editor;
+mod diagnostics;
 mod editor;
 mod log_file;
 mod open_dir;
@@ -25,6 +27,7 @@ mod text;
 mod theme;
 mod ui;
 mod verifier;
+mod version;
 
 use application::{
     CoreService, DefaultCoreService, DefaultProfileService, DefaultProxyService, ProfileService,
@@ -40,7 +43,7 @@ use runtime::{
 use state::AppState;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use storage::{CoreRepository, ProfileRepository, ProxyRepository, SqliteStorage};
 use ui::AppView;
 use verifier::CdpFingerprintVerifier;
@@ -50,7 +53,40 @@ const EVENT_CAPACITY: usize = 256;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 fn main() {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let invocation = cli::parse(&arguments);
+
+    // The one question that has to be answerable by a script, on a machine whose
+    // window will not open, and without changing anything about the answer:
+    // what is installed here. Answered before a single file is read.
+    if invocation == Ok(cli::Command::Version) {
+        println!("{}", version::line());
+        return;
+    }
+
     tracing_subscriber::fmt::init();
+
+    // `--help` and a refused argument both end here, and both are written in the
+    // language the config file names - read the cheap way, so answering "how do
+    // I use this" cannot move a file (`settings::language_hint`).
+    match &invocation {
+        Ok(cli::Command::Help) => {
+            let t = text::text(settings::language_hint(
+                &settings::Environment::from_process(),
+            ));
+            println!("{}", t.cli_usage);
+            return;
+        }
+        Err(refusal) => {
+            let t = text::text(settings::language_hint(
+                &settings::Environment::from_process(),
+            ));
+            eprintln!("{}", cli::refusal_message(refusal, t));
+            eprintln!("{}", t.cli_usage_hint);
+            std::process::exit(2);
+        }
+        _ => {}
+    }
 
     // Configuration is resolved before anything opens: the data directory and
     // the Xray path both decide what this process does.
@@ -61,6 +97,37 @@ fn main() {
     // below are built in the language the config file asked for - including the
     // ones produced before the window exists.
     let t = settings.text();
+
+    // A report is about the installation rather than about the window, so it is
+    // written and the process ends - here, before storage opens, because asking
+    // for a report must not be the thing that creates a database.
+    if let Ok(cli::Command::Diagnostics { destination }) = &invocation {
+        // What a real start would have complained about is worth saying out
+        // loud: it is usually the reason a report was asked for.
+        if let Some((message, _)) = &settings_notice {
+            eprintln!("{message}");
+        }
+        let destination = destination
+            .clone()
+            .unwrap_or_else(|| paths::default_diagnostics_file(&data_dir, SystemTime::now()));
+        match diagnostics::write_for(&settings, &destination, t) {
+            Ok(()) => println!("{}", t.diag_written(&destination.display().to_string())),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // What this run is and where it keeps its files, in the one log that outlives
+    // the window and in the one a headless run has.
+    let started = t.run_started(
+        &version::line(),
+        &version::platform(),
+        &data_dir.display().to_string(),
+    );
+    tracing::info!("{started}");
 
     // Checked before storage opens, because opening it is what creates the
     // database in the new place and ends the question this asks.
@@ -141,6 +208,11 @@ fn main() {
         settings,
     );
     let _ = app_state.load();
+    // The activity log's first line, before anything a start has to report: what
+    // build this is, on what platform, and where it keeps its files is what
+    // every problem report is asked for first, and the log is what outlives the
+    // window.
+    app_state.note_startup(started);
     if let Some((message, error)) = core_notice {
         app_state.push_notice(message, error);
     }
@@ -222,7 +294,9 @@ fn main() {
                         height: px(560.0),
                     }),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Fingerprint Browser".into()),
+                        // The version is in the title so a screenshot answers the
+                        // question a report would otherwise have to ask.
+                        title: Some(version::window_title().into()),
                         ..Default::default()
                     }),
                     ..Default::default()

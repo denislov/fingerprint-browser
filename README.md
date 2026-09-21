@@ -62,6 +62,11 @@ this repository does not bundle or fork them.
   the config file. Identifiers the window is addressed by do not change with the
   language, and the faults reported by the engine's own layers stay in English;
   see [interface text](docs/i18n.md).
+- Say what it is without opening a window: `--version` prints the version, the
+  commit it was built from and the platform, `--help` prints the options in the
+  language you chose, and `--diagnostics` writes one file about this installation
+  that never contains proxy credentials or browser data. The same report is one
+  button on the Settings page; see [diagnostics](docs/diagnostics.md).
 
 ## Proxy testing
 
@@ -162,19 +167,33 @@ cargo run -p app
 FP_BROWSER_CHROMIUM_BIN=/path/chrome FP_BROWSER_XRAY_BIN=/path/xray cargo run -p app
 ```
 
+The program itself is `fingerprint-browser`. It takes no argument to open the
+window, and three options that answer a question and exit: `--version`, `--help`,
+and `--diagnostics`, which writes one file about this installation - the build,
+the effective settings and where each came from, the state and permissions of
+every file it keeps, and the end of the activity log - with `--out <path>` to say
+where. The report never opens the database and never reads browser data; see
+[diagnostics](docs/diagnostics.md). The version is also in the window's title bar
+and is the first line of the activity log.
+
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | FP_BROWSER_CHROMIUM_BIN | Initial core executable | Local bin candidates, then PATH |
 | FP_BROWSER_CHROMIUM_MAJOR | Override when version detection fails | Detected |
-| FP_BROWSER_DATA_DIR | Database, profiles, logs, runtime files and exports | Platform application-data directory |
+| FP_BROWSER_CONFIG | Config file path, for a test or a script | `<data dir>/config.json` |
+| FP_BROWSER_DATA_DIR | Database, profiles, logs, runtime files, config file and exports | Platform application-data directory |
 | FP_BROWSER_ECHO_URL | Address endpoint a proxy test asks | http://api.ipify.org |
 | FP_BROWSER_XRAY_BIN | Proxy executable | bin/xray.exe on Windows; bin/xray elsewhere |
 
 Data defaults to %LOCALAPPDATA%\FpBrowser on Windows, $XDG_DATA_HOME/FpBrowser
 or ~/.local/share/FpBrowser on Linux, and ~/Library/Application Support/FpBrowser
-on macOS. Legacy ./data is detected and reported, not automatically moved.
-Settings are stored outside the data directory so changing it cannot lose the
-setting that chose it. Environment values override saved settings.
+on macOS. One directory is the whole installation: the config file lives in the
+data directory beside the database, the logs and the profiles, and the data
+directory itself is chosen by `FP_BROWSER_DATA_DIR` or the platform. Legacy ./data
+is detected and reported, not automatically moved; a config file left in the old
+per-platform location is folded into the data directory once, at the next start.
+Environment values override saved settings, and the Settings page says which
+value won.
 
 ## Validation
 

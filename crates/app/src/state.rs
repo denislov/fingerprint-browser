@@ -897,6 +897,16 @@ impl AppState {
         });
     }
 
+    /// Put a line in the activity log without showing it.
+    ///
+    /// The log's own first line goes in this way: what build this run is and
+    /// where it keeps its files belongs in the file that outlives the window,
+    /// and it is not news the user has to acknowledge with a toast - which is
+    /// the whole difference between this and [`AppState::push_notice`].
+    pub fn note_startup(&mut self, message: impl Into<String>) {
+        self.append_log(LogLevel::Info, None, message);
+    }
+
     pub fn dismiss_notice(&mut self) {
         self.notice = None;
     }

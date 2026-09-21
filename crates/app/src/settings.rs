@@ -352,6 +352,42 @@ fn read_stored(
     (moved, None, None)
 }
 
+/// The language this run would speak, read the cheap way.
+///
+/// `--help` is answered before the window exists and has to be answered in a
+/// real language. Loading the settings to find that language would fold an
+/// older installation's config file into the data directory as a side effect of
+/// asking how the program is used, which is a strange thing for `--help` to do
+/// to someone. So this reads the stored `lang` and nothing else: no migration,
+/// no writes, no notices. Anything it cannot read - no file, a broken one, a
+/// name this build does not know - is English, which is the answer
+/// [`Settings::load`] would have given too.
+pub fn language_hint(env: &Environment) -> Lang {
+    let data_dir = resolve_data_dir(env);
+    let config_path = resolve_config_path(env, &data_dir);
+    let stored = if config_path.exists() {
+        stored_language(&config_path)
+    } else if env.config.is_none() {
+        // The file that has not been moved yet still says which language to
+        // move it in.
+        stored_language(&legacy_config_path(&env.host))
+    } else {
+        None
+    };
+    Lang::from_code(stored.as_deref().unwrap_or(""))
+}
+
+/// Just the `lang` field, read leniently.
+///
+/// Deliberately not [`read_config`]: this is a hint for a message that is about
+/// to be printed, and a file with one unknown field in it should not cost the
+/// reader their own language.
+fn stored_language(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("lang")?.as_str().map(str::to_string)
+}
+
 /// The endpoint the proxy diagnostic asks what address it left from.
 ///
 /// The default is plain HTTP on purpose. The first question a proxy test asks is
@@ -453,6 +489,15 @@ impl Settings {
 
     pub fn xray_executable(&self) -> &Path {
         &self.xray_executable
+    }
+
+    /// The config file this run read, and the one it writes to.
+    ///
+    /// Exposed because a report has to name the file it is talking about, and
+    /// because the path is a fact about the installation rather than about the
+    /// page that happens to show it.
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
     }
 
     /// The endpoint the proxy test asks, which may see the address it is asked
@@ -1236,6 +1281,56 @@ mod tests {
             !unknown.rows(en()).is_empty(),
             "and the window still renders"
         );
+    }
+
+    /// `--help` is answered before the window exists and must not be the thing
+    /// that moves a config file: the hint reads the language and stops there.
+    #[test]
+    fn the_language_hint_reads_the_config_file_without_moving_it() {
+        let home =
+            std::env::temp_dir().join(format!("fp-settings-home-hint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let legacy = home.join(".config/fp-browser/config.json");
+        std::fs::create_dir_all(legacy.parent().expect("parent")).expect("legacy dir");
+        // A field this build does not know, because a hint that refused a file
+        // over one unknown key would cost the reader their own language.
+        std::fs::write(&legacy, r#"{"lang": "zh", "future_field": 1}"#).expect("legacy config");
+
+        let environment = Environment {
+            host: paths::Host {
+                home: Some(home.clone()),
+                ..paths::Host::default()
+            },
+            ..Environment::default()
+        };
+
+        assert_eq!(language_hint(&environment), Lang::Zh);
+        assert!(
+            legacy.exists(),
+            "answering --help does not move the file it read"
+        );
+        let data = paths::data_dir(&environment.host).expect("a data directory");
+        assert!(
+            !data.join(paths::CONFIG_FILE).exists(),
+            "and it writes nothing"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_language_hint_that_cannot_be_read_is_english() {
+        // No file anywhere: the same answer `Settings::load` would give.
+        assert_eq!(language_hint(&Environment::default()), Lang::En);
+
+        let config = TempConfig::new("hint-broken");
+        config.write("{ not json");
+        assert_eq!(language_hint(&env(&config)), Lang::En);
+
+        // A name this build does not know, and a `lang` that is not a string.
+        config.write(r#"{"lang": "kl"}"#);
+        assert_eq!(language_hint(&env(&config)), Lang::En);
+        config.write(r#"{"lang": 3}"#);
+        assert_eq!(language_hint(&env(&config)), Lang::En);
     }
 
     /// A config file this build cannot write refuses the change rather than

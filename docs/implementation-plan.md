@@ -18,6 +18,7 @@ statements there are not current TODOs.
 | Layout | One directory per installation: the config file lives in the data directory beside the database, the logs, the runtime files and the profiles |
 | Windows lifecycle | Atomic job assignment, kill-on-close containment, native identity, recovery with retained failure records |
 | Backup | Configuration export, import and restore are in, from the Settings page, along with the browser-data copy for stopped profiles - see below |
+| Delivery | The program is named and versioned where it is seen: `--version` (version, commit, platform), `--help` in the chosen language, and `--diagnostics`, which writes one report about the installation for a bug report - see [diagnostics.md](diagnostics.md) |
 | Validation | Linux/Windows CI configuration, native process tests, opt-in real Windows Chromium/Xray acceptance |
 
 The desktop workflow is implemented. “Phase 5 has started” is outdated, and
@@ -403,6 +404,52 @@ Commands and limits: [windows-acceptance.md](windows-acceptance.md).
 3. Distribution: repeatable Windows release build, first-run executable setup,
    diagnostics and packaging. Do not silently download binaries. This is the
    remaining item that does not need another machine.
+   - [x] **Self-description.** `--version` (version, injected commit, platform),
+     `--help` in the language the config file names, the version in the window
+     title, and the same line as the first line of the activity log.
+   - [x] **Diagnostics.** `--diagnostics` and a Settings-page button write one
+     markdown report: build, effective settings with their sources, the state and
+     permissions of every file the installation keeps, and the end of the log. It
+     never opens the database and never reads browser data. See
+     [diagnostics.md](diagnostics.md).
+   - [ ] **Release build.** A `[profile.release]` that is worth shipping, the
+     version and commit in one place, and a CHANGELOG with a version policy.
+   - [ ] **Packaging.** A repeatable Windows build that produces an installer, and
+     a Linux archive; an icon, and a release workflow that attaches the artifacts
+     rather than only running the gate.
+   - [ ] **First-run setup.** What the window says, and offers, when there is no
+     core or no Xray: the empty states exist, and the walk from a fresh install to
+     a first launched profile is not yet written down as one path with a test.
+
+### Why distribution is a task and not a paragraph
+
+Everything above is a feature of a program that only its author can build. The
+remaining work is what makes it a thing someone else can install, and it is
+deliberately not "add an installer": each piece has a rule behind it.
+
+- **The build has to describe itself.** Two builds of `0.1.0` are not the same
+  program, so `--version` and every report carry the commit, injected at build
+  time by `crates/app/build.rs` rather than written in the source. A bug report
+  without it is a conversation; with it, it is a checkout.
+- **The first question has to be answerable without the window.** A program whose
+  only surface is a GUI cannot be asked anything by a script, and cannot say
+  anything when the window will not open - which is exactly when someone needs to
+  ask. Hence `--version`, `--help` and `--diagnostics`, and hence the rule that
+  `--version` reads nothing and `--help` writes nothing.
+- **Nothing is downloaded for the user.** Chromium and Xray are the user's, and
+  the program never fetches them. That decision is what makes the first run
+  something to explain rather than something to automate; the empty state points
+  at the core page and names `FP_BROWSER_CHROMIUM_BIN` instead of offering to
+  install a browser.
+- **A report must be safe to send.** The proxy credentials are in the database,
+  so the report measures it and does not read it, and the summary says what is in
+  the file before anyone shares it.
+
+**Done means:** on a clean Windows machine, from an artifact this repository
+produced, a user can install it, see which build they have, be told what to
+supply when there is no browser core, and produce one file to attach to a report
+- and none of it required a download the program made by itself.
+
 
 ### Why profile search stays a single-profile feature
 

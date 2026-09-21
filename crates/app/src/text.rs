@@ -111,6 +111,53 @@ macro_rules! catalog {
 }
 
 catalog! {
+    // ---- the command line ----
+    //
+    // Not the window's words, and still this table's: the person reading the
+    // help is the same person who chose the language. `--help` reads that choice
+    // the cheap way (`settings::language_hint`), so answering it cannot move a
+    // file, and falls back to English when there is nothing to read.
+    cli_usage => concat!(
+        "Fingerprint Browser - browser profiles for fingerprint-chromium\n",
+        "\n",
+        "Usage:\n",
+        "  fingerprint-browser [option]\n",
+        "\n",
+        "Options:\n",
+        "  -h, --help         Print this help and exit\n",
+        "  -V, --version      Print the version, the commit and the platform, and exit\n",
+        "      --diagnostics  Write a report about this installation and exit\n",
+        "      --out <path>   Where --diagnostics writes; the data directory by default\n",
+        "\n",
+        "Environment:\n",
+        "  FP_BROWSER_DATA_DIR, FP_BROWSER_XRAY_BIN, FP_BROWSER_CHROMIUM_BIN,\n",
+        "  FP_BROWSER_CHROMIUM_MAJOR, FP_BROWSER_CONFIG, FP_BROWSER_ECHO_URL\n",
+        "\n",
+        "With no option the window opens. The report holds versions, paths, file modes\n",
+        "and the end of the activity log; it holds no proxy credentials and no browser\n",
+        "data. See the README for what each environment variable does.",
+    ) => concat!(
+        "Fingerprint Browser —— fingerprint-chromium 的浏览器档案管理器\n",
+        "\n",
+        "用法：\n",
+        "  fingerprint-browser [选项]\n",
+        "\n",
+        "选项：\n",
+        "  -h, --help         显示本帮助并退出\n",
+        "  -V, --version      显示版本、提交与平台并退出\n",
+        "      --diagnostics  写出本安装的诊断报告并退出\n",
+        "      --out <路径>   --diagnostics 的写入位置；默认为数据目录\n",
+        "\n",
+        "环境变量：\n",
+        "  FP_BROWSER_DATA_DIR、FP_BROWSER_XRAY_BIN、FP_BROWSER_CHROMIUM_BIN、\n",
+        "  FP_BROWSER_CHROMIUM_MAJOR、FP_BROWSER_CONFIG、FP_BROWSER_ECHO_URL\n",
+        "\n",
+        "不带选项时打开窗口。报告包含版本、路径、文件权限与日志的末尾若干行，\n",
+        "不包含任何代理凭据与浏览器数据。各环境变量的作用见 README。",
+    );
+    cli_usage_hint => "Run fingerprint-browser --help for the options."
+        => "运行 fingerprint-browser --help 查看选项。";
+
     // ---- the shell ----
     quit => "Quit" => "退出";
 
@@ -288,6 +335,24 @@ catalog! {
     copy_in => "Copy in" => "拷入";
     browser_data_note => "The directory holds one subdirectory per profile, named after its identifier, so it lines up with the configuration."
         => "该目录下每个档案一个子目录，以标识符命名，因此能与配置一一对应。";
+
+    // ---- the diagnostics report ----
+    diag_title => "Fingerprint Browser diagnostics" => "Fingerprint Browser 诊断报告";
+    diag_intro => "Versions, paths, file modes and the end of the activity log. No proxy credentials and no browser data: this report never opens the database."
+        => "版本、路径、文件权限与日志的末尾。不含代理凭据与浏览器数据：本报告不会打开数据库。";
+    diag_build => "Build" => "构建";
+    diag_version => "Version" => "版本";
+    diag_commit => "Commit" => "提交";
+    diag_platform => "Platform" => "平台";
+    diag_report_time => "Report time" => "生成时间";
+    diag_settings => "Settings in force" => "当前设置";
+    diag_files => "Files" => "文件";
+    diag_database => "Database" => "数据库";
+    diag_activity_log => "Activity log" => "日志文件";
+    diag_activity_log_rotated => "Rotated activity log" => "轮转的日志文件";
+    diag_log => "The end of the activity log" => "日志的末尾";
+    diag_log_empty => "nothing has been written to this log yet" => "这个日志里还没有任何内容";
+    diag_missing => "missing" => "缺失";
 
     // ---- the profile editor ----
     name_field => "Name" => "名称";
@@ -1708,6 +1773,105 @@ impl Text {
             (Lang::Zh, FaultClass::Http(code)) => format!("HTTP {code}"),
             (Lang::Zh, FaultClass::Reading) => "应答无法解析".to_string(),
             (Lang::Zh, FaultClass::Other) => "未分类".to_string(),
+        }
+    }
+
+    /// An argument the command line does not have.
+    pub fn cli_unknown_argument(&self, argument: &str) -> String {
+        match self.lang {
+            Lang::En => format!("unknown argument: {argument}"),
+            Lang::Zh => format!("未知参数：{argument}"),
+        }
+    }
+
+    /// An option that needs a value and did not get one.
+    pub fn cli_missing_value(&self, option: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{option} needs a value"),
+            Lang::Zh => format!("{option} 需要一个值"),
+        }
+    }
+
+    /// An option that only means something alongside another.
+    pub fn cli_not_applicable(&self, option: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{option} is only used by --diagnostics"),
+            Lang::Zh => format!("{option} 只能与 --diagnostics 一起使用"),
+        }
+    }
+
+    /// The first line of the activity log: what this run is and where it keeps
+    /// its files, which is what a problem report is asked for first.
+    pub fn run_started(&self, build: &str, platform: &str, data_dir: &str) -> String {
+        match self.lang {
+            Lang::En => format!("This run: {build} on {platform}; data directory {data_dir}."),
+            Lang::Zh => format!("本次运行：{build}，平台 {platform}；数据目录 {data_dir}。"),
+        }
+    }
+
+    /// A directory, and how many entries are in it. The report counts a
+    /// directory rather than listing it: the profiles under one are the user's
+    /// browsing, not a fact about the installation.
+    pub fn diag_directory(&self, entries: usize) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "directory, {entries} {}",
+                if entries == 1 { "entry" } else { "entries" }
+            ),
+            Lang::Zh => format!("目录，{entries} 项"),
+        }
+    }
+
+    pub fn diag_bytes(&self, bytes: u64) -> String {
+        match self.lang {
+            Lang::En => format!("{bytes} {}", if bytes == 1 { "byte" } else { "bytes" }),
+            Lang::Zh => format!("{bytes} 字节"),
+        }
+    }
+
+    /// The permission bits, where the platform has them. Four digits: whether a
+    /// file can be executed is the question this line is usually asked.
+    pub fn diag_mode(&self, mode: &str) -> String {
+        match self.lang {
+            Lang::En => format!("mode {mode}"),
+            Lang::Zh => format!("权限 {mode}"),
+        }
+    }
+
+    pub fn diag_unreadable(&self, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not be read: {error}"),
+            Lang::Zh => format!("无法读取：{error}"),
+        }
+    }
+
+    /// The one thing `--diagnostics` prints when it works.
+    pub fn diag_written(&self, path: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Wrote a diagnostics report to {path}."),
+            Lang::Zh => format!("诊断报告已写入 {path}。"),
+        }
+    }
+
+    /// How much of the log the report carries, and of how much.
+    pub fn diag_log_lines(&self, shown: usize, total: usize) -> String {
+        match self.lang {
+            Lang::En => format!("the last {shown} of {total} lines, oldest first"),
+            Lang::Zh => format!("共 {total} 行，显示最后 {shown} 行，由旧到新"),
+        }
+    }
+
+    pub fn diag_create_failed(&self, directory: &str, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not create {directory}: {error}"),
+            Lang::Zh => format!("无法创建 {directory}：{error}"),
+        }
+    }
+
+    pub fn diag_write_failed(&self, path: &str, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not write {path}: {error}"),
+            Lang::Zh => format!("无法写入 {path}：{error}"),
         }
     }
 }

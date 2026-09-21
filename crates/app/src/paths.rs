@@ -132,6 +132,24 @@ pub fn default_export_file(data_dir: &Path, at: std::time::SystemTime) -> PathBu
     ))
 }
 
+/// The directory a diagnostics report writes into when the user has not said
+/// where.
+pub const DIAGNOSTICS_DIR: &str = "diagnostics";
+
+/// Where a diagnostics report writes with no path given:
+/// `<data dir>/diagnostics/fp-browser-diagnostics-<stamp>.md`.
+///
+/// The same rule as the configuration export, for the same reason: a name with
+/// the second in it cannot land on an earlier report by accident, so the
+/// default destination is always safe to replace and a report that replaces one
+/// is one the user pointed at.
+pub fn default_diagnostics_file(data_dir: &Path, at: std::time::SystemTime) -> PathBuf {
+    data_dir.join(DIAGNOSTICS_DIR).join(format!(
+        "fp-browser-diagnostics-{}.md",
+        crate::log_file::file_stamp(at)
+    ))
+}
+
 /// A notice for a run that follows the move of the default data directory.
 ///
 /// The default used to be the relative `data`, next to wherever the program was
@@ -402,6 +420,38 @@ mod tests {
 
         // The colon a clock time carries is the one that would have broken this,
         // and it is the reason `log_file::file_stamp` exists at all.
+        for forbidden in [':', '*', '?', '"', '<', '>', '|', '/', '\\'] {
+            assert!(!name.contains(forbidden), "{name} holds {forbidden:?}");
+        }
+    }
+
+    #[test]
+    fn the_default_diagnostics_report_lands_beside_the_data_in_its_own_folder() {
+        let data = Path::new("/home/alice/.local/share/FpBrowser");
+        let file = default_diagnostics_file(data, std::time::UNIX_EPOCH);
+
+        assert_eq!(file.parent().unwrap(), data.join(DIAGNOSTICS_DIR));
+        assert_eq!(
+            file.file_name().unwrap(),
+            "fp-browser-diagnostics-19700101-000000.md"
+        );
+        // A report is not a configuration backup: the two write to different
+        // folders, so neither can be mistaken for the other.
+        assert_ne!(file.parent().unwrap(), data.join(EXPORT_DIR));
+        assert_ne!(
+            file.parent().unwrap(),
+            default_export_file(data, std::time::UNIX_EPOCH)
+                .parent()
+                .unwrap()
+        );
+
+        // The same rule as the export: two seconds, two files.
+        let second = default_diagnostics_file(
+            data,
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1),
+        );
+        assert_ne!(file, second);
+        let name = second.file_name().unwrap().to_string_lossy();
         for forbidden in [':', '*', '?', '"', '<', '>', '|', '/', '\\'] {
             assert!(!name.contains(forbidden), "{name} holds {forbidden:?}");
         }

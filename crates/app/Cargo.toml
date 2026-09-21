@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The package is `app` because it is the application crate; the program is named
+# for what it does, because this is the name that ends up in `--version`, in the
+# window's title bar and in an installed shortcut.
+[[bin]]
+name = "fingerprint-browser"
+path = "src/main.rs"
+
 [dependencies]
 domain = { workspace = true }
 storage = { workspace = true }
