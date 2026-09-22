@@ -256,7 +256,7 @@ pub fn plan_import(
 
         // A profile without its proxy is imported with none. The database cannot
         // hold a dangling reference anyway - `profiles.proxy_id` is a foreign
-        // key with `ON DELETE SET NULL` - so the alternative to clearing it is a
+        // key with `ON DELETE RESTRICT` - so the alternative to clearing it is a
         // write that fails.
         if let Some(proxy_id) = profile.proxy_id
             && !(held_proxies.contains(&proxy_id) || arriving_proxies.contains(&proxy_id))

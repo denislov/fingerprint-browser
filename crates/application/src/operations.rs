@@ -288,8 +288,8 @@ mod tests {
         assert_eq!(operations.any(), None);
     }
 
-    /// The valve: only a start expires, and only once it is older than the age it
-    /// is asked about. A copy is ended by its worker, however long that takes.
+    /// Age is diagnostic only. Neither a queued start nor a copy can be
+    /// released just because its worker has taken longer than expected.
     #[test]
     fn overdue_starts_remain_held_until_acknowledged() {
         let operations = operations();

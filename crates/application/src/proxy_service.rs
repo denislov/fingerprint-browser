@@ -1,12 +1,11 @@
 //! Proxies the user can assign to a profile.
 //!
 //! Two rules live here rather than in the UI. A proxy is checked against the
-//! same domain rules storage enforces and against what the runtime can actually
+//! domain rules and against what the runtime can actually
 //! build, so an entry that could never work is refused when it is created
 //! instead of failing later at launch. And a proxy that profiles still point at
-//! cannot be deleted: the storage schema would null the assignment out and
-//! quietly send that traffic direct, which is the one outcome a proxy must
-//! never have.
+//! cannot be deleted: both the service and the restrictive foreign key preserve
+//! the assignment instead of silently sending that traffic direct.
 
 use crate::error::AppError;
 use domain::{ProxyId, ProxyOutbound, ProxyProfile, validate_proxy};
@@ -53,7 +52,7 @@ impl DefaultProxyService {
         Self { proxies, profiles }
     }
 
-    /// Storage rules, and the domain rules storage also enforces.
+    /// Domain validation before writing through the repository.
     ///
     /// There used to be a second question here - does the runtime have a config
     /// builder for this protocol - and the answer is now "for all six". What is
@@ -276,7 +275,7 @@ mod tests {
         );
     }
 
-    /// Deleting would null the assignment out and send that traffic direct.
+    /// A used proxy must be refused instead of silently clearing the assignment.
     #[test]
     fn a_proxy_still_assigned_to_a_profile_cannot_be_deleted() {
         let (service, _, profiles) = service();
