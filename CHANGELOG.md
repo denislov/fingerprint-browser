@@ -73,6 +73,15 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Changed
 
+- A command the runtime cannot take is now refused instead of freezing the window.
+  Every start, stop and restart was sent through a bounded queue with a blocking
+  send, from the window's own thread - so while the supervisor was inside a
+  readiness wait or a process-tree kill, the window waited with it. A full queue
+  is now refused immediately and says the runtime is still busy, which is a
+  different answer from a channel that has closed and is not worth retrying. The
+  one command that waits is the exit path's "leave the running sessions running",
+  which waits for the supervisor to take it for a couple of seconds and then warns
+  rather than blocking the exit for ever.
 - A start now gives back everything it acquired from one place. The ports, the
   Xray process and its temporary configuration, the browser and the session record
   used to be undone by five separate hand-written rollbacks, one per failure point,

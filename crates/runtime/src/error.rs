@@ -113,6 +113,14 @@ pub enum RuntimeCommandError {
     #[error("supervisor channel closed")]
     ChannelClosed,
 
+    /// The command was not taken: the supervisor is still working through what it
+    /// already has.
+    ///
+    /// Its own answer rather than [`Self::ChannelClosed`], because the two mean
+    /// opposite things about whether trying again is worth it.
+    #[error("the runtime is still busy with an earlier command")]
+    Busy,
+
     #[error("runtime command error: {0}")]
     Other(String),
 }
