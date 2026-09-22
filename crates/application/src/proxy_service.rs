@@ -30,6 +30,11 @@ pub trait ProxyService: Send + Sync {
     /// same ones an edit answers to, which is the point: a proxy whose
     /// credentials were left out of the file is refused here by
     /// [`validate_proxy`], exactly as it would be if someone typed it in.
+    ///
+    /// An upsert, for the same reason a core's is: the identifier in the file is
+    /// the one profiles' assignments travel by, so a record already stored under it
+    /// is the same proxy and re-importing has to be able to finish. An edit
+    /// ([`ProxyService::update`]) refuses an identifier that is not stored.
     fn insert(&self, proxy: ProxyProfile) -> Result<(), AppError>;
     fn delete(&self, id: ProxyId) -> Result<(), AppError>;
     fn get(&self, id: ProxyId) -> Result<Option<ProxyProfile>, AppError>;
@@ -320,6 +325,40 @@ mod tests {
         let (service, _, _) = service();
         assert!(matches!(
             service.delete(ProxyId::new()),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    /// `insert` is an upsert, and this is the contract written down: a file names
+    /// the identifier, so a record already stored under it is the same proxy and
+    /// re-importing has to be able to finish. The alternative - refusing - would
+    /// make an import fail against the installation it was imported into.
+    #[test]
+    fn inserting_a_proxy_whose_identifier_is_taken_replaces_it() {
+        let (service, proxies, _) = service();
+        let mut first = service.create(draft("Old name")).expect("create");
+        first.name = "Imported name".to_string();
+        service.insert(first.clone()).expect("first import");
+
+        let mut second = first.clone();
+        second.name = "Re-imported name".to_string();
+        service.insert(second.clone()).expect("re-import");
+
+        let id = first.id;
+        let stored = service.get(id).expect("get").expect("stored");
+        assert_eq!(stored.name, "Re-imported name");
+        assert_eq!(
+            proxies.list().expect("list").len(),
+            1,
+            "a replacement is not a second record"
+        );
+
+        // An edit, by contrast, refuses an identifier that is not stored: that is
+        // the other half of the contract, and the two must not drift.
+        let mut nowhere = first.clone();
+        nowhere.id = ProxyId::new();
+        assert!(matches!(
+            service.update(nowhere),
             Err(AppError::NotFound(_))
         ));
     }

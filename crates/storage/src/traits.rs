@@ -1,6 +1,14 @@
 use crate::error::StorageError;
 use domain::{BrowserCore, BrowserProfile, CoreId, ProfileId, ProxyId, ProxyProfile};
 
+/// Profiles, one record at a time.
+///
+/// `insert` and `update` are the two halves of a write that knows which it is:
+/// one refuses an identifier that is taken, the other refuses one that is not
+/// there. A profile's identifier is not a label - it is what its browser data
+/// directory is named after - so overwriting one silently would be a way to lose
+/// the record of a directory that is still on disk, which is why there is no
+/// `save` here.
 pub trait ProfileRepository: Send + Sync {
     fn get(&self, id: ProfileId) -> Result<Option<BrowserProfile>, StorageError>;
     fn list(&self) -> Result<Vec<BrowserProfile>, StorageError>;
@@ -9,6 +17,13 @@ pub trait ProfileRepository: Send + Sync {
     fn delete(&self, id: ProfileId) -> Result<(), StorageError>;
 }
 
+/// Proxies, one record at a time.
+///
+/// `save` is an upsert: it writes the record under the identifier it carries,
+/// replacing whatever was stored under that identifier. That is what an import
+/// needs - the file names the identifier, and the identifier is what a profile's
+/// assignment travels by - and it is not what an edit needs, which goes through
+/// the application service, where the rules are.
 pub trait ProxyRepository: Send + Sync {
     fn get(&self, id: ProxyId) -> Result<Option<ProxyProfile>, StorageError>;
     fn list(&self) -> Result<Vec<ProxyProfile>, StorageError>;
@@ -16,6 +31,7 @@ pub trait ProxyRepository: Send + Sync {
     fn delete(&self, id: ProxyId) -> Result<(), StorageError>;
 }
 
+/// Cores, one record at a time. See [`ProxyRepository::save`] for the upsert.
 pub trait CoreRepository: Send + Sync {
     fn get(&self, id: CoreId) -> Result<Option<BrowserCore>, StorageError>;
     fn list(&self) -> Result<Vec<BrowserCore>, StorageError>;

@@ -42,6 +42,13 @@ pub trait CoreService: Send + Sync {
     /// [`CoreService::redetect`] is the existing way to read the version again.
     /// A version that was never read is still refused at launch rather than
     /// assumed, because `major` `0` has no capability table.
+    ///
+    /// An upsert, and deliberately: the file names the identifier, and a core
+    /// that is already stored under it is *the same core* - the one its profiles
+    /// launch with - so re-importing a file that was imported before has to be able
+    /// to finish rather than collide with itself. [`CoreService::update`] is the
+    /// other direction: it refuses an identifier that is not stored, because an
+    /// edit of a core that is not there is a mistake rather than a creation.
     fn insert(&self, core: BrowserCore) -> Result<(), AppError>;
     fn delete(&self, id: CoreId) -> Result<(), AppError>;
     fn get(&self, id: CoreId) -> Result<Option<BrowserCore>, AppError>;
@@ -674,5 +681,53 @@ mod tests {
             vec!["Profile 1".to_string(), "Profile 2".to_string()]
         );
         assert!(!usage.contains_key(&idle.id));
+    }
+
+    /// `insert` is an upsert, and this is the contract written down: an imported
+    /// file names the identifier, so a core already stored under it is the same
+    /// core - the one its profiles launch with - and re-importing has to finish
+    /// rather than collide with itself. `update`, by contrast, refuses a core that
+    /// is not stored.
+    #[test]
+    fn inserting_a_core_whose_identifier_is_taken_replaces_it() {
+        let binary = TempBinary::new("imported", Some("Chromium 128.0.0.0"));
+        let fixture = fixture();
+        let stored = fixture
+            .service
+            .add(None, binary.path_buf())
+            .expect("add a core");
+
+        let mut imported = stored.clone();
+        imported.name = "From the file".to_string();
+        fixture
+            .service
+            .insert(imported.clone())
+            .expect("first import");
+
+        let mut again = imported.clone();
+        again.version = "148.0.0.0".to_string();
+        again.major = 148;
+        fixture.service.insert(again.clone()).expect("re-import");
+
+        let read_back = fixture
+            .service
+            .get(stored.id)
+            .expect("get")
+            .expect("stored");
+        assert_eq!(read_back.name, "From the file");
+        assert_eq!(read_back.major, 148);
+        assert_eq!(
+            fixture.cores.list().expect("list").len(),
+            1,
+            "a replacement is not a second record"
+        );
+
+        // The other half: an edit of a core that is not stored is refused.
+        let mut nowhere = imported.clone();
+        nowhere.id = CoreId::new();
+        assert!(matches!(
+            fixture.service.update(nowhere),
+            Err(AppError::NotFound(_))
+        ));
     }
 }
