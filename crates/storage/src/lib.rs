@@ -1,3 +1,4 @@
+pub mod atomic_file;
 pub mod error;
 pub mod memory;
 pub mod migrations;

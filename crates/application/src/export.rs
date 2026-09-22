@@ -88,9 +88,11 @@ pub fn write_config_backup(
         })?;
     }
 
-    std::fs::write(destination, &contents).map_err(|source| ExportError::Write {
-        path: destination.to_path_buf(),
-        source,
+    storage::atomic_file::write(destination, contents.as_bytes()).map_err(|source| {
+        ExportError::Write {
+            path: destination.to_path_buf(),
+            source,
+        }
     })?;
 
     Ok(ExportReport {

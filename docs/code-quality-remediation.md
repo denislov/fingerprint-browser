@@ -11,7 +11,7 @@ Behavioral fixes precede structural cleanup.
 - [x] Match asynchronous diagnostics to individual tasks.
 - [x] Enforce diagnostic deadlines throughout partial reads and writes.
 - [x] Preserve decoded proxy credentials.
-- [ ] Atomically replace configuration backups and settings files.
+- [x] Atomically replace configuration backups and settings files.
 - [ ] Align SQLite insert/update errors and share row decoding.
 - [ ] Extract large modules by responsibility and correct stale documentation.
 
@@ -45,6 +45,11 @@ drip-feed peer regression verifies that partial progress cannot renew a timeout.
 
 Stage 6: Trojan and Shadowsocks credentials retain decoded whitespace. Tests
 cover percent-encoded Trojan passwords and both base64 Shadowsocks link forms.
+
+Stage 7: backups and settings share a same-directory atomic file replacement
+helper. The temporary file is private and synced before replacement. Tests
+inject a mid-write failure and a failed rename; both preserve the existing
+destination and remove the temporary file. App, application and storage tests pass.
 
 Real-browser, real-Xray and platform-specific tests require their corresponding
 runtime environment; ordinary workspace tests do not replace those checks.

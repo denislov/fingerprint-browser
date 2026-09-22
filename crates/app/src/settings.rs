@@ -796,7 +796,7 @@ fn write_config(path: &Path, stored: &Stored, t: &Text) -> Result<(), String> {
     }
     let text = serde_json::to_string_pretty(stored)
         .map_err(|error| t.config_encode_failed(&error.to_string()))?;
-    std::fs::write(path, format!("{text}\n")).map_err(|error| {
+    storage::atomic_file::write(path, format!("{text}\n").as_bytes()).map_err(|error| {
         t.config_file_write_failed(&path.display().to_string(), &error.to_string())
     })
 }
