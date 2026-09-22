@@ -190,3 +190,29 @@ pub(super) fn format_age(at: SystemTime, t: &Text) -> String {
         seconds => format!("{}h", seconds / 3600),
     }
 }
+
+impl AppView {
+    pub(super) fn on_copy_log(&mut self, cx: &mut Context<Self>) {
+        let t = self.state.text();
+        let text: String = self
+            .state
+            .log_rows()
+            .iter()
+            .map(|row| format!("{} [{}] {}", row.who, row.level.label(t), row.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    pub(super) fn on_set_log_filter(&mut self, filter: LogFilter, cx: &mut Context<Self>) {
+        self.state.set_log_filter(filter);
+        cx.notify();
+    }
+
+    pub(super) fn on_clear_log(&mut self, cx: &mut Context<Self>) {
+        self.state.clear_log();
+        cx.notify();
+    }
+}

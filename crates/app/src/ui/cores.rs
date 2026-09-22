@@ -170,3 +170,175 @@ pub(super) fn cores_body(
                 )
         }))
 }
+
+impl AppView {
+    /// Removing a core is refused while a profile still launches with it.
+    pub(super) fn on_delete_core(
+        &mut self,
+        id: CoreId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let t = self.state.text();
+        let (name, version, used_by) = match self.state.core(id) {
+            Some(core) => {
+                let used_by = self
+                    .state
+                    .core_rows()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|row| row.core.id == id)
+                    .map(|row| row.used_by)
+                    .unwrap_or_default();
+                (core.name, core.version, used_by)
+            }
+            None => (id.to_string(), String::new(), Vec::new()),
+        };
+        let description = if used_by.is_empty() {
+            t.delete_core_confirm(&name, &version)
+        } else {
+            t.core_in_use(&name, &used_by.join(", "))
+        };
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            let description = description.clone();
+            alert
+                .title(t.delete_core_title)
+                .description(description)
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(t.delete)
+                        .cancel_text(t.keep)
+                        .show_cancel(true)
+                        .on_ok(move |_, _, cx| {
+                            if let Some(view) = view.upgrade() {
+                                view.update(cx, |view, cx| {
+                                    let _ = view.state.delete_core(id);
+                                    cx.notify();
+                                });
+                            }
+                            true
+                        })
+                        .on_cancel(|_, _, _| true),
+                )
+        });
+        cx.notify();
+    }
+
+    /// Re-reads a core's version - for a binary that was replaced in place.
+    /// Reads a core's version again.
+    ///
+    /// The probe starts the binary and waits for it to answer, which is a program
+    /// this window did not write: it runs on a worker, so a core that hangs or a
+    /// binary on a slow disk does not stop the window redrawing.
+    pub(super) fn on_redetect_core(&mut self, id: CoreId, cx: &mut Context<Self>) {
+        let job = match self.state.begin_redetect(id) {
+            Ok(job) => job,
+            Err(message) => {
+                self.state.push_notice(message, true);
+                cx.notify();
+                return;
+            }
+        };
+        let sender = self.maintenance_tx.clone();
+        std::thread::spawn(move || {
+            let result = maintenance::run_redetect(job);
+            let _ = sender.send(maintenance::Outcome::Redetected { id, result });
+        });
+        cx.notify();
+    }
+
+    /// Opens the form for a new core, or for one that is already registered.
+    /// Opens the form for a new core, or for one that is already registered.
+    ///
+    /// Adding goes through the service, which probes the binary: the version a
+    /// core claims decides what the engine may be asked to spoof, so it is read
+    /// rather than typed.
+    pub(super) fn on_edit_core(
+        &mut self,
+        id: Option<CoreId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let t = self.state.text();
+        let editing = id.and_then(|id| self.state.core(id));
+        if id.is_some() && editing.is_none() {
+            self.state.push_notice(t.core_gone.to_string(), true);
+            cx.notify();
+            return;
+        }
+        let core_editor = cx.new(|cx| match &editing {
+            Some(core) => CoreEditor::for_core(core, t, window, cx),
+            None => CoreEditor::new(t, window, cx),
+        });
+        self.core_editor = Some(core_editor.clone());
+        let view = cx.entity().downgrade();
+        let accepted = core_editor.clone();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let core_editor = core_editor.clone();
+            let view = view.clone();
+            let accepted = accepted.clone();
+            let title = core_editor.read(cx).title();
+            dialog
+                .title(title)
+                .w(px(680.0))
+                .child(core_editor.clone())
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            DialogClose::new().trigger(|button| button.label(t.cancel).outline()),
+                        )
+                        .child(DialogAction::new().child(Button::new("ok").label(t.save))),
+                )
+                .on_ok(move |_, _, cx| {
+                    let editing = core_editor.read(cx).is_edit();
+                    let name = core_editor.read(cx).name(cx);
+                    let path = core_editor.read(cx).executable(cx);
+                    let built = if editing {
+                        core_editor.read(cx).build_core(cx).map(Some)
+                    } else if path.as_os_str().is_empty() {
+                        Err(t.executable_cannot_be_empty.to_string())
+                    } else {
+                        Ok(None)
+                    };
+
+                    let saved: Result<(), String> = match built {
+                        Ok(core) => view
+                            .update(cx, |view, _| {
+                                let result = match core {
+                                    Some(core) => view.state.update_core(core),
+                                    None => view.state.add_core(name, path).map(|_| ()),
+                                };
+                                match result {
+                                    Ok(()) => Ok(()),
+                                    Err(error) => {
+                                        let message = error.to_string();
+                                        view.state.push_notice(message.clone(), true);
+                                        Err(message)
+                                    }
+                                }
+                            })
+                            .unwrap_or_else(|_| Err(t.window_gone.to_string())),
+                        Err(error) => Err(error),
+                    };
+                    match saved {
+                        Ok(()) => {
+                            accepted.update(cx, |editor, cx| {
+                                editor.set_error(None);
+                                cx.notify();
+                            });
+                            true
+                        }
+                        Err(message) => {
+                            accepted.update(cx, |editor, cx| {
+                                editor.set_error(Some(message));
+                                cx.notify();
+                            });
+                            false
+                        }
+                    }
+                })
+        });
+    }
+}

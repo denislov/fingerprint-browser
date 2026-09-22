@@ -495,3 +495,10 @@ pub(super) fn elapsed(row: &ProfileRow, t: &Text) -> String {
         None => "—".to_string(),
     }
 }
+
+impl AppView {
+    pub(super) fn on_set_details_tab(&mut self, tab: DetailsTab, cx: &mut Context<Self>) {
+        self.state.set_details_tab(tab);
+        cx.notify();
+    }
+}
