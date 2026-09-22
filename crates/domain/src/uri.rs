@@ -162,7 +162,12 @@ fn parse_url_link(
         "password"
     };
     let secret = percent_decode(url.username(), scheme)?;
-    let secret = text(&secret).ok_or(UriError::Missing {
+    let secret = if scheme == "trojan" {
+        credential(&secret)
+    } else {
+        text(&secret)
+    }
+    .ok_or(UriError::Missing {
         scheme,
         field: secret_field,
     })?;
@@ -245,7 +250,7 @@ fn parse_ss(input: &str) -> Result<ParsedProxy, UriError> {
         scheme: SCHEME,
         field: "method",
     })?;
-    let password = text(password).ok_or(UriError::Missing {
+    let password = credential(password).ok_or(UriError::Missing {
         scheme: SCHEME,
         field: "password",
     })?;
@@ -604,6 +609,11 @@ fn text(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Credentials are opaque; whitespace decoded from a link is part of the key.
+fn credential(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 fn lower(value: &Option<String>) -> Option<String> {
     value
         .as_deref()
@@ -710,6 +720,23 @@ mod tests {
 
     fn base64(value: &str) -> String {
         base64::engine::general_purpose::STANDARD.encode(value)
+    }
+
+    #[test]
+    fn encoded_credentials_preserve_leading_and_trailing_whitespace() {
+        assert_eq!(
+            trojan("trojan://%20secret%20@example.org:443").password,
+            " secret "
+        );
+        for link in [
+            format!("ss://{}@example.org:8388", base64("aes-256-gcm: secret ")),
+            format!("ss://{}", base64("aes-256-gcm: secret @example.org:8388")),
+        ] {
+            let ProxyOutbound::Shadowsocks(proxy) = outbound(&link) else {
+                panic!("shadowsocks")
+            };
+            assert_eq!(proxy.password, " secret ");
+        }
     }
 
     fn vless(link: &str) -> VlessOutbound {

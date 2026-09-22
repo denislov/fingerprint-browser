@@ -10,7 +10,7 @@ Behavioral fixes precede structural cleanup.
 - [x] Keep queued starts protected until their own runtime acknowledgement.
 - [x] Match asynchronous diagnostics to individual tasks.
 - [x] Enforce diagnostic deadlines throughout partial reads and writes.
-- [ ] Preserve decoded proxy credentials.
+- [x] Preserve decoded proxy credentials.
 - [ ] Atomically replace configuration backups and settings files.
 - [ ] Align SQLite insert/update errors and share row decoding.
 - [ ] Extract large modules by responsibility and correct stale documentation.
@@ -42,6 +42,9 @@ temporary engine directories. Restore invalidates all previous readings.
 Stage 5: diagnostic socket operations recheck a single absolute deadline before
 each read/write. Connection establishment consumes the same budget. A local
 drip-feed peer regression verifies that partial progress cannot renew a timeout.
+
+Stage 6: Trojan and Shadowsocks credentials retain decoded whitespace. Tests
+cover percent-encoded Trojan passwords and both base64 Shadowsocks link forms.
 
 Real-browser, real-Xray and platform-specific tests require their corresponding
 runtime environment; ordinary workspace tests do not replace those checks.
