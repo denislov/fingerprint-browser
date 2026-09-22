@@ -71,10 +71,14 @@ v1 明确不做：
 关键约束：
 
 1. UI 不直接 `Command::spawn()`。
-2. Storage 不认识 GPUI 类型。
-3. Runtime 不直接操作 UI Entity / View。
-4. Domain model 不依赖 SQLite、GPUI、Xray JSON 或 Chromium CLI。
-5. 所有外部进程启动前，先生成不可变 `LaunchPlan`。
+2. UI 回调不等待慢操作：代理测试、指纹校验、打开目录、浏览器数据复制，以及
+   导出/导入/还原配置与重新探测 core 版本，都把工作交给 worker，答案经各自的通道
+   回到 tick 循环。四个配置类任务共用一个结果类型与一条通道（`maintenance`），
+   同时只允许一个在跑，第二个点击被拒绝。
+3. Storage 不认识 GPUI 类型。
+4. Runtime 不直接操作 UI Entity / View。
+5. Domain model 不依赖 SQLite、GPUI、Xray JSON 或 Chromium CLI。
+6. 所有外部进程启动前，先生成不可变 `LaunchPlan`。
 
 ---
 

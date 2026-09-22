@@ -13,6 +13,7 @@ mod editor;
 mod exit;
 mod instance;
 mod log_file;
+mod maintenance;
 mod open_dir;
 mod paths;
 mod proxy_editor;

@@ -1280,6 +1280,20 @@ impl Text {
         }
     }
 
+    /// The refusal of a second configuration task while one is running.
+    ///
+    /// One sentence for all four rather than one per task: there is only ever one
+    /// in flight, the reader has just clicked the button, and which of the four is
+    /// running is visible in the window rather than in this sentence.
+    pub fn maintenance_busy(&self) -> String {
+        match self.lang {
+            Lang::En => {
+                "Another configuration task is still running; wait for it to finish.".to_string()
+            }
+            Lang::Zh => "另一个配置任务仍在进行，请等它结束。".to_string(),
+        }
+    }
+
     /// The refusal of an operation that needs the whole installation to itself.
     ///
     /// Named rather than counted: the reader has to know which profile to wait

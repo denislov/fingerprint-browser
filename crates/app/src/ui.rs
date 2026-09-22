@@ -8,6 +8,7 @@ use crate::browser_data::BrowserDataCopier;
 use crate::core_editor::CoreEditor;
 use crate::editor::{ProfileEdit, ProfileEditor};
 use crate::exit::{Exit, ExitMode};
+use crate::maintenance;
 use crate::open_dir::DirectoryOpener;
 use crate::proxy_editor::ProxyEditor;
 use crate::proxy_import::ProxyImport;
@@ -101,6 +102,11 @@ pub struct AppView {
     /// Finished browser-data copies, with the direction each was taken in.
     browser_data: Receiver<(Direction, Result<BrowserDataReport, String>)>,
     browser_data_tx: Sender<(Direction, Result<BrowserDataReport, String>)>,
+    /// What a configuration task reported: one channel and one answer type for
+    /// the four of them, so a fifth cannot report somewhere the window does not
+    /// hear it.
+    maintenance: Receiver<maintenance::Outcome>,
+    maintenance_tx: Sender<maintenance::Outcome>,
     state: AppState,
     events: Receiver<RuntimeEvent>,
     /// Kept alive: dropping a GPUI subscription unregisters the observer.
@@ -142,6 +148,7 @@ impl AppView {
         let (proxy_test_tx, proxy_tests) = crossbeam_channel::unbounded();
         let (open_tx, open_results) = crossbeam_channel::unbounded();
         let (browser_data_tx, browser_data) = crossbeam_channel::unbounded();
+        let (maintenance_tx, maintenance) = crossbeam_channel::unbounded();
         Self {
             editor: None,
             proxy_editor: None,
@@ -166,6 +173,8 @@ impl AppView {
             open_tx,
             browser_data,
             browser_data_tx,
+            maintenance,
+            maintenance_tx,
             state,
             events,
             window_closed: None,
@@ -297,7 +306,9 @@ impl AppView {
                     let tested = view.drain_proxy_tests();
                     let opened = view.drain_open_results();
                     let copied = view.drain_browser_data();
-                    if notified || reconcile || verified || tested || opened || copied {
+                    let maintained = view.drain_maintenance();
+                    if notified || reconcile || verified || tested || opened || copied || maintained
+                    {
                         view.state.refresh_runtime();
                         cx.notify();
                     }
@@ -408,6 +419,20 @@ impl AppView {
     /// Nothing is dropped for having gone stale the way a verification is: a
     /// copy is not about a runtime state that can change under it, and the
     /// report is the only record of what it did.
+    /// Collect what the configuration workers reported.
+    ///
+    /// Nothing is dropped for having gone stale: a task is about the whole
+    /// installation rather than about a runtime state that can change under it,
+    /// and its answer is the only record of what it did.
+    fn drain_maintenance(&mut self) -> bool {
+        let mut received = false;
+        while let Ok(outcome) = self.maintenance.try_recv() {
+            self.state.finish_maintenance(outcome);
+            received = true;
+        }
+        received
+    }
+
     fn drain_browser_data(&mut self) -> bool {
         let mut received = false;
         while let Ok((direction, outcome)) = self.browser_data.try_recv() {
@@ -840,8 +865,25 @@ impl AppView {
     }
 
     /// Re-reads a core's version - for a binary that was replaced in place.
+    /// Reads a core's version again.
+    ///
+    /// The probe starts the binary and waits for it to answer, which is a program
+    /// this window did not write: it runs on a worker, so a core that hangs or a
+    /// binary on a slow disk does not stop the window redrawing.
     fn on_redetect_core(&mut self, id: CoreId, cx: &mut Context<Self>) {
-        let _ = self.state.redetect_core(id);
+        let job = match self.state.begin_redetect(id) {
+            Ok(job) => job,
+            Err(message) => {
+                self.state.push_notice(message, true);
+                cx.notify();
+                return;
+            }
+        };
+        let sender = self.maintenance_tx.clone();
+        std::thread::spawn(move || {
+            let result = maintenance::run_redetect(job);
+            let _ = sender.send(maintenance::Outcome::Redetected { id, result });
+        });
         cx.notify();
     }
 
@@ -1279,9 +1321,27 @@ impl AppView {
             self.state.set_export_path(typed);
         }
         // The result - and whether the file carries credentials - is reported
-        // through the banner, the toast and the activity log, all of which
-        // `export_configuration` reaches by way of `set_notice`.
-        let _ = self.state.export_configuration();
+        // through the banner, the toast and the activity log, all of which the
+        // worker's answer reaches by way of `finish_maintenance`. The read and the
+        // write are the whole configuration and one file, so they run on a worker
+        // like the other three.
+        let job = match self.state.begin_export() {
+            Ok(job) => job,
+            Err(message) => {
+                self.state.push_notice(message, true);
+                cx.notify();
+                return;
+            }
+        };
+        let sender = self.maintenance_tx.clone();
+        std::thread::spawn(move || {
+            let destination = job.destination.clone();
+            let result = maintenance::run_export(job);
+            let _ = sender.send(maintenance::Outcome::Exported {
+                destination,
+                result,
+            });
+        });
         cx.notify();
     }
 
@@ -1323,8 +1383,22 @@ impl AppView {
         }
         // The result - and every shortfall the report carries - is reported
         // through `set_notice`, which routes shortfalls to the banner and
-        // clean imports to a toast.
-        let _ = self.state.import_configuration();
+        // clean imports to a toast. An import writes every record in the file one
+        // at a time, so it runs on a worker.
+        let job = match self.state.begin_import() {
+            Ok(job) => job,
+            Err(message) => {
+                self.state.push_notice(message, true);
+                cx.notify();
+                return;
+            }
+        };
+        let sender = self.maintenance_tx.clone();
+        std::thread::spawn(move || {
+            let source = job.source.clone();
+            let result = maintenance::run_import(job);
+            let _ = sender.send(maintenance::Outcome::Imported { source, result });
+        });
         cx.notify();
     }
 
@@ -1364,12 +1438,34 @@ impl AppView {
             return;
         }
         match self.state.is_configuration_empty() {
-            Ok(true) => {
-                let _ = self.state.restore_configuration(RestoreMode::OnlyWhenEmpty);
-            }
+            Ok(true) => self.start_restore(RestoreMode::OnlyWhenEmpty, cx),
             Ok(false) => self.confirm_restore(window, cx),
             Err(error) => self.state.push_notice(error.to_string(), true),
         }
+        cx.notify();
+    }
+
+    /// Puts the restore on a worker and lets the confirmation close.
+    ///
+    /// The file is read, checked and applied as one transaction, so it is the
+    /// largest piece of work any of these four do - and the one least able to
+    /// happen where the window is drawn, since the window is what the user is
+    /// watching while a whole configuration is replaced.
+    fn start_restore(&mut self, mode: RestoreMode, cx: &mut Context<Self>) {
+        let job = match self.state.begin_restore(mode) {
+            Ok(job) => job,
+            Err(message) => {
+                self.state.push_notice(message, true);
+                cx.notify();
+                return;
+            }
+        };
+        let sender = self.maintenance_tx.clone();
+        std::thread::spawn(move || {
+            let source = job.source.clone();
+            let result = maintenance::run_restore(job);
+            let _ = sender.send(maintenance::Outcome::Restored { source, result });
+        });
         cx.notify();
     }
 
@@ -1393,8 +1489,7 @@ impl AppView {
                         .on_ok(move |_, _, cx| {
                             if let Some(view) = view.upgrade() {
                                 view.update(cx, |view, cx| {
-                                    let _ = view.state.restore_configuration(RestoreMode::Replace);
-                                    cx.notify();
+                                    view.start_restore(RestoreMode::Replace, cx);
                                 });
                             }
                             true
@@ -4750,6 +4845,7 @@ mod tests {
                 view.drain_proxy_tests();
                 view.drain_open_results();
                 view.drain_browser_data();
+                view.drain_maintenance();
                 cx.notify();
             });
             std::thread::sleep(Duration::from_millis(10));
@@ -6540,7 +6636,14 @@ mod tests {
         // an `InputState` gets the window it needs.
         type_export_path(cx, &view, path.to_string_lossy().as_ref());
         cx.update(|window, cx| window.click("export-run", cx));
-        settle(cx);
+        // The write happens on a worker: the answer arrives on a later tick, and
+        // the message below is the proof that it did.
+        wait_for_state(cx, &view, |state| {
+            state
+                .toasts()
+                .last()
+                .is_some_and(|toast| toast.message.contains("config.json"))
+        });
 
         assert!(path.exists(), "{} should exist", path.display());
         let text = std::fs::read_to_string(&path).expect("read back");
@@ -6802,7 +6905,14 @@ mod tests {
         type_import_path(cx, &view, path.to_string_lossy().as_ref());
         scroll_settings_to(cx, "import-run");
         cx.update(|window, cx| window.click("import-run", cx));
-        settle(cx);
+        // The read and the writes happen on a worker, so the answer arrives on a
+        // later tick rather than inside the click.
+        wait_for_state(cx, &view, |state| {
+            state
+                .toasts()
+                .last()
+                .is_some_and(|toast| toast.message.contains("config.json"))
+        });
 
         // An empty installation importing an empty file is the quiet case: a
         // toast that says so, not a banner that pretends something happened.
@@ -6924,7 +7034,9 @@ mod tests {
         );
 
         cx.update(|window, cx| window.click("ok", cx));
-        settle(cx);
+        // The replacement is a transaction over the whole configuration, and it
+        // runs on a worker: the rows change when the answer arrives.
+        wait_for_state(cx, &view, |state| state.rows().is_empty());
 
         // The file held nothing, so the replacement took what was here away.
         assert_eq!(

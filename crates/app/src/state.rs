@@ -8,6 +8,7 @@
 use crate::browser_data::BrowserDataJob;
 use crate::exit::ExitMode;
 use crate::log_file::LogFile;
+use crate::maintenance;
 use crate::proxy_tester::ProxyTestJob;
 use crate::settings::{SettingKey, SettingRow, Settings};
 use crate::text::{Lang, Text, text};
@@ -16,7 +17,7 @@ use crate::verifier::{EgressJob, VerificationJob, VerificationReport};
 use application::{
     AppError, BrowserDataReport, CoreService, Counts, Credentials, Direction, ExportOrigin,
     ExportReport, Held, ImportNotes, ImportReport, NewProfile, NewProxy, Operation, Operations,
-    ProfileService, ProxyService, RestoreError, RestoreMode, RestoreReport, RuntimeService,
+    ProfileService, ProxyService, RestoreMode, RestoreReport, RuntimeService,
 };
 use domain::{
     BrowserCore, BrowserProfile, CoreId, ProfileId, ProxyId, ProxyOutbound, ProxyProfile,
@@ -723,6 +724,14 @@ pub struct AppState {
     /// answer is matched against - one entry per profile, because a profile is
     /// exactly as busy as the lease above says it is.
     pending_starts: BTreeMap<ProfileId, PendingStart>,
+    /// The maintenance task a worker is running, if one is.
+    ///
+    /// One at a time, because the four of them read and write the same file and
+    /// the same rows, and the window has one button each rather than a queue. It
+    /// is cleared by whichever `finish_` the answer goes to - the one that a
+    /// synchronous caller reaches in a row, and the one the view reaches through
+    /// [`AppState::finish_maintenance`].
+    maintenance: Option<maintenance::Kind>,
 }
 
 /// A start that is waiting for its proxy to answer.
@@ -853,6 +862,7 @@ impl AppState {
             browser_data_path: String::new(),
             operations: Arc::new(Operations::default()),
             pending_starts: BTreeMap::new(),
+            maintenance: None,
         }
     }
 
@@ -1569,31 +1579,99 @@ impl AppState {
     /// names a new file each second, so it cannot land on an older backup by
     /// accident; a path typed on purpose is meant, and refusing it would break
     /// updating a backup kept at one path.
-    pub fn export_configuration(&mut self) -> Result<ExportReport, String> {
-        let t = self.text();
+    /// The export, on the calling thread.
+    ///
+    /// For tests, and only for tests: the window uses [`AppState::begin_export`]
+    /// and applies the answer through [`AppState::finish_maintenance`], so the
+    /// read and the write happen on a worker rather than on the thread that draws
+    /// the window. This is the same three steps in a row, which is what makes the
+    /// whole task testable without a window.
+    #[cfg(test)]
+    pub(crate) fn export_configuration(&mut self) -> Result<ExportReport, String> {
+        let job = self.begin_export()?;
+        let destination = job.destination.clone();
+        let result = maintenance::run_export(job);
+        self.finish_export(&destination, &result);
+        result
+    }
+
+    /// The export as a value, for a caller that will run it somewhere else.
+    ///
+    /// Refused while another maintenance task is in flight: these read and write
+    /// the same file and the same rows, and the window has one button rather than
+    /// two. The marker is cleared by whichever `finish_` the answer goes to.
+    pub fn begin_export(&mut self) -> Result<maintenance::ExportJob, String> {
+        self.begin_maintenance(maintenance::Kind::Export)?;
         let credentials = if self.export_includes_credentials {
             Credentials::Included
         } else {
             Credentials::Excluded
         };
-        let origin = ExportOrigin {
-            exported_at: crate::log_file::timestamp(SystemTime::now()),
-            source_data_dir: self.settings.data_dir().display().to_string(),
-        };
-        let destination = self.export_destination();
+        Ok(maintenance::ExportJob {
+            text: self.text(),
+            profiles: Arc::clone(&self.profiles),
+            cores: Arc::clone(&self.cores),
+            proxies: Arc::clone(&self.proxies),
+            credentials,
+            origin: ExportOrigin {
+                exported_at: crate::log_file::timestamp(SystemTime::now()),
+                source_data_dir: self.settings.data_dir().display().to_string(),
+            },
+            destination: self.export_destination(),
+        })
+    }
 
-        let result = application::read_configuration(&*self.profiles, &*self.cores, &*self.proxies)
-            .map_err(|error| t.export_read_failed(&error.to_string()))
-            .and_then(|snapshot| {
-                application::write_config_backup(snapshot, credentials, origin, &destination)
-                    .map_err(|error| t.export_write_failed(&error.to_string()))
-            });
-
-        match &result {
+    /// What an export did, said to the reader, and the marker let go.
+    pub fn finish_export(
+        &mut self,
+        destination: &std::path::Path,
+        result: &Result<ExportReport, String>,
+    ) {
+        self.maintenance = None;
+        let t = self.text();
+        match result {
             Ok(report) => self.set_notice(Notice::info(export_summary(report, t))),
-            Err(message) => self.set_notice(Notice::error(message.clone())),
+            // The report names the file it wrote; a failure has no report, so the
+            // sentence is the only place the destination appears.
+            Err(message) => {
+                let _ = destination;
+                self.set_notice(Notice::error(message.clone()));
+            }
         }
-        result
+    }
+
+    /// Records that a maintenance task has started, refusing a second one.
+    fn begin_maintenance(&mut self, kind: maintenance::Kind) -> Result<(), String> {
+        if let Some(running) = self.maintenance {
+            let message = self.text().maintenance_busy();
+            self.set_notice(Notice::error(message.clone()));
+            tracing::debug!("refused a {kind:?} while a {running:?} is running");
+            return Err(message);
+        }
+        self.maintenance = Some(kind);
+        Ok(())
+    }
+
+    /// Applies whatever a maintenance task reported.
+    ///
+    /// The one door the view's worker answers come through, so a new maintenance
+    /// task cannot report its result anywhere the window does not hear it. Each
+    /// `finish_` clears the marker, which is what lets the next task run: a task
+    /// that never let go would refuse every task after it.
+    pub fn finish_maintenance(&mut self, outcome: maintenance::Outcome) {
+        match outcome {
+            maintenance::Outcome::Exported {
+                destination,
+                result,
+            } => self.finish_export(&destination, &result),
+            maintenance::Outcome::Imported { source, result } => {
+                self.finish_import(&source, &result)
+            }
+            maintenance::Outcome::Restored { source, result } => {
+                self.finish_restore(&source, &result)
+            }
+            maintenance::Outcome::Redetected { id, result } => self.finish_redetect(id, &result),
+        }
     }
 
     pub fn set_import_path(&mut self, path: impl Into<String>) {
@@ -1651,35 +1729,49 @@ impl AppState {
     ///
     /// The rows are reloaded afterwards, because a Profiles page still showing
     /// the list from before the import would contradict the sentence above it.
-    pub fn import_configuration(&mut self) -> Result<ImportReport, String> {
-        let t = self.text();
+    /// The import, on the calling thread. See
+    /// [`AppState::export_configuration`] for why this exists.
+    #[cfg(test)]
+    pub(crate) fn import_configuration(&mut self) -> Result<ImportReport, String> {
+        let job = self.begin_import()?;
+        let source = job.source.clone();
+        let result = maintenance::run_import(job);
+        self.finish_import(&source, &result);
+        result
+    }
+
+    /// The import as a value, for a caller that will run it somewhere else.
+    ///
+    /// Every refusal that can be made before a thread is spawned is made here: no
+    /// path typed, another maintenance task in flight.
+    pub fn begin_import(&mut self) -> Result<maintenance::ImportJob, String> {
         let Some(source) = self.import_source() else {
             let message = "Type the path of a configuration backup to import.".to_string();
             self.set_notice(Notice::error(message.clone()));
             return Err(message);
         };
-        let data_dir = self.settings.data_dir().to_path_buf();
+        self.begin_maintenance(maintenance::Kind::Import)?;
+        Ok(maintenance::ImportJob {
+            text: self.text(),
+            source,
+            data_dir: self.settings.data_dir().to_path_buf(),
+            profiles: Arc::clone(&self.profiles),
+            cores: Arc::clone(&self.cores),
+            proxies: Arc::clone(&self.proxies),
+        })
+    }
 
-        let result = application::read_config_backup(&source)
-            .map_err(|error| t.file_read_failed(&error.to_string()))
-            .and_then(|document| {
-                application::read_configuration(&*self.profiles, &*self.cores, &*self.proxies)
-                    .map_err(|error| t.export_read_failed(&error.to_string()))
-                    .and_then(|present| {
-                        let plan = application::plan_import(&document, &present, &data_dir);
-                        application::apply_import(
-                            plan,
-                            &*self.cores,
-                            &*self.proxies,
-                            &*self.profiles,
-                        )
-                        .map_err(|error| t.config_write_failed(&error.to_string()))
-                    })
-            });
-
-        match &result {
+    /// What an import did, said to the reader, with the rows reloaded.
+    pub fn finish_import(
+        &mut self,
+        source: &std::path::Path,
+        result: &Result<ImportReport, String>,
+    ) {
+        self.maintenance = None;
+        let t = self.text();
+        match result {
             Ok(report) => {
-                let summary = import_summary(report, &source, t);
+                let summary = import_summary(report, source, t);
                 // An import that did less than the file asked for gets the
                 // banner, which stays until it is dismissed; one that did
                 // exactly what it asked gets a toast. That is what makes the
@@ -1693,7 +1785,6 @@ impl AppState {
             }
             Err(message) => self.set_notice(Notice::error(message.clone())),
         }
-        result
     }
 
     pub fn set_restore_path(&mut self, path: impl Into<String>) {
@@ -1747,7 +1838,27 @@ impl AppState {
     /// file and a handful of rows - and reloads the rows afterwards, because a
     /// list still showing what was replaced would contradict the sentence above
     /// it.
-    pub fn restore_configuration(&mut self, mode: RestoreMode) -> Result<RestoreReport, String> {
+    /// The restore, on the calling thread. See
+    /// [`AppState::export_configuration`] for why this exists.
+    #[cfg(test)]
+    pub(crate) fn restore_configuration(
+        &mut self,
+        mode: RestoreMode,
+    ) -> Result<RestoreReport, String> {
+        let job = self.begin_restore(mode)?;
+        let source = job.source.clone();
+        let result = maintenance::run_restore(job);
+        self.finish_restore(&source, &result);
+        result
+    }
+
+    /// The restore as a value, for a caller that will run it somewhere else.
+    ///
+    /// Every refusal the installation can make is made here, before a thread is
+    /// spawned: nothing typed, a running browser, a profile another operation is
+    /// holding, another maintenance task in flight. What is left for the worker is
+    /// what only the file can be refused for.
+    pub fn begin_restore(&mut self, mode: RestoreMode) -> Result<maintenance::RestoreJob, String> {
         let t = self.text();
         let Some(source) = self.restore_source() else {
             let message = t.restore_needs_path.to_string();
@@ -1772,35 +1883,30 @@ impl AppState {
             return Err(message);
         }
 
-        let data_dir = self.settings.data_dir().to_path_buf();
-        let result = application::read_config_backup(&source)
-            .map_err(|error| t.file_read_failed(&error.to_string()))
-            .and_then(|document| {
-                application::read_configuration(&*self.profiles, &*self.cores, &*self.proxies)
-                    .map_err(|error| t.export_read_failed(&error.to_string()))
-                    .and_then(|present| {
-                        let plan = application::plan_restore(&document, &present, &data_dir, mode)
-                            .map_err(|error| match error {
-                                RestoreError::NotEmpty { present } => {
-                                    t.restore_not_empty(&t.counts_phrase(
-                                        present.cores,
-                                        present.proxies,
-                                        present.profiles,
-                                    ))
-                                }
-                                // The file's own faults. Each says what is wrong
-                                // with it, because there is nothing the reader
-                                // could do to the installation to make it fit.
-                                other => t.restore_refused(&other.to_string()),
-                            })?;
-                        application::apply_restore(plan, &present, self.configuration.as_ref())
-                            .map_err(|error| t.config_write_failed(&error.to_string()))
-                    })
-            });
+        self.begin_maintenance(maintenance::Kind::Restore)?;
+        Ok(maintenance::RestoreJob {
+            text: t,
+            source,
+            data_dir: self.settings.data_dir().to_path_buf(),
+            mode,
+            profiles: Arc::clone(&self.profiles),
+            cores: Arc::clone(&self.cores),
+            proxies: Arc::clone(&self.proxies),
+            configuration: Arc::clone(&self.configuration),
+        })
+    }
 
-        match &result {
+    /// What a restore did, said to the reader, with the rows reloaded.
+    pub fn finish_restore(
+        &mut self,
+        source: &std::path::Path,
+        result: &Result<RestoreReport, String>,
+    ) {
+        self.maintenance = None;
+        let t = self.text();
+        match result {
             Ok(report) => {
-                let summary = restore_summary(report, &source, t);
+                let summary = restore_summary(report, source, t);
                 self.set_notice(if report.needs_attention() {
                     Notice::error(summary)
                 } else {
@@ -1810,7 +1916,6 @@ impl AppState {
             }
             Err(message) => self.set_notice(Notice::error(message.clone())),
         }
-        result
     }
 
     pub fn set_browser_data_path(&mut self, path: impl Into<String>) {
@@ -1955,16 +2060,49 @@ impl AppState {
     }
 
     /// Re-reads a core's version, for a binary that was replaced in place.
-    pub fn redetect_core(&mut self, id: CoreId) -> Result<(), AppError> {
-        let t = self.text();
-        let refreshed = self.record(self.cores.redetect(id))?;
-        self.set_notice(Notice::info(t.core_refreshed(
-            &refreshed.name,
-            &refreshed.version,
-            refreshed.major,
-        )));
-        self.load_rows()?;
+    ///
+    /// The synchronous half of this is for tests, for the same reason the other
+    /// three are: the window runs the probe on a worker.
+    #[cfg(test)]
+    pub(crate) fn redetect_core(&mut self, id: CoreId) -> Result<(), AppError> {
+        // Reading a version starts the core's binary and waits for it to answer,
+        // which is why the window runs this on a worker; a caller that wants the
+        // answer before returning gets the same three steps in a row.
+        let job = self.begin_redetect(id).map_err(AppError::Other)?;
+        let result = maintenance::run_redetect(job);
+        self.finish_redetect(id, &result);
         Ok(())
+    }
+
+    /// The version probe as a value, for a caller that will run it somewhere else.
+    pub fn begin_redetect(&mut self, id: CoreId) -> Result<maintenance::RedetectJob, String> {
+        self.begin_maintenance(maintenance::Kind::Redetect)?;
+        Ok(maintenance::RedetectJob {
+            id,
+            cores: Arc::clone(&self.cores),
+        })
+    }
+
+    /// What a version probe found, said to the reader, with the rows reloaded.
+    pub fn finish_redetect(&mut self, id: CoreId, result: &Result<BrowserCore, String>) {
+        self.maintenance = None;
+        let t = self.text();
+        match result {
+            Ok(refreshed) => {
+                self.set_notice(Notice::info(t.core_refreshed(
+                    &refreshed.name,
+                    &refreshed.version,
+                    refreshed.major,
+                )));
+                let _ = self.load_rows();
+            }
+            // The probe is the failure: a missing binary, a version that cannot be
+            // read, a program that never answers.
+            Err(message) => {
+                let _ = id;
+                self.set_notice(Notice::error(message.clone()));
+            }
+        }
     }
 
     /// Removes a core. Refused while a profile still launches with it.
@@ -5261,6 +5399,58 @@ mod tests {
                 }),
             )
             .expect("create proxy")
+    }
+
+    /// One configuration task at a time, and the marker is what makes it so.
+    ///
+    /// The four of them read and write the same rows and the same file, and two
+    /// clicks arriving before the first answer would otherwise interleave an
+    /// import with the restore that is replacing everything it is importing into.
+    #[test]
+    fn a_second_configuration_task_is_refused_while_one_is_running() {
+        let scratch = Scratch::new("one-at-a-time");
+        let mut fixture = fixture();
+        fixture.state.set_export_path(
+            scratch
+                .dir
+                .join("config.json")
+                .to_string_lossy()
+                .to_string(),
+        );
+
+        // A path, so the refusal below is about the task in flight rather than
+        // about an empty field.
+        fixture.state.set_import_path(
+            scratch
+                .dir
+                .join("elsewhere.json")
+                .to_string_lossy()
+                .to_string(),
+        );
+        let job = fixture.state.begin_export().expect("the first task");
+        // No answer has come back yet, which is exactly when a second click
+        // happens.
+        let refused = fixture
+            .state
+            .begin_import()
+            .err()
+            .expect("one configuration task at a time");
+        assert!(refused.contains("still running"), "{refused}");
+        let notice = fixture.state.notice().expect("a notice");
+        assert!(notice.error, "{notice:?}");
+        assert_eq!(notice.message, refused);
+
+        // The answer lets the next one in - a failure as much as a success, or the
+        // window would refuse every task after the first that went wrong.
+        let destination = job.destination.clone();
+        let result = maintenance::run_export(job);
+        fixture
+            .state
+            .finish_maintenance(maintenance::Outcome::Exported {
+                destination,
+                result,
+            });
+        fixture.state.begin_export().expect("the marker was let go");
     }
 
     #[test]

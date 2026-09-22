@@ -73,6 +73,17 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Changed
 
+- Writing a configuration backup, importing one, restoring one and re-reading a
+  core's version no longer run on the thread that draws the window. All four are
+  slow in the way a page switch is not - an export reads every core, proxy and
+  profile, an import then writes every record in the file one at a time, a restore
+  replaces the whole configuration in one transaction, and a version probe starts a
+  program and waits for it to answer - and each of them used to run inside its own
+  click handler, so the window stopped redrawing until it finished. They now run on
+  a worker and report one answer type through one channel, so a fifth task cannot
+  report somewhere the window does not hear it. Only one runs at a time: they read
+  and write the same rows and the same file, and a second click while one is
+  running is refused with a sentence rather than interleaved with it.
 - A new profile's fingerprint seed now comes from the operating system's entropy
   rather than from the clock. The seed is what makes two profiles' fingerprints
   differ, so a repeated seed is two profiles a site can correlate and a guessable
