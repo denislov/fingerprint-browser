@@ -200,12 +200,12 @@ const LOCK_OFFSET: i64 = 1 << 20;
 #[cfg(windows)]
 fn overlapped() -> windows_sys::Win32::System::IO::OVERLAPPED {
     let mut overlapped = windows_sys::Win32::System::IO::OVERLAPPED::default();
-    // SAFETY: the union's other arm is a pointer this call does not read; the
-    // offset is written as the two halves the API takes.
-    unsafe {
-        overlapped.Anonymous.Anonymous.Offset = LOCK_OFFSET as u32;
-        overlapped.Anonymous.Anonymous.OffsetHigh = (LOCK_OFFSET >> 32) as u32;
-    }
+    // No `unsafe`: the offset is written as the two halves the API takes, and
+    // writing a union field is not the access that needs it - only *reading* one
+    // is, because that is the one that can produce a value the arm does not hold.
+    // The union's other arm is a pointer this code never reads.
+    overlapped.Anonymous.Anonymous.Offset = LOCK_OFFSET as u32;
+    overlapped.Anonymous.Anonymous.OffsetHigh = (LOCK_OFFSET >> 32) as u32;
     overlapped
 }
 
