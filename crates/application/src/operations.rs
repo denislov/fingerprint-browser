@@ -122,6 +122,7 @@ impl Operations {
             operations: Arc::clone(self),
             profiles: taken,
             operation,
+            installation: None,
         })
     }
 
@@ -185,6 +186,14 @@ pub struct Held {
     operations: Arc<Operations>,
     profiles: Vec<ProfileId>,
     operation: Operation,
+    installation: Option<crate::coordination::InstallationLease>,
+}
+
+impl Held {
+    pub fn with_installation(mut self, lease: crate::coordination::InstallationLease) -> Self {
+        self.installation = Some(lease);
+        self
+    }
 }
 
 impl Drop for Held {

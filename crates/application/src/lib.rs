@@ -1,5 +1,6 @@
 pub mod browser_data;
 pub mod config_backup;
+pub mod coordination;
 pub mod core_service;
 pub mod error;
 pub mod export;

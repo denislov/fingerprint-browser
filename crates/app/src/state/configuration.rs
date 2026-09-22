@@ -364,8 +364,10 @@ impl AppState {
             return Err(message);
         }
 
+        let installation = self.installation.exclusive().map_err(|e| e.to_string())?;
         self.begin_maintenance(maintenance::Kind::Restore)?;
         Ok(maintenance::RestoreJob {
+            _installation: installation,
             text: t,
             source,
             data_dir: self.settings.data_dir().to_path_buf(),
@@ -425,6 +427,7 @@ impl AppState {
         &mut self,
         direction: Direction,
     ) -> Result<(BrowserDataJob, Held), String> {
+        let installation = self.installation.shared().map_err(|e| e.to_string())?;
         let t = self.text();
         let directory = self
             .browser_data_directory()
@@ -474,7 +477,7 @@ impl AppState {
             running: active,
             directory,
         };
-        Ok((job, lease))
+        Ok((job, lease.with_installation(installation)))
     }
 
     /// Reports the outcome of a browser-data copy the worker finished.

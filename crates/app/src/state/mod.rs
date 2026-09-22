@@ -661,6 +661,7 @@ impl CoreChoice {
 }
 
 pub struct AppState {
+    installation: Arc<application::coordination::Installation>,
     profiles: Arc<dyn ProfileService>,
     runtime: Arc<RuntimeService>,
     cores: Arc<dyn CoreService>,
@@ -837,7 +838,21 @@ impl AppState {
             proxies,
             configuration,
         } = services;
+        let installation = Arc::new(application::coordination::Installation::default());
+        let profiles = Arc::new(application::coordination::Coordinated {
+            service: profiles,
+            installation: Arc::clone(&installation),
+        }) as Arc<dyn ProfileService>;
+        let cores = Arc::new(application::coordination::Coordinated {
+            service: cores,
+            installation: Arc::clone(&installation),
+        }) as Arc<dyn CoreService>;
+        let proxies = Arc::new(application::coordination::Coordinated {
+            service: proxies,
+            installation: Arc::clone(&installation),
+        }) as Arc<dyn ProxyService>;
         Self {
+            installation,
             profiles,
             runtime,
             cores,

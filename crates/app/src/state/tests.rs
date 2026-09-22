@@ -127,6 +127,33 @@ fn seed_core(fixture: &Fixture) -> CoreId {
 }
 
 #[test]
+fn restore_holds_the_installation_until_its_worker_finishes() {
+    let mut fixture = fixture();
+    seed_core(&fixture);
+    fixture.state.load().unwrap();
+    let id = fixture.state.create_profile("Original").unwrap();
+    fixture
+        .state
+        .set_restore_path("/not-read-until-worker/config.json");
+    fixture.state.set_browser_data_path("/backups/fp");
+    let job = fixture.state.begin_restore(RestoreMode::Replace).unwrap();
+    assert!(fixture.state.start(id).is_err());
+    assert!(fixture.state.create_profile("During restore").is_err());
+    assert!(fixture.state.delete_profile(id).is_err());
+    let mut edited = fixture.state.profile(id).unwrap();
+    edited.name = "Changed".into();
+    // The service itself is guarded, independently of the UI entry point.
+    assert!(fixture.state.profiles.update(edited).is_err());
+    assert!(fixture.state.browser_data_job(Direction::ToBackup).is_err());
+    assert!(fixture.runtime.commands.lock().unwrap().is_empty());
+    drop(job);
+    fixture
+        .state
+        .finish_restore(std::path::Path::new("unused"), &Err("cancelled".into()));
+    assert!(fixture.state.create_profile("After restore").is_ok());
+}
+
+#[test]
 fn editing_a_profile_writes_it_and_keeps_the_row_in_step() {
     let mut fixture = fixture();
     seed_core(&fixture);

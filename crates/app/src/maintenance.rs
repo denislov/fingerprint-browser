@@ -86,6 +86,7 @@ pub struct ImportJob {
 /// Everything a restore needs, including the repository that replaces the whole
 /// configuration as one thing.
 pub struct RestoreJob {
+    pub _installation: application::coordination::InstallationLease,
     pub text: &'static Text,
     pub source: PathBuf,
     pub data_dir: PathBuf,

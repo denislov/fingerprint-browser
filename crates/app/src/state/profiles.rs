@@ -184,6 +184,7 @@ impl AppState {
     /// stops saying the profile is stopped, and [`Operations::expire`] gives it
     /// back if the runtime never says anything at all.
     pub(super) fn begin_starting(&self, id: ProfileId) -> Result<(), AppError> {
+        let _installation = self.installation.shared()?;
         let t = self.text();
         self.operations
             .take(id, Operation::Starting)
