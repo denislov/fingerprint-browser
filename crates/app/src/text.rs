@@ -1378,6 +1378,40 @@ impl Text {
         }
     }
 
+    /// The refusal of a start whose proxy did not answer.
+    ///
+    /// Named rather than counted, and the profile comes first: the reader pressed
+    /// Start on that profile, so the proxy is the reason rather than the subject.
+    /// The fault follows, because which stage of the path failed is what says
+    /// whether to wait, to fix the proxy, or to fix the endpoint the check asks.
+    pub fn proxy_blocks_start(&self, profile: &str, proxy: &str, fault: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "Did not start {profile}: it uses {proxy}, and no traffic got through. {fault}"
+            ),
+            Lang::Zh => format!("未启动 {profile}：它使用代理 {proxy}，流量没有通过。{fault}"),
+        }
+    }
+
+    /// The line that says a start waited for its proxy and then went ahead.
+    pub fn started_through_proxy(&self, profile: &str, proxy: &str, exit_ip: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Started {profile} through {proxy}, leaving from {exit_ip}"),
+            Lang::Zh => format!("已通过代理 {proxy} 启动 {profile}，出口地址 {exit_ip}"),
+        }
+    }
+
+    /// Why a start could not even be checked: no such proxy, or one that cannot
+    /// be tested at all.
+    pub fn start_not_checked(&self, profile: &str, reason: &str) -> String {
+        match self.lang {
+            Lang::En => {
+                format!("Did not start {profile}: its proxy could not be checked. {reason}")
+            }
+            Lang::Zh => format!("未启动 {profile}：无法检查它使用的代理。{reason}"),
+        }
+    }
+
     pub fn proxy_test_log(&self, name: &str, detail: &str) -> String {
         match self.lang {
             Lang::En => format!("proxy test: {name} - {detail}"),

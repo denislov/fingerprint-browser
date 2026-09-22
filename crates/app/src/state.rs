@@ -24,7 +24,7 @@ use domain::{
     RuntimeState,
 };
 use runtime::{Diagnosis, Discrepancy, Fault, RuntimeComponent, RuntimeEvent, RuntimeSnapshot};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -215,11 +215,22 @@ pub struct ProfileRow {
     pub core_name: String,
     pub proxy_name: Option<String>,
     pub snapshot: Option<RuntimeSnapshot>,
+    /// True while this profile's start is waiting for its proxy to answer.
+    ///
+    /// A start that has to check its proxy has asked for a browser and not been
+    /// given one yet, and the runtime has heard nothing about it: the snapshot
+    /// still says stopped. `Starting` is exactly what that is, and it is what
+    /// keeps the row honest - the profile is on its way, and the Stop button
+    /// beside it is what calls it off.
+    pub checking_proxy: bool,
 }
 
 impl ProfileRow {
     /// Snapshot state, or `Stopped` when the profile was never started.
     pub fn state(&self) -> RuntimeState {
+        if self.checking_proxy {
+            return RuntimeState::Starting;
+        }
         self.snapshot
             .as_ref()
             .map(|snapshot| snapshot.state.clone())
@@ -696,6 +707,37 @@ pub struct AppState {
     /// its command is queued, and the state it produces is published a tick
     /// later. Everything that must not overlap with a start or a copy asks here.
     operations: Arc<Operations>,
+    /// The starts that are waiting for a proxy to answer, by profile, and which
+    /// opening each of them is: a start or a restart.
+    ///
+    /// The command is not queued until the answer is in, so this is what the
+    /// answer is matched against - one entry per profile, because a profile is
+    /// exactly as busy as the lease above says it is.
+    pending_starts: BTreeMap<ProfileId, (ProxyId, Opening)>,
+}
+
+/// Which way a profile is about to be opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opening {
+    Start,
+    /// Stop it and start it again, in one command.
+    Restart,
+}
+
+/// What opening a profile still needs before its command is queued.
+#[derive(Debug, Clone)]
+pub enum StartGate {
+    /// The command is queued: nothing had to be asked first.
+    Queued,
+    /// A test of this profile's proxy is already in flight, so this opening waits
+    /// for that answer rather than asking a second time.
+    Awaiting,
+    /// The proxy has to be asked first, and this is the job that asks it.
+    ///
+    /// Boxed because the job carries a whole proxy profile and the other two
+    /// variants carry nothing: an enum that is 464 bytes for the two answers that
+    /// need no data at all is a cost paid on every one of them.
+    Checking(Box<ProxyTestJob>),
 }
 
 /// What the window's state writes through.
@@ -786,6 +828,7 @@ impl AppState {
             restore_path: String::new(),
             browser_data_path: String::new(),
             operations: Arc::new(Operations::default()),
+            pending_starts: BTreeMap::new(),
         }
     }
 
@@ -825,6 +868,7 @@ impl AppState {
                 let proxy_name = profile.proxy_id.and_then(|id| proxies.get(&id).cloned());
                 let snapshot = runtime.snapshot(profile.id);
                 ProfileRow {
+                    checking_proxy: self.pending_starts.contains_key(&profile.id),
                     profile,
                     core_name,
                     proxy_name,
@@ -846,6 +890,7 @@ impl AppState {
     pub fn refresh_runtime(&mut self) {
         let runtime = Arc::clone(&self.runtime);
         for row in &mut self.rows {
+            row.checking_proxy = self.pending_starts.contains_key(&row.profile.id);
             row.snapshot = runtime.snapshot(row.profile.id);
             // A start lease is held only until the runtime has said something
             // about it. The snapshot is what says it: once the profile is no
@@ -866,12 +911,25 @@ impl AppState {
         }
 
         for profile in self.operations.expire(START_LEASE) {
+            if self.pending_starts.contains_key(&profile) {
+                // A proxy is still being asked about this profile, and the lease
+                // is what keeps it to itself while that happens. Taking it again
+                // restarts the clock rather than handing the profile out from
+                // under a check that is still running.
+                let _ = self.operations.take(profile, Operation::Starting);
+                continue;
+            }
             tracing::warn!(
                 "no answer for the start of {} within {}s; the profile is free again",
                 self.profile_name(profile),
                 START_LEASE.as_secs()
             );
         }
+    }
+
+    /// The row of one profile, for the places that ask about it by identifier.
+    pub fn row(&self, id: ProfileId) -> Option<&ProfileRow> {
+        self.rows.iter().find(|row| row.profile.id == id)
     }
 
     pub fn rows(&self) -> &[ProfileRow] {
@@ -1957,19 +2015,135 @@ impl AppState {
         Ok(id)
     }
 
-    pub fn start(&mut self, id: ProfileId) -> Result<(), AppError> {
+    /// Opens a profile, once its proxy has said it can carry the traffic.
+    ///
+    /// The gate is the whole point of this method. A profile that leaves through a
+    /// proxy is only useful while that proxy carries traffic, and a launch that
+    /// goes ahead without it produces the worst of both outcomes: a browser that
+    /// looks healthy while its traffic leaks, or one whose first page never
+    /// loads. So the command is not queued until one request has come back
+    /// through the same engine the profile would use - [`crate::proxy_tester`],
+    /// the same question the Proxies page asks by hand.
+    ///
+    /// The lease is taken here, before the check, and that is what makes the two
+    /// halves one operation: while the proxy is being asked, the profile is
+    /// already busy - a second start, a restart and a browser-data copy are all
+    /// refused - and a check that fails gives the lease back, so the profile can
+    /// be tried again as soon as the proxy is fixed.
+    ///
+    /// A profile with no proxy has nothing to ask, so it is queued here and the
+    /// answer is [`StartGate::Queued`].
+    pub fn begin_opening(&mut self, id: ProfileId, how: Opening) -> Result<StartGate, AppError> {
         self.begin_starting(id)?;
-        if let Err(error) = self.record(self.runtime.start(id)) {
-            // The command never reached the runtime, so no snapshot will ever
-            // answer for it: give the profile back here rather than at the tick.
-            self.operations.free(id, Operation::Starting);
-            return Err(error);
+
+        let Some(proxy_id) = self.profile(id).and_then(|profile| profile.proxy_id) else {
+            // Nothing to ask: the request a check would send is the one the
+            // browser makes for its own first page anyway.
+            return match self.queue_opening(id, how) {
+                Ok(()) => Ok(StartGate::Queued),
+                Err(error) => {
+                    // The command never reached the runtime, so no snapshot will
+                    // ever answer for it: give the profile back here rather than
+                    // at the tick.
+                    self.operations.free(id, Operation::Starting);
+                    Err(error)
+                }
+            };
+        };
+
+        // A test of this proxy is already in flight - the Proxies page's own
+        // button, or another profile's start. Its answer is the answer this
+        // opening needs, so it waits for it instead of refusing and making the
+        // reader press Start again a few seconds later.
+        if self
+            .proxy_tests
+            .get(&proxy_id)
+            .is_some_and(ProxyTest::is_running)
+        {
+            self.pending_starts.insert(id, (proxy_id, how));
+            self.set_checking_proxy(id, true);
+            return Ok(StartGate::Awaiting);
+        }
+
+        match self.begin_proxy_test(proxy_id) {
+            Ok(job) => {
+                self.pending_starts.insert(id, (proxy_id, how));
+                self.set_checking_proxy(id, true);
+                Ok(StartGate::Checking(Box::new(job)))
+            }
+            Err(error) => {
+                // No such proxy, or one that cannot be tested at all. Nothing is
+                // going to answer for this profile, so it is refused now rather
+                // than left waiting for an answer that was never asked for.
+                self.operations.free(id, Operation::Starting);
+                let message = {
+                    let t = self.text();
+                    t.start_not_checked(&self.profile_name(id), &error.to_string())
+                };
+                self.set_notice(Notice::error(message));
+                Err(error)
+            }
+        }
+    }
+
+    /// Queues the command an opening was holding, for a profile that holds its
+    /// lease.
+    ///
+    /// The second half of [`AppState::begin_opening`]: either nothing had to be
+    /// asked, or the proxy has just answered. Fails only when the command itself
+    /// does, and the caller is what gives the lease back in that case.
+    fn queue_opening(&mut self, id: ProfileId, how: Opening) -> Result<(), AppError> {
+        let result = match how {
+            Opening::Start => self.runtime.start(id),
+            Opening::Restart => self.runtime.restart(id),
+        };
+        self.record(result)?;
+        if how == Opening::Restart {
+            // A restarted browser is a new browser: the old reading is stale.
+            self.forget_verification(id);
         }
         self.refresh_runtime();
         Ok(())
     }
 
+    /// Starts a profile without asking its proxy first.
+    ///
+    /// The command half of [`AppState::begin_opening`], for a caller that has
+    /// already decided: a test, or the acceptance harness that drives the state
+    /// directly. The window never uses it - `begin_opening` is what makes a start
+    /// wait for the proxy, and a second way in would be a way around that.
+    #[cfg(test)]
+    pub(crate) fn start(&mut self, id: ProfileId) -> Result<(), AppError> {
+        self.begin_starting(id)?;
+        if let Err(error) = self.queue_opening(id, Opening::Start) {
+            self.operations.free(id, Operation::Starting);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn restart(&mut self, id: ProfileId) -> Result<(), AppError> {
+        self.begin_starting(id)?;
+        if let Err(error) = self.queue_opening(id, Opening::Restart) {
+            self.operations.free(id, Operation::Starting);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn stop(&mut self, id: ProfileId) -> Result<(), AppError> {
+        // A stop pressed while the proxy is still being asked calls the start
+        // off rather than stopping a browser that was never launched: the command
+        // would reach a runtime with nothing to stop, and the answer to the check
+        // would then start the profile the reader just called off.
+        if self.pending_starts.remove(&id).is_some() {
+            self.operations.free(id, Operation::Starting);
+            self.set_checking_proxy(id, false);
+            self.refresh_runtime();
+            return Ok(());
+        }
+
         self.record(self.runtime.stop(id))?;
         // The reading described a browser that no longer exists.
         self.forget_verification(id);
@@ -1977,16 +2151,11 @@ impl AppState {
         Ok(())
     }
 
-    pub fn restart(&mut self, id: ProfileId) -> Result<(), AppError> {
-        self.begin_starting(id)?;
-        if let Err(error) = self.record(self.runtime.restart(id)) {
-            self.operations.free(id, Operation::Starting);
-            return Err(error);
+    /// Marks a row as waiting for its proxy, now rather than at the next tick.
+    fn set_checking_proxy(&mut self, id: ProfileId, checking: bool) {
+        if let Some(row) = self.rows.iter_mut().find(|row| row.profile.id == id) {
+            row.checking_proxy = checking;
         }
-        // A restarted browser is a new browser: the old reading is stale.
-        self.forget_verification(id);
-        self.refresh_runtime();
-        Ok(())
     }
 
     /// Takes the profile for a start that is about to be queued.
@@ -2020,9 +2189,7 @@ impl AppState {
 
     /// The name of a profile, or its identifier when storage no longer has it.
     fn profile_name(&self, id: ProfileId) -> String {
-        self.rows
-            .iter()
-            .find(|row| row.profile.id == id)
+        self.row(id)
             .map(|row| row.profile.name.clone())
             .unwrap_or_else(|| id.to_string())
     }
@@ -2049,6 +2216,12 @@ impl AppState {
     /// Removes a profile. Its browser data is kept on disk: deleting a profile
     /// should not be the same decision as destroying its sessions.
     pub fn delete_profile(&mut self, id: ProfileId) -> Result<(), AppError> {
+        // A profile that is being checked has no browser yet; leaving the check
+        // pending would start a profile that no longer exists, so it is called
+        // off with the record.
+        if self.pending_starts.remove(&id).is_some() {
+            self.operations.free(id, Operation::Starting);
+        }
         self.record(self.profiles.delete(id, DeleteMode::KeepUserData))?;
         self.forget_verification(id);
         if self.selected == Some(id) {
@@ -2231,21 +2404,71 @@ impl AppState {
             .map(|proxy| proxy.name)
             .unwrap_or_else(|| t.a_removed_profile.to_string());
 
+        // The openings that were waiting for this answer, taken out first: the
+        // answer is what decides them, and a test that is only a reading has
+        // none.
+        let waiting: Vec<(ProfileId, Opening)> = self
+            .pending_starts
+            .iter()
+            .filter(|(_, (proxy_id, _))| *proxy_id == id)
+            .map(|(profile, (_, how))| (*profile, *how))
+            .collect();
+        for (profile, _) in &waiting {
+            self.pending_starts.remove(profile);
+            self.set_checking_proxy(*profile, false);
+        }
+
         match &test {
             ProxyTest::Passed(reading) => {
-                self.toast(
-                    ToastKind::Success,
-                    t.proxy_traffic_from(&name, &reading.exit_ip),
-                );
+                if waiting.is_empty() {
+                    self.toast(
+                        ToastKind::Success,
+                        t.proxy_traffic_from(&name, &reading.exit_ip),
+                    );
+                }
+                // A start that waited for this reading is the reason the reading
+                // was taken, so its sentence is the one the reader is waiting
+                // for. The profile's lease is already held, and queuing is what
+                // the answer buys.
+                for (profile, how) in waiting {
+                    let profile_name = self.profile_name(profile);
+                    match self.queue_opening(profile, how) {
+                        Ok(()) => self.toast(
+                            ToastKind::Success,
+                            t.started_through_proxy(&profile_name, &name, &reading.exit_ip),
+                        ),
+                        Err(_) => {
+                            // `queue_opening` recorded the reason; nothing may be
+                            // left holding the profile.
+                            self.operations.free(profile, Operation::Starting);
+                        }
+                    }
+                }
             }
             ProxyTest::Failed(fault) => {
-                // The class is what to act on, so it goes first; the evidence
-                // follows, because a dashboard line is too short to hold it and
-                // this is the one moment the user is thinking about this proxy.
-                self.toast(
-                    ToastKind::Error,
-                    t.proxy_no_traffic_reached(&name, &fault.to_string()),
-                );
+                if waiting.is_empty() {
+                    // The class is what to act on, so it goes first; the evidence
+                    // follows, because a dashboard line is too short to hold it
+                    // and this is the one moment the user is thinking about this
+                    // proxy.
+                    self.toast(
+                        ToastKind::Error,
+                        t.proxy_no_traffic_reached(&name, &fault.to_string()),
+                    );
+                }
+                for (profile, _) in waiting {
+                    // The refusal, and the profile is free again: a proxy that is
+                    // down now may be up in a minute, and the reader has to be
+                    // able to press Start then.
+                    self.operations.free(profile, Operation::Starting);
+                    let message = t.proxy_blocks_start(
+                        &self.profile_name(profile),
+                        &name,
+                        &fault.to_string(),
+                    );
+                    self.set_notice(Notice::error(message.clone()));
+                    self.toast(ToastKind::Error, message);
+                }
             }
             ProxyTest::Running => {}
         }
@@ -5543,6 +5766,272 @@ mod tests {
     /// its command is queued, so a profile whose browser is coming up still reads
     /// as stopped. The worker is what holds the copy's lease, so the test holds it
     /// the same way - by keeping the value alive.
+    /// A stopped profile that leaves through a proxy, ready to be opened.
+    fn proxied(fixture: &mut Fixture, name: &str) -> (ProfileId, ProxyId) {
+        seed_core(fixture);
+        fixture.state.load().expect("load");
+        let id = fixture.state.create_profile(name).expect("create");
+        let proxy_id = fixture
+            .state
+            .create_proxy("Office", socks5("10.0.0.1", 1080))
+            .expect("create proxy");
+        let mut profile = fixture.state.profile(id).expect("the profile");
+        profile.proxy_id = Some(proxy_id);
+        fixture.state.update_profile(profile).expect("assign");
+        (id, proxy_id)
+    }
+
+    /// The reading a passing test produces, for the tests that only care that
+    /// something came back.
+    fn through_the_proxy() -> Result<Diagnosis, Fault> {
+        Ok(Diagnosis {
+            exit_ip: "198.51.100.9".to_string(),
+            elapsed: Duration::from_millis(120),
+        })
+    }
+
+    fn commands(fixture: &Fixture) -> Vec<String> {
+        fixture.runtime.commands.lock().expect("commands").clone()
+    }
+
+    /// A profile whose traffic leaves through a proxy is only as usable as that
+    /// proxy: the command waits until a request has come back through it.
+    ///
+    /// The window is the whole reason the gate is where it is. `start` returns as
+    /// soon as its command is queued, so a launch that went ahead first and asked
+    /// afterwards would produce a browser that is already running by the time
+    /// anybody knows the proxy is down - which is a browser whose traffic leaks,
+    /// or one that shows nothing but network errors.
+    #[test]
+    fn opening_a_proxied_profile_asks_its_proxy_first() {
+        let mut fixture = fixture();
+        let (id, proxy_id) = proxied(&mut fixture, "Work laptop");
+
+        let gate = fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect("the gate");
+        let StartGate::Checking(job) = gate else {
+            panic!("a proxied profile is checked first: {gate:?}");
+        };
+        assert_eq!(job.proxy_id, proxy_id);
+        assert_eq!(job.proxy.name, "Office");
+        assert!(
+            job.live_port.is_none(),
+            "nothing is up for this proxy, so the check is a rehearsal"
+        );
+        assert_eq!(
+            fixture.state.proxy_test(proxy_id),
+            Some(&ProxyTest::Running),
+            "the proxy row shows the check that is in flight"
+        );
+        assert!(
+            commands(&fixture).is_empty(),
+            "no command reaches the runtime before the answer"
+        );
+        assert_eq!(
+            fixture.state.row(id).expect("the row").state(),
+            RuntimeState::Starting,
+            "a profile waiting for its proxy is on its way, not stopped"
+        );
+
+        // The answer is what queues it, and the sentence says both halves.
+        fixture
+            .state
+            .finish_proxy_test(proxy_id, false, through_the_proxy());
+        assert_eq!(commands(&fixture), [format!("start:{id}")]);
+        let message = last_message(&fixture);
+        assert!(
+            message.contains("Started Work laptop through Office"),
+            "{message}"
+        );
+        assert!(message.contains("198.51.100.9"), "{message}");
+        assert_eq!(
+            fixture.state.row(id).expect("the row").state(),
+            RuntimeState::Running
+        );
+        assert_eq!(
+            fixture.state.operations.held(id),
+            None,
+            "the snapshot answered, so the start's lease is done"
+        );
+    }
+
+    /// A proxy that carries nothing refuses the start, names both ends, and gives
+    /// the profile back so the next attempt is possible.
+    #[test]
+    fn opening_a_proxied_profile_is_refused_when_its_proxy_has_no_traffic() {
+        let mut fixture = fixture();
+        let (id, proxy_id) = proxied(&mut fixture, "Work laptop");
+        fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect("the gate");
+
+        fixture.state.finish_proxy_test(
+            proxy_id,
+            false,
+            Err(Fault::new(FaultClass::Unreachable, "no route to host")),
+        );
+
+        assert!(
+            commands(&fixture).is_empty(),
+            "a refused start queues nothing"
+        );
+        assert_eq!(
+            fixture.state.row(id).expect("the row").state(),
+            RuntimeState::Stopped,
+            "the profile is stopped again, not left reading as starting"
+        );
+        let message = last_message(&fixture);
+        assert!(message.contains("Work laptop"), "{message}");
+        assert!(message.contains("Office"), "{message}");
+        assert!(message.contains("no route to host"), "{message}");
+        assert_eq!(
+            fixture.state.operations.held(id),
+            None,
+            "a proxy that is down now may be up in a minute: the profile is free"
+        );
+
+        // Which is what the next press of Start needs.
+        let again = fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect("a second attempt");
+        assert!(matches!(again, StartGate::Checking(_)));
+    }
+
+    #[test]
+    fn opening_a_profile_without_a_proxy_asks_nothing() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture.state.create_profile("Plain").expect("create");
+
+        let gate = fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect("the gate");
+
+        assert!(matches!(gate, StartGate::Queued));
+        assert_eq!(commands(&fixture), [format!("start:{id}")]);
+        assert_eq!(
+            fixture.state.row(id).expect("the row").state(),
+            RuntimeState::Running
+        );
+    }
+
+    /// A test of this proxy is already in flight - the Proxies page's own button.
+    /// Its answer is the answer the start needs, so the start waits for it rather
+    /// than refusing and making the reader press Start again.
+    #[test]
+    fn a_start_joins_a_proxy_test_that_is_already_in_flight() {
+        let mut fixture = fixture();
+        let (id, proxy_id) = proxied(&mut fixture, "Work laptop");
+        fixture
+            .state
+            .begin_proxy_test(proxy_id)
+            .expect("the row's own test");
+
+        let gate = fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect("the gate");
+        assert!(matches!(gate, StartGate::Awaiting));
+        assert!(commands(&fixture).is_empty());
+
+        fixture
+            .state
+            .finish_proxy_test(proxy_id, false, through_the_proxy());
+        assert_eq!(commands(&fixture), [format!("start:{id}")]);
+    }
+
+    /// A restart goes through the same gate: it is the same browser on the same
+    /// proxy.
+    #[test]
+    fn restarting_a_proxied_profile_asks_its_proxy_too() {
+        let mut fixture = fixture();
+        let (id, proxy_id) = proxied(&mut fixture, "Work laptop");
+
+        let gate = fixture
+            .state
+            .begin_opening(id, Opening::Restart)
+            .expect("the gate");
+        assert!(matches!(gate, StartGate::Checking(_)));
+        assert!(commands(&fixture).is_empty());
+
+        fixture
+            .state
+            .finish_proxy_test(proxy_id, false, through_the_proxy());
+        assert_eq!(commands(&fixture), [format!("restart:{id}")]);
+    }
+
+    /// A stop pressed while the proxy is still being asked calls the start off.
+    /// The command would reach a runtime with nothing to stop, and the answer to
+    /// the check would then start the profile the reader just called off.
+    #[test]
+    fn stopping_calls_off_a_start_that_is_waiting_for_its_proxy() {
+        let mut fixture = fixture();
+        let (id, proxy_id) = proxied(&mut fixture, "Work laptop");
+        fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect("the gate");
+
+        fixture.state.stop(id).expect("stop");
+
+        assert_eq!(
+            fixture.state.row(id).expect("the row").state(),
+            RuntimeState::Stopped
+        );
+        assert!(
+            commands(&fixture).is_empty(),
+            "nothing was started, and there was nothing to stop"
+        );
+
+        // The answer arrives late and starts nothing.
+        fixture
+            .state
+            .finish_proxy_test(proxy_id, false, through_the_proxy());
+        assert!(commands(&fixture).is_empty());
+        assert_eq!(fixture.state.operations.held(id), None);
+    }
+
+    /// While the check runs the profile is busy, which is the lease doing its
+    /// job: a copy of its browser data would read a directory the browser is
+    /// about to be given.
+    #[test]
+    fn a_profile_waiting_for_its_proxy_is_busy() {
+        let mut fixture = fixture();
+        let (id, proxy_id) = proxied(&mut fixture, "Work laptop");
+        fixture.state.set_browser_data_path("/backups/fp");
+        fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect("the gate");
+
+        let error = fixture
+            .state
+            .browser_data_job(Direction::ToBackup)
+            .expect_err("the start is already under way");
+
+        assert!(error.contains("Work laptop"), "{error}");
+        assert_eq!(
+            fixture.state.operations.held(id),
+            Some(Operation::Starting),
+            "the lease is what the refusal is made of"
+        );
+
+        // And a second press of Start says so rather than asking twice.
+        let error = fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect_err("already under way");
+        assert!(error.to_string().contains("Work laptop"), "{error}");
+
+        let _ = proxy_id;
+    }
+
     #[test]
     fn a_copy_holds_its_profiles_until_the_worker_gives_them_back() {
         let mut fixture = fixture();

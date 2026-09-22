@@ -66,9 +66,14 @@ start and the row says so. If it is missing, the launch fails closed - the
 browser is not started to go direct instead, which is the failure this program
 exists to prevent.
 
-**5. Start it.** **Start** on the row. The row goes `Starting` -> `Running`, and
-the Runtime Details panel has the pid, the CDP port, the SOCKS port when there is
-one, and the exact arguments the browser was given (*Args* tab).
+**5. Start it.** **Start** on the row. A profile that uses a proxy is asked about
+first: the request the Proxies page sends is sent again, and the browser is
+launched only if a byte comes back through the engine it will use - so the row
+sits at `Starting` for as long as that takes, and a proxy that carries nothing is
+refused with a sentence naming the proxy and the stage that failed. Then the row
+goes `Starting` -> `Running`, and the Runtime Details panel has the pid, the CDP
+port, the SOCKS port when there is one, and the exact arguments the browser was
+given (*Args* tab).
 
 **6. Verify the fingerprint.** **Verify fingerprint** asks the running browser
 what it reports and compares that against what the profile claims, one claim at a

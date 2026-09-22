@@ -97,6 +97,18 @@ Not established, and deliberately not claimed: that a browser was pointed at the
 engine, or that a profile's remaining traffic takes the same path. Reading a
 fingerprint back is the neighbouring check, not a substitute.
 
+- **A start waits for that answer.** `AppState::begin_opening` takes the profile's
+  lease and, when the profile leaves through a proxy, hands back the test job
+  instead of queueing the command: the row reads `Starting`, the window runs the
+  same test the Proxies page runs, and `finish_proxy_test` queues the launch on a
+  reading that came back and refuses it otherwise - naming the profile, the proxy
+  and the fault, and giving the profile back so the next press is possible. A
+  start that joins a test already in flight waits for that one rather than asking
+  twice, and a stop while the check runs calls the start off. A profile with no
+  proxy has nothing to ask and is queued at once. The command is never queued
+  first and checked afterwards: a launch that goes ahead produces a browser that
+  is already running by the time anybody knows the proxy is down.
+
 ## Runtime exit read-back
 
 The pre-flight asks about a *proxy*; it cannot say whether a *browser* was

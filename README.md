@@ -119,8 +119,18 @@ When a profile using the proxy is running, its engine is probed: that is the pat
 the traffic is actually taking, and it is never stopped or restarted by a test -
 whoever started it stops it. Otherwise a temporary engine is started for the test
 alone and removed when the test ends, including when it fails; its config, which
-holds the upstream credentials, goes with it. The test runs only when the user
-starts it, and never in the background.
+holds the upstream credentials, goes with it.
+
+**Starting a profile that uses a proxy asks the proxy first.** Pressing **Start**
+(or **Restart**) on a proxied profile sends the same request the button on the
+Proxies page sends, waits for the answer, and only queues the launch when a byte
+came back through the engine the profile will use. A proxy that carries nothing
+means the browser is not started at all: the row says `Starting` while the check
+runs, and the refusal names the profile, the proxy and the stage of the path that
+failed. Nothing else about the app changes - a profile without a proxy starts
+immediately, and the check is the same one the Proxies page runs, so the reading
+it produces is the reading the row shows. The cost is one round trip per launch;
+the alternative is a browser that runs, looks healthy, and leaks.
 
 ### Where a browser's own traffic leaves from
 

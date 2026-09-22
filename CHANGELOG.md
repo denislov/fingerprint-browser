@@ -65,6 +65,18 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Changed
 
+- Starting (or restarting) a profile that uses a proxy now asks the proxy first and
+  refuses when nothing comes back. A launch used to go ahead on the strength of the
+  engine binding its loopback port, which says nothing about whether the upstream
+  carries traffic - so a proxy that had stopped working produced a browser that ran
+  and leaked, or one that showed nothing but network errors, and the only way to
+  find out was to press **Start** and look. The check is the same request the
+  Proxies page sends, run on the same worker and reported in the same place, and
+  the launch is queued only once a byte has come back through the engine the
+  profile will use. The row reads `Starting` while it runs, **Stop** calls the
+  start off, a profile with no proxy is unaffected, and a refusal names the
+  profile, the proxy and the stage of the path that failed. See
+  [proxy testing](README.md#proxy-testing).
 - Closing the window to the background now really takes it off the screen, on
   Linux as well as on Windows. "In the background" used to mean *minimized*, which
   left the window's button on the Cinnamon panel and its entry in Alt+Tab - the

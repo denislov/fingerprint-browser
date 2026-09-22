@@ -14,8 +14,8 @@ use crate::proxy_import::ProxyImport;
 use crate::proxy_tester::ProxyTester;
 use crate::settings::SettingKey;
 use crate::state::{
-    AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Page, ProfileRow, ProxyRow,
-    ProxyTest, Toast, ToastKind, Verification,
+    AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Opening, Page, ProfileRow,
+    ProxyRow, ProxyTest, StartGate, Toast, ToastKind, Verification,
 };
 use crate::text::{Lang, Text};
 use crate::theme::{Palette, ThemeChoice, palette};
@@ -1150,8 +1150,7 @@ impl AppView {
     }
 
     fn on_start(&mut self, id: ProfileId, cx: &mut Context<Self>) {
-        let _ = self.state.start(id);
-        cx.notify();
+        self.open_profile(id, Opening::Start, cx);
     }
 
     fn on_stop(&mut self, id: ProfileId, cx: &mut Context<Self>) {
@@ -1160,7 +1159,36 @@ impl AppView {
     }
 
     fn on_restart(&mut self, id: ProfileId, cx: &mut Context<Self>) {
-        let _ = self.state.restart(id);
+        self.open_profile(id, Opening::Restart, cx);
+    }
+
+    /// Starts or restarts a profile, asking its proxy first when it has one.
+    ///
+    /// A profile whose traffic leaves through a proxy is only as usable as that
+    /// proxy, so the command is held back until a request has come back through
+    /// the same engine the profile would use - the same question the Proxies page
+    /// asks by hand, on the same worker, through the same channel, so the answer
+    /// lands in the same place: the proxy row gets a fresh reading either way,
+    /// and the opening goes ahead or is refused with a sentence saying which
+    /// stage of the path failed.
+    fn open_profile(&mut self, id: ProfileId, how: Opening, cx: &mut Context<Self>) {
+        let gate = match self.state.begin_opening(id, how) {
+            Ok(gate) => gate,
+            Err(error) => {
+                self.state.push_notice(error.to_string(), true);
+                cx.notify();
+                return;
+            }
+        };
+        if let StartGate::Checking(job) = gate {
+            let tester = Arc::clone(&self.tester);
+            let sender = self.proxy_test_tx.clone();
+            std::thread::spawn(move || {
+                let live = job.is_live();
+                let outcome = tester.test(&job);
+                let _ = sender.send((job.proxy_id, live, outcome));
+            });
+        }
         cx.notify();
     }
 
@@ -3929,13 +3957,13 @@ mod tests {
     use crate::verifier::testing::FakeVerifier;
     use application::Direction;
     use application::{DefaultProfileService, DefaultProxyService, ProxyService, RuntimeService};
-    use domain::{CoreId, ProfileId, ProxyId};
+    use domain::{CoreId, ProfileId, ProxyId, RuntimeState};
     use gpui_kit::component::Root;
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::component::theme::Theme;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext, px, size};
-    use runtime::{Diagnosis, Discrepancy, Fault, FaultClass, RuntimeEvent};
+    use runtime::{Discrepancy, Fault, FaultClass, RuntimeEvent};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
@@ -4784,21 +4812,22 @@ mod tests {
         let proxy_id = seed_proxy(cx, view, "Office");
         view.update(cx, |view, cx| {
             let state = view.state_mut();
-            state.begin_proxy_test(proxy_id).expect("begin");
-            state.finish_proxy_test(
-                proxy_id,
-                false,
-                Ok(Diagnosis {
-                    exit_ip: "198.51.100.9".to_string(),
-                    elapsed: Duration::from_millis(80),
-                }),
-            );
             let mut profile = state.profile(id).expect("the profile");
             profile.proxy_id = Some(proxy_id);
             state.update_profile(profile).expect("assign");
             cx.notify();
         });
+
+        // Pressing Start on a proxied profile asks the proxy first now, so the
+        // reading this profile is judged against is the one the start's own check
+        // took - the harness's tester, which leaves from `FAKE_EXIT_IP` - and the
+        // command is only queued once that answer is in.
         cx.update(|window, cx| window.click(format!("start-{id}"), cx));
+        wait_for_state(cx, view, |state| {
+            state
+                .row(id)
+                .is_some_and(|row| row.state() == RuntimeState::Running)
+        });
         runtime.set_cdp_port(id, 9333);
         view.update(cx, |view, cx| {
             view.state_mut().refresh_runtime();
@@ -4831,7 +4860,7 @@ mod tests {
             .expect("a proxied profile is asked about its address");
         assert_eq!(
             egress.expected.as_deref(),
-            Some("198.51.100.9"),
+            Some(crate::proxy_tester::testing::FAKE_EXIT_IP),
             "the expectation is what the proxy was measured at, not the reading"
         );
         assert!(
@@ -6908,6 +6937,145 @@ mod tests {
         assert!(message.contains("were replaced"), "{message}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A stopped profile that leaves through a proxy: the shape every pre-flight
+    /// test starts from.
+    fn seed_proxied_profile(
+        cx: &mut gpui_kit::VisualTestContext,
+        view: &gpui_kit::Entity<AppView>,
+    ) -> (ProfileId, ProxyId) {
+        let id = seed_profile(cx, view);
+        let proxy_id = seed_proxy(cx, view, "Office");
+        view.update(cx, |view, cx| {
+            let state = view.state_mut();
+            let mut profile = state.profile(id).expect("the profile");
+            profile.proxy_id = Some(proxy_id);
+            state.update_profile(profile).expect("assign");
+            cx.notify();
+        });
+        (id, proxy_id)
+    }
+
+    /// Pressing Start on a proxied profile asks the proxy first, and a proxy that
+    /// carries nothing means the browser is never launched.
+    ///
+    /// This is the whole point of the gate at the level the user meets it: the
+    /// window must not be able to produce a browser whose traffic has nowhere to
+    /// go, and the sentence has to say which link of the chain failed.
+    #[gpui_kit::test]
+    fn starting_a_proxied_profile_is_refused_when_its_proxy_has_no_traffic(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let tester = Arc::new(FakeProxyTester::with_outcome(Err(Fault::new(
+            FaultClass::Unreachable,
+            "no route to the upstream",
+        ))));
+        let (view, runtime, _opener, tester, _copier) = view_with_tester(
+            cx,
+            Arc::new(FakeVerifier::passing()),
+            tester,
+            Arc::new(FakeBrowserDataCopier::passing()),
+            None,
+            Arc::new(FakeOpener::working()),
+            None,
+        );
+        let cx = window(cx, &view);
+        let (id, proxy_id) = seed_proxied_profile(cx, &view);
+
+        cx.update(|window, cx| window.click(format!("start-{id}"), cx));
+        wait_for_state(cx, &view, |state| {
+            state
+                .proxy_test(proxy_id)
+                .is_some_and(|test| !test.is_running())
+        });
+
+        assert_eq!(tester.calls(), 1, "the proxy was asked once");
+        assert!(
+            runtime.commands.lock().expect("commands").is_empty(),
+            "the browser was not launched"
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().row(id).expect("the row").state()),
+            RuntimeState::Stopped,
+            "and the profile is not left reading as starting"
+        );
+        let message = last_message(cx, &view);
+        assert!(message.contains("Profile 1"), "{message}");
+        assert!(message.contains("Office"), "{message}");
+        assert!(message.contains("no route to the upstream"), "{message}");
+    }
+
+    /// The same press, with a proxy that answers: the browser starts, and the
+    /// window says where the traffic it will use leaves from.
+    #[gpui_kit::test]
+    fn starting_a_proxied_profile_goes_ahead_once_its_proxy_answers(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let tester = Arc::new(FakeProxyTester::passing_from("198.51.100.9"));
+        let (view, runtime, _opener, tester, _copier) = view_with_tester(
+            cx,
+            Arc::new(FakeVerifier::passing()),
+            tester,
+            Arc::new(FakeBrowserDataCopier::passing()),
+            None,
+            Arc::new(FakeOpener::working()),
+            None,
+        );
+        let cx = window(cx, &view);
+        let (id, _proxy_id) = seed_proxied_profile(cx, &view);
+
+        cx.update(|window, cx| window.click(format!("start-{id}"), cx));
+        wait_for_state(cx, &view, |state| {
+            state
+                .row(id)
+                .is_some_and(|row| row.state() == RuntimeState::Running)
+        });
+
+        assert_eq!(tester.calls(), 1, "the proxy was asked once");
+        assert_eq!(
+            runtime.commands.lock().expect("commands").clone(),
+            [format!("start:{id}")]
+        );
+        let message = last_message(cx, &view);
+        assert!(
+            message.contains("Started Profile 1 through Office"),
+            "{message}"
+        );
+        assert!(message.contains("198.51.100.9"), "{message}");
+    }
+
+    /// A profile without a proxy is not slowed down or gated by any of this: the
+    /// request a check would send is the one the browser makes for its own first
+    /// page.
+    #[gpui_kit::test]
+    fn starting_a_profile_without_a_proxy_asks_nothing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let tester = Arc::new(FakeProxyTester::passing());
+        let (view, runtime, _opener, tester, _copier) = view_with_tester(
+            cx,
+            Arc::new(FakeVerifier::passing()),
+            tester,
+            Arc::new(FakeBrowserDataCopier::passing()),
+            None,
+            Arc::new(FakeOpener::working()),
+            None,
+        );
+        let cx = window(cx, &view);
+        let id = seed_profile(cx, &view);
+
+        cx.update(|window, cx| window.click(format!("start-{id}"), cx));
+        settle(cx);
+
+        assert_eq!(tester.calls(), 0, "no proxy, nothing to ask");
+        assert_eq!(
+            runtime.commands.lock().expect("commands").clone(),
+            [format!("start:{id}")]
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().row(id).expect("the row").state()),
+            RuntimeState::Running
+        );
     }
 
     /// The same view, with the browser-data copier the test drives.
