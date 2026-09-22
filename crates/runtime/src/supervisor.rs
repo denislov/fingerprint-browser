@@ -1553,12 +1553,6 @@ mod tests {
         dir: PathBuf,
     }
     impl Fixture {
-        /// The parameters this fixture starts with, for a test that drives the
-        /// facade rather than the supervisor.
-        fn params(&self) -> StartParams {
-            self.params.clone()
-        }
-
         fn new(browser: bool, cdp: bool, script: &str) -> Self {
             // Avoid fork/exec races with another test writing its executable
             // and immediate port-rebind assertions racing sibling fixtures.
@@ -1586,39 +1580,12 @@ mod tests {
                 Arc::new(RwLock::new(HashMap::new())),
                 components,
             );
-            let proxy = ProxyProfile {
-                id: ProxyId::new(),
-                name: "test".into(),
-                outbound: ProxyOutbound::Socks5(Socks5Outbound {
-                    host: "localhost".into(),
-                    port: 1080,
-                    username: Some("user".into()),
-                    password: Some("secret".into()),
-                }),
-            };
-            let core = BrowserCore {
-                id: CoreId::new(),
-                name: "test".into(),
-                executable: "/bin/sleep".into(),
-                version: "128".into(),
-                major: 128,
-            };
-            let profile = BrowserProfile {
-                id,
-                name: "test".into(),
-                core_id: core.id,
-                user_data_dir: dir.join("profile"),
-                fingerprint: FingerprintProfile::new_random(42),
-                proxy_id: Some(proxy.id),
-                window: WindowProfile::new(800, 600),
-                start_target: StartTarget::Blank,
-            };
             Self {
                 _serial: serial,
                 commands: Some(channels.command_tx),
                 supervisor,
                 events: channels.event_rx,
-                params: StartParams::with_proxy(profile, core, proxy),
+                params: crate::test_support::start_params_for(id, &dir),
                 dir,
             }
         }
@@ -1859,74 +1826,6 @@ mod tests {
         assert_eq!(f.snapshot().state, RuntimeState::Stopped);
         assert!(f.supervisor.active_sessions.is_empty());
         assert!(!f.config().exists());
-    }
-
-    /// The command channel is bounded, and the window's own thread is what fills
-    /// it. A send that waits for room is a frozen window while the supervisor is
-    /// inside a readiness wait or a process-tree kill, so a full queue is refused
-    /// - immediately, and with an answer that says trying again is worth it.
-    #[test]
-    fn a_full_command_queue_is_refused_rather_than_waited_on() {
-        let (command_tx, command_rx) = crossbeam_channel::bounded(1);
-        let facade = ChannelRuntimeFacade::new(
-            command_tx,
-            Arc::new(RwLock::new(HashMap::<ProfileId, RuntimeSnapshot>::new())),
-        );
-        let params = Fixture::new(true, true, XRAY).params();
-
-        // Nobody is draining: the second command has nowhere to go.
-        facade
-            .start(params.clone())
-            .expect("room for the first command");
-        let refused = facade
-            .stop(params.profile.id)
-            .expect_err("the queue is full and this must not wait for it");
-        assert!(matches!(refused, RuntimeCommandError::Busy), "{refused}");
-        assert!(
-            matches!(facade.start(params.clone()), Err(RuntimeCommandError::Busy)),
-            "and it is refused for every command, not just the one"
-        );
-
-        // A supervisor that is gone, on the other hand, is not a queue to retry:
-        // the two answers have to stay different.
-        drop(command_rx);
-        assert!(matches!(
-            facade.restart(params),
-            Err(RuntimeCommandError::ChannelClosed)
-        ));
-    }
-
-    /// Leaving the running sessions behind is the last thing a run does, so it is
-    /// the one command that waits for room - and it stops waiting, because an
-    /// exit that never finishes is worse than one that warns.
-    #[test]
-    fn the_handover_waits_for_room_but_not_forever() {
-        let (command_tx, command_rx) = crossbeam_channel::bounded(1);
-        let facade = ChannelRuntimeFacade::new(
-            command_tx,
-            Arc::new(RwLock::new(HashMap::<ProfileId, RuntimeSnapshot>::new())),
-        )
-        .with_handover_timeout(Duration::from_millis(50));
-        let params = Fixture::new(true, true, XRAY).params();
-        facade.start(params).expect("room for the first command");
-
-        let started = std::time::Instant::now();
-        let refused = facade
-            .release_all()
-            .expect_err("a full queue it cannot wait out");
-        let waited = started.elapsed();
-        assert!(matches!(refused, RuntimeCommandError::Busy), "{refused}");
-        assert!(
-            waited >= Duration::from_millis(50) && waited < Duration::from_secs(2),
-            "it waits for the timeout and then gives up: {waited:?}"
-        );
-
-        // With room it is taken, which is the ordinary exit.
-        command_rx.recv().expect("the first command");
-        facade
-            .release_all()
-            .expect("the command was taken once there was room");
-        assert!(matches!(command_rx.recv(), Ok(RuntimeCommand::ReleaseAll)));
     }
 
     #[test]
@@ -2460,5 +2359,100 @@ mod tests {
                 start_time: Some(7),
             })
         }
+    }
+}
+
+/// The command queue's own rules, tested without anything to run.
+///
+/// Portable, and deliberately outside the module above: the supervisor's other
+/// tests drive real processes through a shell script, which is why that module is
+/// Unix-only, but a full queue and a closed channel are the same question on every
+/// platform - and a rule tested on one of them is a rule the other can regress
+/// without anyone noticing.
+#[cfg(test)]
+mod command_queue {
+    use super::{ChannelRuntimeFacade, HANDOVER_TIMEOUT};
+    use crate::error::RuntimeCommandError;
+    use crate::events::{RuntimeCommand, StartParams};
+    use crate::facade::{RuntimeFacade, RuntimeSnapshot};
+    use crossbeam_channel::{Receiver, Sender};
+    use domain::ProfileId;
+    use std::collections::HashMap;
+    use std::sync::{Arc, RwLock};
+    use std::time::{Duration, Instant};
+
+    fn facade(
+        command_tx: Sender<RuntimeCommand>,
+        handover_timeout: Duration,
+    ) -> ChannelRuntimeFacade {
+        ChannelRuntimeFacade::new(
+            command_tx,
+            Arc::new(RwLock::new(HashMap::<ProfileId, RuntimeSnapshot>::new())),
+        )
+        .with_handover_timeout(handover_timeout)
+    }
+
+    /// The command channel is bounded, and the window's own thread is what fills
+    /// it. A send that waits for room is a frozen window while the supervisor is
+    /// inside a readiness wait or a process-tree kill, so a full queue is refused
+    /// - immediately, and with an answer that says trying again is worth it.
+    #[test]
+    fn a_full_command_queue_is_refused_rather_than_waited_on() {
+        let (command_tx, command_rx) = crossbeam_channel::bounded(1);
+        let facade = facade(command_tx, HANDOVER_TIMEOUT);
+        let params: StartParams =
+            crate::test_support::start_params(&std::env::temp_dir().join("fp-runtime-queue"));
+
+        // Nobody is draining: the second command has nowhere to go.
+        facade
+            .start(params.clone())
+            .expect("room for the first command");
+        let refused = facade
+            .stop(params.profile.id)
+            .expect_err("the queue is full and this must not wait for it");
+        assert!(matches!(refused, RuntimeCommandError::Busy), "{refused}");
+        assert!(
+            matches!(facade.start(params.clone()), Err(RuntimeCommandError::Busy)),
+            "and it is refused for every command, not just the one"
+        );
+
+        // A supervisor that is gone, on the other hand, is not a queue to retry:
+        // the two answers have to stay different.
+        drop(command_rx);
+        assert!(matches!(
+            facade.restart(params),
+            Err(RuntimeCommandError::ChannelClosed)
+        ));
+    }
+
+    /// Leaving the running sessions behind is the last thing a run does, so it is
+    /// the one command that waits for room - and it stops waiting, because an
+    /// exit that never finishes is worse than one that warns.
+    #[test]
+    fn the_handover_waits_for_room_but_not_forever() {
+        let (command_tx, command_rx): (Sender<RuntimeCommand>, Receiver<RuntimeCommand>) =
+            crossbeam_channel::bounded(1);
+        let facade = facade(command_tx, Duration::from_millis(50));
+        let params: StartParams =
+            crate::test_support::start_params(&std::env::temp_dir().join("fp-runtime-queue"));
+        facade.start(params).expect("room for the first command");
+
+        let started = Instant::now();
+        let refused = facade
+            .release_all()
+            .expect_err("a full queue it cannot wait out");
+        let waited = started.elapsed();
+        assert!(matches!(refused, RuntimeCommandError::Busy), "{refused}");
+        assert!(
+            waited >= Duration::from_millis(50) && waited < HANDOVER_TIMEOUT,
+            "it waits for the timeout and then gives up: {waited:?}"
+        );
+
+        // With room it is taken, which is the ordinary exit.
+        command_rx.recv().expect("the first command");
+        facade
+            .release_all()
+            .expect("the command was taken once there was room");
+        assert!(matches!(command_rx.recv(), Ok(RuntimeCommand::ReleaseAll)));
     }
 }

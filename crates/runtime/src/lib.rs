@@ -423,3 +423,58 @@ mod tests {
         handle.join().expect("join supervisor thread");
     }
 }
+
+/// Builders for the values tests start things with.
+///
+/// Portable on purpose. The parts of the supervisor that can be driven with fake
+/// components are tested on every platform, and anything those tests need has to
+/// build without a shell script or a Unix permission bit - which is what kept the
+/// command queue's own rules inside the Unix-only test module before.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::events::StartParams;
+    use domain::{
+        BrowserCore, BrowserProfile, CoreId, FingerprintProfile, ProxyId, ProxyOutbound,
+        ProxyProfile, Socks5Outbound, StartTarget, WindowProfile,
+    };
+    use std::path::Path;
+
+    /// The parameters a test starts a profile with, named after nothing: the
+    /// identifier is minted here.
+    pub(crate) fn start_params(dir: &Path) -> StartParams {
+        start_params_for(domain::ProfileId::new(), dir)
+    }
+
+    /// The same, with the identifier given - for a test that has already named a
+    /// directory after it.
+    pub(crate) fn start_params_for(id: domain::ProfileId, dir: &Path) -> StartParams {
+        let proxy = ProxyProfile {
+            id: ProxyId::new(),
+            name: "test".into(),
+            outbound: ProxyOutbound::Socks5(Socks5Outbound {
+                host: "localhost".into(),
+                port: 1080,
+                username: Some("user".into()),
+                password: Some("secret".into()),
+            }),
+        };
+        let core = BrowserCore {
+            id: CoreId::new(),
+            name: "test".into(),
+            executable: "/bin/sleep".into(),
+            version: "128".into(),
+            major: 128,
+        };
+        let profile = BrowserProfile {
+            id,
+            name: "test".into(),
+            core_id: core.id,
+            user_data_dir: dir.join("profile"),
+            fingerprint: FingerprintProfile::new_random(42),
+            proxy_id: Some(proxy.id),
+            window: WindowProfile::new(800, 600),
+            start_target: StartTarget::Blank,
+        };
+        StartParams::with_proxy(profile, core, proxy)
+    }
+}

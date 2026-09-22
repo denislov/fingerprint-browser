@@ -73,6 +73,11 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Changed
 
+- The runtime's test-support builders are now shared, and the command queue's rules
+  are tested on every platform. The supervisor's test module spawns shell scripts,
+  so it is Unix-only; the parts of the state machine that need no process - a full
+  queue, a closed channel, the exit handover's patience - now live outside it in a
+  portable module, and run on Windows CI too.
 - A command the runtime cannot take is now refused instead of freezing the window.
   Every start, stop and restart was sent through a bounded queue with a blocking
   send, from the window's own thread - so while the supervisor was inside a
