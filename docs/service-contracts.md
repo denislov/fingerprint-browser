@@ -44,11 +44,15 @@ pub trait CoreRepository: Send + Sync {
 
 职责：Profile CRUD 与静态验证。
 
+删除只删记录，不删浏览器数据。`user_data_dir` 对导入的 profile 是文件里记录的绝对
+路径，服务无法证明它属于本安装，也无法证明其中没有正在运行的浏览器，所以不提供
+"连同数据一起删除"的模式。
+
 ```rust
 pub trait ProfileService {
     fn create(&self, draft: NewProfile) -> Result<BrowserProfile, AppError>;
     fn update(&self, profile: BrowserProfile) -> Result<(), AppError>;
-    fn delete(&self, id: ProfileId, mode: DeleteMode) -> Result<(), AppError>;
+    fn delete(&self, id: ProfileId) -> Result<(), AppError>;
     fn duplicate(&self, id: ProfileId, new_name: String) -> Result<BrowserProfile, AppError>;
 }
 ```

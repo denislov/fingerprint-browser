@@ -24,7 +24,7 @@ pub use import::{
 };
 pub use operations::{Busy, Held, Operation, Operations};
 pub use profile_service::{
-    DefaultProfileService, DeleteMode, NewProfile, ProfileService, default_user_data_dir,
+    DefaultProfileService, NewProfile, ProfileService, default_user_data_dir,
 };
 pub use proxy_service::{DefaultProxyService, NewProxy, ProxyService};
 pub use restore::{
@@ -81,9 +81,7 @@ mod tests {
         assert_eq!(all.len(), 2);
 
         // Delete
-        service
-            .delete(profile.id, DeleteMode::KeepUserData)
-            .expect("delete");
+        service.delete(profile.id).expect("delete");
         let remaining = service.list().expect("list profiles");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, dup.id);

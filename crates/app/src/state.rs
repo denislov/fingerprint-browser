@@ -14,10 +14,9 @@ use crate::text::{Lang, Text, text};
 use crate::theme::ThemeChoice;
 use crate::verifier::{EgressJob, VerificationJob, VerificationReport};
 use application::{
-    AppError, BrowserDataReport, CoreService, Counts, Credentials, DeleteMode, Direction,
-    ExportOrigin, ExportReport, Held, ImportNotes, ImportReport, NewProfile, NewProxy, Operation,
-    Operations, ProfileService, ProxyService, RestoreError, RestoreMode, RestoreReport,
-    RuntimeService,
+    AppError, BrowserDataReport, CoreService, Counts, Credentials, Direction, ExportOrigin,
+    ExportReport, Held, ImportNotes, ImportReport, NewProfile, NewProxy, Operation, Operations,
+    ProfileService, ProxyService, RestoreError, RestoreMode, RestoreReport, RuntimeService,
 };
 use domain::{
     BrowserCore, BrowserProfile, CoreId, ProfileId, ProxyId, ProxyOutbound, ProxyProfile,
@@ -2304,7 +2303,7 @@ impl AppState {
         if self.pending_starts.remove(&id).is_some() {
             self.operations.free(id, Operation::Starting);
         }
-        self.record(self.profiles.delete(id, DeleteMode::KeepUserData))?;
+        self.record(self.profiles.delete(id))?;
         self.forget_verification(id);
         if self.selected == Some(id) {
             self.selected = None;

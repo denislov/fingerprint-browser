@@ -7,12 +7,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use storage::ProfileRepository;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeleteMode {
-    KeepUserData,
-    RemoveUserData,
-}
-
 #[derive(Debug, Clone)]
 pub struct NewProfile {
     pub name: String,
@@ -47,7 +41,18 @@ pub trait ProfileService: Send + Sync {
     /// are still the domain's, so a profile with no name is refused here rather
     /// than stored.
     fn insert(&self, profile: BrowserProfile) -> Result<(), AppError>;
-    fn delete(&self, id: ProfileId, mode: DeleteMode) -> Result<(), AppError>;
+    /// Removes the record, and only the record.
+    ///
+    /// There is deliberately no mode that removes the browser data as well. A
+    /// profile's directory is not always a directory this program created: an
+    /// imported profile keeps the absolute path it was exported with, so a
+    /// recursive delete here would end at whatever that path names - and it would
+    /// end there *after* the record was gone, leaving nothing that describes what
+    /// was deleted or why. If deleting browser data is ever wanted, it belongs
+    /// behind proof that the directory is the one this installation keeps for that
+    /// profile, a check that no browser is running in it, and a report of what
+    /// could not be removed - none of which this service can establish on its own.
+    fn delete(&self, id: ProfileId) -> Result<(), AppError>;
     fn duplicate(&self, id: ProfileId, new_name: String) -> Result<BrowserProfile, AppError>;
     fn get(&self, id: ProfileId) -> Result<Option<BrowserProfile>, AppError>;
     fn list(&self) -> Result<Vec<BrowserProfile>, AppError>;
@@ -115,18 +120,11 @@ impl ProfileService for DefaultProfileService {
         Ok(())
     }
 
-    fn delete(&self, id: ProfileId, mode: DeleteMode) -> Result<(), AppError> {
-        if let Some(profile) = self.repo.get(id)? {
+    fn delete(&self, id: ProfileId) -> Result<(), AppError> {
+        // Read first, so a missing profile is not silently a successful delete:
+        // the caller wants to know that the identifier named nothing.
+        if self.repo.get(id)?.is_some() {
             self.repo.delete(id)?;
-            if mode == DeleteMode::RemoveUserData
-                && profile.user_data_dir.exists()
-                && let Err(e) = std::fs::remove_dir_all(&profile.user_data_dir)
-            {
-                tracing::warn!(
-                    "failed to delete user data dir {}: {e}",
-                    profile.user_data_dir.display()
-                );
-            }
         }
         Ok(())
     }
