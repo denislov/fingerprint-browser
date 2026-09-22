@@ -172,9 +172,13 @@ mod linux {
     /// asset is not: one drawing, two byte orders, swapped here rather than
     /// committed twice.
     fn argb_icon() -> ksni::Icon {
+        // `as_chunks` rather than `chunks_exact(4)`: the asset is a whole number
+        // of four-byte pixels, and saying so once here means every `pixel` below
+        // is a `[u8; 4]` the compiler can index, rather than a slice whose length
+        // each read has to trust.
+        let (pixels, _) = PIXELS.as_chunks::<4>();
         let mut data = Vec::with_capacity(PIXELS.len());
-        for pixel in PIXELS.chunks_exact(4) {
-            let [red, green, blue, alpha] = [pixel[0], pixel[1], pixel[2], pixel[3]];
+        for &[red, green, blue, alpha] in pixels {
             data.extend_from_slice(&[alpha, red, green, blue]);
         }
         ksni::Icon {
@@ -202,8 +206,9 @@ mod linux {
             let at = |pixels: &[u8], index: usize| pixels[index * 4..index * 4 + 4].to_vec();
             // A transparent corner is black in both orders, so the pixel that
             // means something here is an opaque one.
-            let opaque = PIXELS
-                .chunks_exact(4)
+            let (pixels, _) = PIXELS.as_chunks::<4>();
+            let opaque = pixels
+                .iter()
                 .position(|pixel| pixel[3] == 255)
                 .expect("the icon has opaque pixels");
             let rgba = at(PIXELS, opaque);
@@ -288,12 +293,14 @@ mod tests {
     #[test]
     fn the_asset_is_a_square_of_pixels_with_a_shape_in_it() {
         assert_eq!(PIXELS.len(), (SIDE * SIDE * 4) as usize);
+        let (pixels, leftover) = PIXELS.as_chunks::<4>();
+        assert!(leftover.is_empty(), "the asset is whole pixels");
         assert!(
-            PIXELS.chunks_exact(4).any(|pixel| pixel[3] == 255),
+            pixels.iter().any(|pixel| pixel[3] == 255),
             "the icon has an opaque middle"
         );
         assert!(
-            PIXELS.chunks_exact(4).any(|pixel| pixel[3] == 0),
+            pixels.iter().any(|pixel| pixel[3] == 0),
             "the icon is a shape: its corners are transparent"
         );
     }
