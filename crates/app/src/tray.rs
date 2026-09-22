@@ -236,7 +236,7 @@ mod windows {
     use super::{PIXELS, SIDE, TrayEvent};
     use crate::text::Text;
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-    use tray_icon::{Icon, TrayIcon, TrayIconAttributes};
+    use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconAttributes, TrayIconEvent};
 
     /// The ids the two items are recognized by. They are not shown to anyone.
     const SHOW: &str = "show-window";
@@ -262,23 +262,45 @@ mod windows {
                 icon: Some(icon),
                 menu: Some(Box::new(menu)),
                 tooltip: Some(crate::version::NAME.to_string()),
+                menu_on_left_click: false,
+                menu_on_right_click: true,
                 ..Default::default()
             })
             .map_err(|error| error.to_string())?;
             Ok(Self { _icon: icon })
         }
 
-        /// The menu's events, which `muda` posts from wherever the click arrived
-        /// and this thread reads.
+        /// The menu's and icon's events, which `muda` and `tray-icon` post from
+        /// wherever the click arrived and this thread reads.
         pub(super) fn drain(&self) -> Vec<TrayEvent> {
-            MenuEvent::receiver()
+            let mut events: Vec<TrayEvent> = MenuEvent::receiver()
                 .try_iter()
                 .filter_map(|event| match event.id.0.as_str() {
                     SHOW => Some(TrayEvent::Show),
                     QUIT => Some(TrayEvent::Quit),
                     _ => None,
                 })
-                .collect()
+                .collect();
+
+            for event in TrayIconEvent::receiver().try_iter() {
+                match event {
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    }
+                    | TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        events.push(TrayEvent::Show);
+                    }
+                    _ => {}
+                }
+            }
+
+            events.dedup();
+            events
         }
     }
 }
@@ -303,5 +325,21 @@ mod tests {
             pixels.iter().any(|pixel| pixel[3] == 0),
             "the icon is a shape: its corners are transparent"
         );
+    }
+
+    #[test]
+    fn tray_labels_are_translated_and_distinct() {
+        for lang in crate::text::Lang::ALL {
+            let t = crate::text::text(lang);
+            assert!(!t.tray_show.trim().is_empty());
+            assert!(!t.tray_quit.trim().is_empty());
+            assert_ne!(t.tray_show, t.tray_quit);
+        }
+        let en = crate::text::text(crate::text::Lang::En);
+        let zh = crate::text::text(crate::text::Lang::Zh);
+        assert_eq!(en.tray_show, "Open window");
+        assert_eq!(en.tray_quit, "Quit completely");
+        assert_eq!(zh.tray_show, "打开窗口");
+        assert_eq!(zh.tray_quit, "完全退出");
     }
 }

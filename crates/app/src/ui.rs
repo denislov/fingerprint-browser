@@ -668,6 +668,12 @@ impl AppView {
     /// would be gone by the next start.
     fn on_choose_language(&mut self, language: Lang, cx: &mut Context<Self>) {
         let _ = self.state.set_language(language);
+        if self.tray.is_some() {
+            match Tray::start(self.state.text()) {
+                Ok(tray) => self.tray = Some(tray),
+                Err(error) => tracing::warn!("no tray icon: {error}"),
+            }
+        }
         cx.notify();
     }
 
@@ -1488,13 +1494,56 @@ impl AppView {
         }
     }
 
-    /// Stays, with no window.
+#[cfg(windows)]
+fn hide_window(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_HIDE};
+
+    if let Ok(handle) = HasWindowHandle::window_handle(window)
+        && let RawWindowHandle::Win32(win32) = handle.as_raw()
+    {
+        let hwnd = win32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+        if !hwnd.is_null() {
+            unsafe {
+                ShowWindowAsync(hwnd, SW_HIDE);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hide_window(window: &Window) {
+    window.minimize_window();
+}
+
+#[cfg(windows)]
+fn show_window(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_RESTORE};
+
+    if let Ok(handle) = HasWindowHandle::window_handle(window)
+        && let RawWindowHandle::Win32(win32) = handle.as_raw()
+    {
+        let hwnd = win32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+        if !hwnd.is_null() {
+            unsafe {
+                ShowWindowAsync(hwnd, SW_RESTORE);
+            }
+        }
+    }
+    window.activate_window();
+}
+
+#[cfg(not(windows))]
+fn show_window(window: &Window) {
+    window.activate_window();
+}
+
+    /// Stays, with no window visible.
     ///
-    /// The window is minimized rather than closed because that is the only thing
-    /// this UI stack offers: GPUI's `hide` is a no-op on both backends and no
-    /// window can be asked to unmap itself. So "in the background" means the
-    /// window is out of the way and the program is still managing the profiles,
-    /// and the tray icon is what says so and what brings it back.
+    /// The window is closed/hidden from view and the taskbar, and the program
+    /// keeps running and managing the profiles. The tray icon is what says so
+    /// and what brings the window back or exits completely.
     fn enter_background(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         // No banner: it would be painted into a window the user has just put
         // away. The activity log is where this is recorded, because the log is
@@ -1502,14 +1551,14 @@ impl AppView {
         tracing::info!("{}", self.state.text().exit_in_background);
         if self.tray.is_none() {
             // A desktop that will not take the icon is worth saying out loud and
-            // is not worth refusing: the window still minimizes, and the log is
+            // is not worth refusing: the window still hides, and the log is
             // what says why there is no way back from the tray.
             match Tray::start(self.state.text()) {
                 Ok(tray) => self.tray = Some(tray),
                 Err(error) => tracing::warn!("no tray icon: {error}"),
             }
         }
-        window.minimize_window();
+        Self::hide_window(window);
     }
 
     /// What the tray asked for, if anything.
@@ -1521,17 +1570,15 @@ impl AppView {
     }
 
     /// Carries out one of those requests.
-    ///
-    /// The window is woken first in both cases: a question asked of a minimized
-    /// window is a question nobody sees.
     fn handle_tray(&mut self, event: TrayEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.activate_window();
         match event {
-            TrayEvent::Show => cx.notify(),
-            // The remembered mode is deliberately not consulted - the tray's way
-            // out is the question, always. A tray item that re-entered "keep
-            // running" would be a program nobody could leave.
-            TrayEvent::Quit => self.open_exit_dialog(window, cx),
+            TrayEvent::Show => {
+                Self::show_window(window);
+                cx.notify();
+            }
+            TrayEvent::Quit => {
+                self.leave(Exit::ExitAll, window, cx);
+            }
         }
     }
 
@@ -4342,6 +4389,26 @@ mod tests {
             "leaving with the browsers running must tell the runtime: {:?}",
             commands()
         );
+
+        // "Background" keeps running, refuses the close, hides the window and starts the tray icon.
+        view.update(cx, |view, _| {
+            view.state_mut()
+                .set_exit_mode(ExitMode::Background)
+                .expect("store the answer")
+        });
+        let allowed =
+            cx.update(|window, cx| view.update(cx, |view, cx| view.on_close_requested(window, cx)));
+        assert!(!allowed, "background mode refuses the close so app keeps running");
+        view.update(cx, |view, _| {
+            assert!(view.tray.is_some(), "entering background starts the tray icon");
+        });
+
+        // TrayEvent::Show wakes/restores the window.
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.handle_tray(crate::tray::TrayEvent::Show, window, cx);
+            });
+        });
     }
 
     #[gpui_kit::test]

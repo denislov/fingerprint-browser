@@ -197,6 +197,7 @@ dependencies = [
  "gpui-kit",
  "ksni",
  "libc",
+ "raw-window-handle",
  "runtime",
  "serde",
  "serde_json",

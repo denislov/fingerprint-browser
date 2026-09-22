@@ -46,12 +46,14 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # The tray icon on Windows: the shell's notification area. Target-gated because
 # the same crate's Linux half links GTK and libappindicator, neither of which this
 # program uses - the Linux tray is `ksni`, above.
 tray-icon = "0.25"
+raw-window-handle = "0.6"
 
 # Only for a Windows host, because it is only used by `build.rs` there: it puts
 # the icon and the version into the executable's resource section, which is what

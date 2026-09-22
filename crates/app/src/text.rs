@@ -204,8 +204,8 @@ catalog! {
     // Three answers, asked once and remembered, and the question itself. The
     // short labels are the chips on the Settings card and the headings of the
     // dialog's rows, so they have to read as actions there and as names here.
-    tray_show => "Show window" => "显示窗口";
-    tray_quit => "Quit…" => "退出…";
+    tray_show => "Open window" => "打开窗口";
+    tray_quit => "Quit completely" => "完全退出";
     exit_card_title => "On closing the window" => "关闭窗口时";
     exit_card_body => "What the window's close button does. \"Ask\" shows the question every time; the other three answer it once and are kept for the next start."
         => "窗口关闭按钮的行为。选“每次询问”则每次都问；其余三项等于预先作答，并保留到下次启动。";
@@ -213,8 +213,8 @@ catalog! {
     exit_ask_note => "Show the three choices whenever the window is closed."
         => "每次关闭窗口时都显示这三个选项。";
     exit_background => "Keep running" => "后台继续运行";
-    exit_background_note => "The window is minimized and the program keeps managing the profiles. A tray icon brings the window back or leaves."
-        => "窗口最小化，程序继续管理各档案；托盘图标可恢复窗口或退出。";
+    exit_background_note => "The window is closed and the program keeps managing the profiles. A tray icon brings the window back or exits completely."
+        => "窗口关闭，程序继续管理各档案；托盘图标可恢复窗口或完全退出。";
     exit_keep_running => "Leave browsers running" => "仅退出程序";
     exit_keep_running_note => "The program ends; the browsers and proxy tunnels it started keep running, and the next start takes them over."
         => "程序结束；它启动的浏览器与代理隧道继续运行，下次启动会接管它们。";
