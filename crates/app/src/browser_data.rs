@@ -10,10 +10,25 @@
 //! must be able to press the button without hundreds of megabytes being written,
 //! and without the machine it runs on being touched.
 
+use crate::text::Text;
 use application::{BrowserDataReport, Direction, copy_browser_data, restore_browser_data};
 use domain::{BrowserProfile, ProfileId};
 use std::collections::HashSet;
 use std::path::PathBuf;
+
+/// A notice for the profiles whose data an interrupted restore had left aside,
+/// or `None` when there was none to put back.
+///
+/// A success rather than a problem, which is why the caller shows it as a toast:
+/// the data is where it belongs either way, and the line is there because a
+/// directory that came back on its own is otherwise indistinguishable from one
+/// that was never lost.
+pub fn recovery_notice(put_back: &[String], t: &Text) -> Option<(String, bool)> {
+    if put_back.is_empty() {
+        return None;
+    }
+    Some((t.data_recovered(&t.names(put_back)), false))
+}
 
 /// Everything a worker needs to copy browser data without touching the view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,5 +126,34 @@ pub(crate) mod testing {
                     })
                 })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::{Lang, text};
+
+    /// The line that says a directory came back, and the case that produces
+    /// nothing: a start with nothing to put back must not invent a notice. The
+    /// recovery itself is the important half, but a repair nobody is told about
+    /// looks like data that was never lost.
+    #[test]
+    fn a_recovery_is_reported_only_when_something_was_put_back() {
+        for lang in Lang::ALL {
+            let t = text(lang);
+            assert!(recovery_notice(&[], t).is_none(), "{lang:?}");
+
+            let (message, error) = recovery_notice(&["Work laptop".to_string()], t)
+                .expect("a profile that was put back is reported");
+            assert!(!error, "a repair that worked is not a problem: {message}");
+            assert!(message.contains("Work laptop"), "{message}");
+        }
+
+        // Several profiles are one phrase, not a list of lines.
+        let (message, _) =
+            recovery_notice(&["Alice".to_string(), "Bob".to_string()], text(Lang::En))
+                .expect("two profiles");
+        assert!(message.contains("Alice and Bob"), "{message}");
     }
 }

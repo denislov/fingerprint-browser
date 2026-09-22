@@ -247,6 +247,18 @@ fn main() {
     // every problem report is asked for first, and the log is what outlives the
     // window.
     app_state.note_startup(started);
+    // A restore killed between the two renames of its swap left the profile with
+    // no data directory and the only copy of its data under a `.old` name beside
+    // it. This is the half of that recovery the program can find by itself - a
+    // backup directory is chosen for one operation and not recorded - and it runs
+    // before the window so the sentence is the first thing the log and the user
+    // read. It goes in before the notices below, because a real problem is worth
+    // more than a repair that worked.
+    let put_back = application::recover_user_data_dirs(&profile_repo.list().unwrap_or_default());
+    if let Some((message, error)) = browser_data::recovery_notice(&put_back, t) {
+        tracing::info!("{message}");
+        app_state.push_notice(message, error);
+    }
     if let Some((message, error)) = core_notice {
         app_state.push_notice(message, error);
     }

@@ -12,6 +12,19 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
 
+### Fixed
+
+- A browser-data copy can no longer destroy the data it is reading. Every path in
+  a run is resolved and compared before the first write, so a backup directory
+  inside the profile it copies, a restore whose destination contains its source, a
+  destination reached through a symlink, and two profiles pointed at overlapping
+  directories are all refused with nothing written.
+- A browser-data copy is built whole beside its destination and renamed onto it
+  only once it is complete, so a copy that fails partway leaves the directory that
+  was there exactly as it was. A run killed between the two renames is put back by
+  the next start - or, for a destination inside a backup directory, by the next
+  copy - and the profiles it was put back for are named in the window.
+
 ### Changed
 
 - Closing the window to the background now really takes it off the screen, on

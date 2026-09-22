@@ -10,7 +10,8 @@ pub mod restore;
 pub mod runtime_service;
 
 pub use browser_data::{
-    BrowserDataError, BrowserDataReport, Direction, copy_browser_data, restore_browser_data,
+    BrowserDataError, BrowserDataReport, Direction, copy_browser_data, recover_user_data_dirs,
+    restore_browser_data,
 };
 pub use config_backup::{BackupError, ConfigBackup, ConfigSnapshot, Credentials, ExportOrigin};
 pub use core_service::{CoreService, DefaultCoreService, VersionProbe};

@@ -1412,6 +1412,36 @@ impl Text {
         }
     }
 
+    /// Names as one phrase: `a`, `a and b`, `a, and 2 more`.
+    ///
+    /// The conjunction and the capped form are each language's own, which is why
+    /// this is not a join at the call site: Chinese does not put spaces around its
+    /// conjunction, and the "and N more" tail is written rather than assembled.
+    pub fn names(&self, entries: &[String]) -> String {
+        match entries {
+            [] => String::new(),
+            [only] => only.clone(),
+            [first, second] => format!("{first} {} {second}", self.list_conjunction()),
+            [first, rest @ ..] => self.listed_more(first, rest.len()),
+        }
+    }
+
+    /// What a restore that was interrupted left, and what was done about it.
+    ///
+    /// The profiles are named because the recovery happens before the window
+    /// opens: without the sentence, a directory that came back is
+    /// indistinguishable from one that was never lost.
+    pub fn data_recovered(&self, names: &str) -> String {
+        match self.lang {
+            Lang::En => {
+                format!(
+                    "An interrupted restore had set browser data aside; it was put back for {names}."
+                )
+            }
+            Lang::Zh => format!("上次的数据恢复被中断，已为以下档案放回原有浏览器数据：{names}"),
+        }
+    }
+
     /// `1 core, 2 proxies and 3 profiles`: the phrase every report opens with.
     pub fn counts_phrase(&self, cores: usize, proxies: usize, profiles: usize) -> String {
         match self.lang {

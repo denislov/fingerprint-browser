@@ -23,6 +23,11 @@
 //!   copying whole is size, and the cost of a filter is a backup that is quietly
 //!   incomplete after a Chromium update. Size is the cheaper of the two, and the
 //!   size is reported before the copy is used.
+//! - **Written whole, then put in place.** The copy is built beside its
+//!   destination and renamed onto it only once it is complete, so a copy that
+//!   fails halfway - a file that cannot be read, a disk that fills - leaves the
+//!   directory that was there exactly as it was. [`commit`] is the two renames
+//!   and [`recover`] is what a run killed between them leaves behind.
 //!
 //! The layout is the data directory's own - `profiles/<id>/` under whatever
 //! directory the caller names - so a backup can be pointed back at, and a copy of
@@ -97,6 +102,31 @@ pub fn restore_browser_data(
     transfer(profiles, running, directory, Direction::FromBackup)
 }
 
+/// Puts back what an interrupted restore left in these profiles' own directories,
+/// and names the profiles it did that for.
+///
+/// A restore's destination is the profile's own data directory, which the program
+/// knows at startup, so this is the half of the recovery that can happen then. The
+/// other half - a copy whose destination is inside the backup directory - cannot:
+/// that directory is chosen for one operation and not recorded anywhere, so it is
+/// recovered when it is next used instead.
+///
+/// Called before the window opens, because its answer is a sentence the user
+/// should read: a restore that was killed between its two renames left the profile
+/// with no data directory at all, and one that was not put back looks like data
+/// that was lost.
+pub fn recover_user_data_dirs(profiles: &[BrowserProfile]) -> Vec<String> {
+    let mut put_back = Vec::new();
+    for profile in profiles {
+        match recover(&profile.name, &resolve(&profile.user_data_dir)) {
+            Ok(true) => put_back.push(profile.name.clone()),
+            Ok(false) => {}
+            Err(error) => tracing::warn!("{error}"),
+        }
+    }
+    put_back
+}
+
 /// The one copy routine, parameterised by direction.
 fn transfer(
     profiles: &[BrowserProfile],
@@ -129,23 +159,31 @@ fn transfer(
     };
 
     for copy in &copies {
-        // Replaced whole rather than merged: a backup with last week's stale
-        // files left in it is not a copy of the directory it claims to be. The
-        // source exists, so the destination is safe to clear.
-        if copy.to.is_dir() {
-            std::fs::remove_dir_all(&copy.to).map_err(|source| BrowserDataError::Remove {
-                profile: copy.profile.clone(),
-                path: copy.to.clone(),
-                source,
-            })?;
-        }
+        // What a previous run left in the middle of a swap, before anything else
+        // looks at the destination.
+        recover(&copy.profile, &copy.to)?;
 
-        let bytes = copy_tree(&copy.from, &copy.to).map_err(|source| BrowserDataError::Copy {
-            profile: copy.profile.clone(),
-            from: copy.from.clone(),
-            to: copy.to.clone(),
-            source,
+        // Built beside the destination rather than in it, so the destination is
+        // untouched until there is a complete copy to put there: a failure
+        // halfway through - a file that cannot be read, a disk that fills - has
+        // written nothing anyone reads, and the old directory is still the one in
+        // place. Beside rather than in the system temporary directory, because the
+        // swap that follows is a rename, and a rename is only a move within one
+        // filesystem.
+        let bytes = copy_tree(&copy.from, &staged(&copy.to)).map_err(|source| {
+            // The unfinished copy is not the destination's replacement and never
+            // becomes one; leaving it would only be confusing.
+            discard(&staged(&copy.to));
+            BrowserDataError::Copy {
+                profile: copy.profile.clone(),
+                from: copy.from.clone(),
+                to: copy.to.clone(),
+                source,
+            }
         })?;
+
+        commit(copy)?;
+
         report.bytes += bytes;
         report.copied.push(copy.profile.clone());
     }
@@ -158,6 +196,26 @@ struct Copy {
     profile: String,
     from: PathBuf,
     to: PathBuf,
+}
+
+/// The suffix of the directory a copy is built in, and of the one it displaces.
+///
+/// Boring, fixed names rather than unique ones, because they are the record a
+/// later run reads: a destination that is missing while `<name>.old` is beside it
+/// is a run that died between the two renames of a swap, and the old directory is
+/// then put back where it belongs. A name with a process id or a timestamp in it
+/// would be a leftover nobody can interpret.
+const STAGING: &str = "partial";
+const DISPLACED: &str = "old";
+
+/// Where a finished copy of `to` is built.
+fn staged(to: &Path) -> PathBuf {
+    beside(to, STAGING)
+}
+
+/// Where the directory `to` currently names is kept while the copy takes its name.
+fn displaced(to: &Path) -> PathBuf {
+    beside(to, DISPLACED)
 }
 
 /// The copies a run will make, in name order, and the profiles with no data to
@@ -197,10 +255,11 @@ fn plan(
             continue;
         }
 
+        let to = resolve(&to);
         copies.push(Copy {
             profile: profile.name.clone(),
             from: resolve(&from),
-            to: resolve(&to),
+            to,
         });
     }
 
@@ -327,6 +386,117 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<u64> {
     Ok(bytes)
 }
 
+/// Puts the replacement in place of whatever is there.
+///
+/// Two renames rather than a delete and a copy: the old directory is renamed
+/// aside first, so a failure while the copy takes its name can put it back, and
+/// the only window in which the destination does not exist is the two renames
+/// themselves. Everything before this happened in the staging directory, which
+/// nothing else reads.
+fn commit(copy: &Copy) -> Result<(), BrowserDataError> {
+    let (staging, old) = (staged(&copy.to), displaced(&copy.to));
+
+    if !exists(&copy.to) {
+        return rename(&staging, &copy.to, &copy.profile);
+    }
+
+    rename(&copy.to, &old, &copy.profile)?;
+    if let Err(source) = std::fs::rename(&staging, &copy.to) {
+        // The destination is missing and the old directory is the only copy of
+        // it. Put that back before reporting, so a failed copy is a copy that did
+        // not happen rather than one that lost what was there.
+        if let Err(restoring) = std::fs::rename(&old, &copy.to) {
+            tracing::error!(
+                "could not put {} back after a failed copy of {}'s browser data: {restoring}",
+                copy.to.display(),
+                copy.profile
+            );
+        }
+        return Err(BrowserDataError::Replace {
+            profile: copy.profile.clone(),
+            path: copy.to.clone(),
+            source,
+        });
+    }
+
+    // The replacement is in place, so what it replaced is finished with. A
+    // failure here is untidy rather than wrong, and the next run clears it.
+    discard(&old);
+    Ok(())
+}
+
+/// Undoes what a run that died in the middle of a swap left beside `to`.
+///
+/// The two sibling names are the durable record of the one moment a destination
+/// is missing: `old` exists only between "the old directory was renamed aside"
+/// and "the finished copy took its name". A destination that is missing while
+/// `old` is beside it is therefore a run that died in that window, and `old` is
+/// the only copy of that data - it is renamed back. A `partial` is a copy that
+/// never finished, and is only in the way.
+///
+/// Returns whether a directory was put back, which is the one outcome worth
+/// telling the user about.
+fn recover(profile: &str, to: &Path) -> Result<bool, BrowserDataError> {
+    let (old, staging) = (displaced(to), staged(to));
+    let mut put_back = false;
+
+    if !exists(to) && exists(&old) {
+        tracing::warn!(
+            "{}'s earlier copy was interrupted with {} renamed aside; putting it back",
+            profile,
+            old.display()
+        );
+        rename(&old, to, profile)?;
+        put_back = true;
+    }
+    discard(&old);
+    discard(&staging);
+    Ok(put_back)
+}
+
+/// Renames one of a copy's directories, reporting the failure as that copy's.
+fn rename(from: &Path, to: &Path, profile: &str) -> Result<(), BrowserDataError> {
+    std::fs::rename(from, to).map_err(|source| BrowserDataError::Replace {
+        profile: profile.to_string(),
+        path: to.to_path_buf(),
+        source,
+    })
+}
+
+/// Removes a path that may be a directory, a file, or nothing at all.
+///
+/// Best effort by design: every caller is clearing a leftover, and a leftover
+/// that cannot be cleared now is cleared by the next run. It is logged either
+/// way, because a directory that keeps coming back is worth knowing about.
+fn discard(path: &Path) {
+    match remove_any(path) {
+        Ok(()) => {}
+        Err(error) => tracing::warn!("could not clear {}: {error}", path.display()),
+    }
+}
+
+fn remove_any(path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether anything at all is at this path, including a link that points nowhere.
+fn exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// A path beside `path`, named after it so that a leftover is recognizable.
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".");
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
 /// Why a browser-data copy could not be taken.
 #[derive(Debug, Error)]
 pub enum BrowserDataError {
@@ -367,18 +537,22 @@ pub enum BrowserDataError {
         second: PathBuf,
     },
 
-    #[error("could not clear {path} before copying {profile}'s browser data: {source}")]
-    Remove {
-        profile: String,
-        path: PathBuf,
-        source: io::Error,
-    },
-
     #[error("could not copy {profile}'s browser data from {from} to {to}: {source}")]
     Copy {
         profile: String,
         from: PathBuf,
         to: PathBuf,
+        source: io::Error,
+    },
+
+    /// The finished copy could not be put in place of what was there.
+    ///
+    /// The old directory is put back before this is reported, so the destination
+    /// is either the copy or what it was - never neither.
+    #[error("could not put the copied browser data in place at {path} for {profile}: {source}")]
+    Replace {
+        profile: String,
+        path: PathBuf,
         source: io::Error,
     },
 }
@@ -706,5 +880,118 @@ mod tests {
             b"state",
             "the source is exactly as it was"
         );
+    }
+
+    /// The copy is built whole beside its destination and only then renamed over
+    /// it. A source that cannot be read partway through - here a link to nothing -
+    /// must therefore leave the directory that was already there exactly as it
+    /// was, rather than a destination that was cleared and refilled by halves.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_fails_leaves_the_directory_that_was_there() {
+        let scratch = Scratch::new("failed");
+        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
+        seed_profile(&profile.user_data_dir, "current");
+        std::os::unix::fs::symlink("nowhere", profile.user_data_dir.join("broken"))
+            .expect("a link that resolves to nothing");
+        let backup = scratch.join("backup");
+        let held = backup.join("profiles").join(profile.id.to_string());
+        std::fs::create_dir_all(&held).expect("previous backup");
+        std::fs::write(held.join("Local State"), b"last week").expect("write");
+
+        let error = copy_browser_data(std::slice::from_ref(&profile), &HashSet::new(), &backup)
+            .expect_err("the link cannot be read");
+
+        assert!(matches!(error, BrowserDataError::Copy { .. }), "{error:?}");
+        assert_eq!(
+            std::fs::read(held.join("Local State")).expect("read"),
+            b"last week",
+            "the previous backup is exactly what it was"
+        );
+        assert!(
+            !staged(&held).exists(),
+            "the unfinished copy was not left behind"
+        );
+    }
+
+    /// The other half of that: a good copy leaves no staging directory and no
+    /// displaced one, so the next run has nothing to interpret.
+    #[test]
+    fn a_copy_that_succeeds_leaves_nothing_beside_the_destination() {
+        let scratch = Scratch::new("clean");
+        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
+        seed_profile(&profile.user_data_dir, "current");
+        let backup = scratch.join("backup");
+        let held = backup.join("profiles").join(profile.id.to_string());
+        std::fs::create_dir_all(&held).expect("previous backup");
+        std::fs::write(held.join("Stale File"), b"old").expect("write");
+
+        copy_browser_data(&[profile], &HashSet::new(), &backup).expect("copy");
+
+        assert!(!staged(&held).exists(), "no staging directory is left");
+        assert!(!displaced(&held).exists(), "no displaced directory is left");
+    }
+
+    /// A run killed between the two renames of a swap leaves the destination
+    /// missing and the only copy of its data under `.old`. The next run puts that
+    /// back before it does anything else - which is what makes a failed copy after
+    /// it harmless rather than fatal.
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_an_interrupted_swap_left_aside_is_put_back() {
+        let scratch = Scratch::new("interrupted");
+        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
+        seed_profile(&profile.user_data_dir, "current");
+        // The copy about to run cannot finish, so what the destination holds
+        // afterwards is exactly what the recovery put there.
+        std::os::unix::fs::symlink("nowhere", profile.user_data_dir.join("broken"))
+            .expect("a link that resolves to nothing");
+        let backup = scratch.join("backup");
+        let held = backup.join("profiles").join(profile.id.to_string());
+        std::fs::create_dir_all(&held).expect("previous backup");
+        std::fs::write(held.join("Local State"), b"last week").expect("write");
+        // The window a kill can land in: renamed aside, not yet renamed back.
+        std::fs::rename(&held, displaced(&held)).expect("rename aside");
+        std::fs::create_dir_all(staged(&held)).expect("unfinished copy");
+
+        let error = copy_browser_data(std::slice::from_ref(&profile), &HashSet::new(), &backup)
+            .expect_err("the copy cannot read the link");
+
+        assert!(matches!(error, BrowserDataError::Copy { .. }), "{error:?}");
+        assert_eq!(
+            std::fs::read(held.join("Local State")).expect("read"),
+            b"last week",
+            "the directory the interrupted swap left aside was put back"
+        );
+        assert!(!displaced(&held).exists(), "and it is not a leftover now");
+        assert!(!staged(&held).exists(), "nor is the unfinished copy");
+    }
+
+    /// The restart half: a profile whose own directory is missing while its `.old`
+    /// is beside it - a restore killed between the two renames - is put back and
+    /// named, before anything else can mistake the missing directory for data that
+    /// was never there.
+    #[test]
+    fn a_restore_left_aside_is_put_back_at_startup_and_named() {
+        let scratch = Scratch::new("startup");
+        let laptop = profile(&scratch.join("data/profiles/one"), "Work laptop");
+        let directory = laptop.user_data_dir.clone();
+        std::fs::create_dir_all(directory.parent().expect("profiles directory")).expect("create");
+        seed_profile(&directory, "restored");
+        std::fs::rename(&directory, displaced(&directory)).expect("rename aside");
+
+        let put_back = recover_user_data_dirs(std::slice::from_ref(&laptop));
+
+        assert_eq!(put_back, vec!["Work laptop".to_string()]);
+        assert_eq!(
+            std::fs::read(directory.join("Local State")).expect("read"),
+            b"restored",
+            "the profile's data is back where it belongs"
+        );
+        assert!(!displaced(&directory).exists());
+
+        // And a profile with nothing to put back is not named.
+        let quiet = profile(&scratch.join("data/profiles/two"), "Fresh");
+        assert!(recover_user_data_dirs(std::slice::from_ref(&quiet)).is_empty());
     }
 }

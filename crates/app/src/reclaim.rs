@@ -27,7 +27,7 @@ pub fn reclaim_notice(
             .iter()
             .map(|session| describe(session, &name_of, t))
             .collect();
-        parts.push(t.reclaim_left_running(sessions.len(), &list(&sessions, t)));
+        parts.push(t.reclaim_left_running(sessions.len(), &t.names(&sessions)));
         if report.reclaimed.iter().any(|session| session.forced) {
             parts.push(t.reclaim_forced());
         }
@@ -44,7 +44,7 @@ pub fn reclaim_notice(
                 t.reclaim_reason(&who, &unresolved.reason)
             })
             .collect();
-        parts.push(t.reclaim_unresolved(reasons.len(), &list(&reasons, t)));
+        parts.push(t.reclaim_unresolved(reasons.len(), &t.names(&reasons)));
     }
     if !report.stale.is_empty() {
         parts.push(t.reclaim_stale(report.stale.len()));
@@ -60,16 +60,6 @@ fn describe(
 ) -> String {
     let who = name_of(session.profile_id).unwrap_or_else(|| session.profile_id.to_string());
     t.reclaim_session(&who, session.browser_pid, session.xray_pid)
-}
-
-/// Names up to two entries, then counts the rest: the banner is one line.
-fn list(entries: &[String], t: &Text) -> String {
-    match entries {
-        [] => String::new(),
-        [only] => only.clone(),
-        [first, second] => format!("{first} {} {second}", t.list_conjunction()),
-        [first, rest @ ..] => t.listed_more(first, rest.len()),
-    }
 }
 
 #[cfg(test)]
