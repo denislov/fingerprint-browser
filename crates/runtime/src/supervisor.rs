@@ -113,18 +113,7 @@ impl Held {
     ) -> Result<(), String> {
         match self {
             Self::Owned(child) => {
-                #[cfg(windows)]
-                if let Err(error) = child.terminate_tree() {
-                    tracing::error!("failed to terminate managed job: {error}");
-                }
-                if matches!(child.try_wait(), Ok(None)) {
-                    #[cfg(unix)]
-                    let _ = tree.terminate_tree(child.id());
-                    // A direct kill is a fallback if the platform tree controller
-                    // fails.
-                    let _ = child.kill();
-                }
-                let _ = child.wait();
+                terminate_owned(tree, child);
                 Ok(())
             }
             // No handle, so the recorded identity is rechecked at the moment of
@@ -147,6 +136,269 @@ impl Held {
             Self::Owned(child) => crate::process::release_child(child),
             Self::Adopted(_) => Ok(()),
         }
+    }
+}
+
+/// Everything one start acquires, in one value.
+///
+/// A start takes a CDP port, sometimes a SOCKS port, sometimes an Xray process
+/// with a temporary config on disk, a browser process, and a session record. Each
+/// of those has to be given back if anything later in the start goes wrong, and
+/// there are five places in the start that can go wrong - which is five
+/// hand-written rollbacks, each of which has to remember every resource acquired
+/// before it. This is that list in one place: [`StartAttempt::drop`] ends what it
+/// still holds, so a path out of the start that forgets to clean up does not
+/// exist, and a sixth failure point added later cannot leak a browser.
+///
+/// On success the children are taken out and [`StartAttempt::keep`] is called:
+/// the record and the config are the running session's then, and must not be
+/// undone.
+struct StartAttempt {
+    profile_id: ProfileId,
+    runtime_dir: std::path::PathBuf,
+    /// The same tree controller the supervisor uses, shared rather than borrowed
+    /// so this can outlive a borrow of it.
+    tree: Arc<dyn ProcessTreeController>,
+    /// Held until the child that will bind it starts. A reservation is a bound
+    /// socket, so it cannot simply be kept: the browser has to be able to take
+    /// the port.
+    cdp: Option<crate::ports::PortReservation>,
+    socks: Option<crate::ports::PortReservation>,
+    browser: Option<crate::process::ManagedChild>,
+    xray: Option<crate::process::ManagedChild>,
+    /// The ports the children were given, and the arguments the browser was
+    /// launched with: what the running session is described by.
+    cdp_port: u16,
+    socks_port: Option<u16>,
+    effective_args: Vec<String>,
+    /// The temporary Xray config, which holds upstream credentials. Removed on
+    /// every path, including the ones that fail before it is written.
+    xray_config: Option<std::path::PathBuf>,
+    /// Whether a session record was written for this attempt.
+    recorded: bool,
+    /// Set by the cancellation polls, so the caller can tell "the start was
+    /// called off" from "the start failed".
+    cancelled: bool,
+    kept: bool,
+}
+
+impl StartAttempt {
+    fn new(
+        profile_id: ProfileId,
+        tree: Arc<dyn ProcessTreeController>,
+        runtime_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            profile_id,
+            runtime_dir,
+            tree,
+            cdp: None,
+            socks: None,
+            browser: None,
+            xray: None,
+            cdp_port: 0,
+            socks_port: None,
+            effective_args: Vec::new(),
+            xray_config: None,
+            recorded: false,
+            cancelled: false,
+            kept: false,
+        }
+    }
+
+    /// The ports, once the plan has been built from them.
+    fn note_ports(&mut self, cdp_port: u16, socks_port: Option<u16>, args: Vec<String>) {
+        self.cdp_port = cdp_port;
+        self.socks_port = socks_port;
+        self.effective_args = args;
+    }
+
+    fn cdp(&self) -> u16 {
+        self.cdp
+            .as_ref()
+            .expect("the CDP port is held before the plan is built from it")
+            .port()
+    }
+
+    fn socks(&self) -> Option<u16> {
+        self.socks.as_ref().map(crate::ports::PortReservation::port)
+    }
+
+    fn browser_id(&self) -> u32 {
+        self.browser
+            .as_ref()
+            .expect("the browser is held before its identifier is asked for")
+            .id()
+    }
+
+    fn xray_id(&self) -> Option<u32> {
+        self.xray.as_ref().map(crate::process::ManagedChild::id)
+    }
+
+    fn hold_cdp(&mut self, reservation: crate::ports::PortReservation) {
+        self.cdp = Some(reservation);
+    }
+
+    fn hold_socks(&mut self, reservation: crate::ports::PortReservation) {
+        self.socks = Some(reservation);
+    }
+
+    /// Lets go of a port so the child that is about to start can bind it.
+    fn release_cdp(&mut self) {
+        drop(self.cdp.take());
+    }
+
+    fn release_socks(&mut self) {
+        drop(self.socks.take());
+    }
+
+    fn hold_browser(&mut self, child: crate::process::ManagedChild) {
+        self.browser = Some(child);
+    }
+
+    fn hold_xray(&mut self, child: crate::process::ManagedChild) {
+        self.xray = Some(child);
+    }
+
+    fn browser_mut(&mut self) -> &mut crate::process::ManagedChild {
+        self.browser
+            .as_mut()
+            .expect("the browser is held before anything asks about it")
+    }
+
+    fn xray_mut(&mut self) -> Option<&mut crate::process::ManagedChild> {
+        self.xray.as_mut()
+    }
+
+    fn xray_status(&mut self) -> Option<std::io::Result<Option<std::process::ExitStatus>>> {
+        self.xray
+            .as_mut()
+            .map(crate::process::ManagedChild::try_wait)
+    }
+
+    /// Remembers the config this attempt will have written, before it is written:
+    /// a failure partway through writing it still has to remove it.
+    fn note_config(&mut self, path: Option<std::path::PathBuf>) {
+        self.xray_config = path;
+    }
+
+    fn note_record(&mut self) {
+        self.recorded = true;
+    }
+
+    /// Somewhere the start checks whether it has been called off.
+    fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    fn note_cancelled(&mut self, cancelled: bool) {
+        self.cancelled = cancelled;
+    }
+
+    /// The start succeeded: these children are the running session's now, and the
+    /// record and config describe a live session rather than a failed attempt.
+    fn keep(&mut self) {
+        self.kept = true;
+    }
+
+    fn take_browser(&mut self) -> crate::process::ManagedChild {
+        self.browser.take().expect("a kept attempt has a browser")
+    }
+
+    fn take_xray(&mut self) -> Option<crate::process::ManagedChild> {
+        self.xray.take()
+    }
+
+    /// The config path, for the session that will own it.
+    fn config(&self) -> Option<&std::path::Path> {
+        self.xray_config.as_deref()
+    }
+}
+
+impl Drop for StartAttempt {
+    /// Undoes whatever the start acquired and did not hand over.
+    ///
+    /// Children first, then the files that describe them: a record removed before
+    /// its process is gone is a process nothing can find, and the terminal moment
+    /// of a failed start is exactly when that matters.
+    fn drop(&mut self) {
+        if self.kept {
+            return;
+        }
+        if let Some(child) = self.browser.as_mut() {
+            terminate_owned(self.tree.as_ref(), child);
+        }
+        if let Some(child) = self.xray.as_mut() {
+            terminate_owned(self.tree.as_ref(), child);
+        }
+        remove_config(self.xray_config.as_deref());
+        if self.recorded {
+            journal::remove(&self.runtime_dir, self.profile_id);
+        }
+    }
+}
+
+/// The CDP port of an attempt, for the probe that is waiting on it.
+///
+/// A free function because the probe takes the port while the attempt is borrowed
+/// mutably by the check that ran just before it.
+fn cdp_port_of(attempt: &StartAttempt) -> u16 {
+    attempt.cdp_port
+}
+
+/// Why a start did not become a session.
+struct StartFailure {
+    message: String,
+    /// Whether the start was called off rather than failing: a cancelled start is
+    /// not an error to show the user, and it leaves the profile stopped.
+    cancelled: bool,
+}
+
+impl StartFailure {
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            cancelled: false,
+        }
+    }
+
+    fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            cancelled: true,
+        }
+    }
+}
+
+/// Ends a child this program started, and the tree under it.
+///
+/// One function, called by the start's own value on its way out and by the
+/// supervisor for a session that is being stopped, because a browser is a process
+/// group and a job object rather than one process: two rules for ending one would
+/// be two chances to leave a renderer behind.
+fn terminate_owned(tree: &dyn ProcessTreeController, child: &mut crate::process::ManagedChild) {
+    #[cfg(windows)]
+    if let Err(error) = child.terminate_tree() {
+        tracing::error!("failed to terminate managed job: {error}");
+    }
+    if matches!(child.try_wait(), Ok(None)) {
+        #[cfg(unix)]
+        let _ = tree.terminate_tree(child.id());
+        // A direct kill is a fallback if the platform tree controller fails.
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+/// Removes a temporary Xray config, which holds the upstream credentials.
+fn remove_config(path: Option<&std::path::Path>) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Err(error) = std::fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("failed to remove the temporary Xray config {path:?}: {error}");
     }
 }
 
@@ -249,8 +501,11 @@ pub struct SupervisorComponents {
     pub capability_resolver: Box<dyn CapabilityResolver>,
     pub port_allocator: Box<dyn PortAllocator>,
     pub cdp_probe: Box<dyn CdpProbe>,
-    pub process_tree: Box<dyn ProcessTreeController>,
-    pub process_inspector: Box<dyn ProcessInspector>,
+    /// Shared rather than owned, so the value a start tracks its own resources in
+    /// can end a process group on its way out without borrowing the supervisor
+    /// that is running it.
+    pub process_tree: Arc<dyn ProcessTreeController>,
+    pub process_inspector: Arc<dyn ProcessInspector>,
     pub xray_builder: Box<dyn XrayConfigBuilder>,
     /// How long a reclaimed orphan may take to exit before it is killed.
     pub orphan_grace: Duration,
@@ -267,8 +522,8 @@ impl Default for SupervisorComponents {
             capability_resolver: Box::new(DefaultCapabilityResolver::new()),
             port_allocator: Box::new(TcpPortAllocator::new()),
             cdp_probe: Box::new(HttpCdpProbe::new()),
-            process_tree: Box::new(DefaultProcessTreeController::new()),
-            process_inspector: Box::new(DefaultProcessInspector::new()),
+            process_tree: Arc::new(DefaultProcessTreeController::new()),
+            process_inspector: Arc::new(DefaultProcessInspector::new()),
             xray_builder: Box::new(DefaultXrayConfigBuilder::new()),
             orphan_grace: journal::DEFAULT_GRACE,
             cdp_ready_timeout: Duration::from_secs(12),
@@ -295,8 +550,8 @@ pub struct RuntimeSupervisor {
     capability_resolver: Box<dyn CapabilityResolver>,
     port_allocator: Box<dyn PortAllocator>,
     cdp_probe: Box<dyn CdpProbe>,
-    process_tree: Box<dyn ProcessTreeController>,
-    process_inspector: Box<dyn ProcessInspector>,
+    process_tree: Arc<dyn ProcessTreeController>,
+    process_inspector: Arc<dyn ProcessInspector>,
     xray_builder: Box<dyn XrayConfigBuilder>,
     orphan_grace: Duration,
     cdp_ready_timeout: Duration,
@@ -549,211 +804,28 @@ impl RuntimeSupervisor {
             return;
         }
 
-        // 1. Allocate CDP port
-        let cdp_reservation = match self.port_allocator.reserve_loopback() {
-            Ok(p) => p,
-            Err(e) => {
-                self.fail_start(profile_id, format!("port allocation failed: {e}"));
+        // Everything this attempt acquires lives in one value from here on, and
+        // every way out of this function that is not the session below drops it -
+        // which ends the children it still holds, removes the temporary config and
+        // removes the record. The five hand-written rollbacks that used to be here
+        // each had to remember every resource acquired before them, and a sixth
+        // failure point added later would have had to remember them too.
+        let (mut attempt, record) = match self.begin_attempt(&params) {
+            Ok(started) => started,
+            Err(failure) => {
+                // The attempt was dropped inside `begin_attempt`: nothing is
+                // running by the time the profile is told it failed.
+                self.report_start_failure(profile_id, failure);
                 return;
             }
         };
 
-        // 2. Allocate SOCKS port if proxy present
-        let mut socks_reservation = match &params.proxy {
-            Some(_) => match self.port_allocator.reserve_loopback() {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    self.fail_start(profile_id, format!("socks port allocation failed: {e}"));
-                    return;
-                }
-            },
-            None => None,
-        };
-        let cdp_port = cdp_reservation.port();
-        let socks_port = socks_reservation
-            .as_ref()
-            .map(|reservation| reservation.port());
-
-        // 3. Resolve capabilities
-        let capabilities = match self.capability_resolver.resolve(&params.core) {
-            Ok(c) => c,
-            Err(e) => {
-                self.fail_start(profile_id, format!("capability error: {e}"));
-                return;
-            }
-        };
-
-        // 3b. Report every switch the core cannot honour. The serializer omits
-        // them, so without this the profile would claim a fingerprint the
-        // engine never applies.
-        let compatibility = crate::compat::check(&params.core, &params.profile, &capabilities);
-        if let Some(message) = compatibility.message() {
-            self.emit(RuntimeEvent::Warning {
-                profile_id,
-                message,
-            });
-        }
-
-        // 4. Build LaunchPlan
-        let ctx = LaunchContext {
-            profile: &params.profile,
-            core: &params.core,
-            proxy: params.proxy.as_ref(),
-            capabilities: &capabilities,
-            cdp_port,
-            socks_port,
-            xray_executable: Some(self.xray_executable.clone()),
-            xray_config_dir: Some(self.runtime_dir.join(profile_id.to_string())),
-        };
-
-        let plan = match self.planner.build(ctx) {
-            Ok(p) => p,
-            Err(e) => {
-                self.fail_start(profile_id, format!("launch plan error: {e}"));
-                return;
-            }
-        };
-
-        let effective_args: Vec<String> = plan
-            .browser_args
-            .iter()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-
-        self.emit(RuntimeEvent::EffectiveLaunchArgs {
-            profile_id,
-            args: effective_args.clone(),
-        });
-
-        // Prepare and verify Xray before Chromium can issue any requests.
-        let mut xray = None;
-        let mut cancelled = false;
-        let xray_config = plan.xray.as_ref().map(|p| p.config_path.clone());
-        if let Some(xray_plan) = &plan.xray {
-            let result = (|| -> Result<crate::process::ManagedChild, String> {
-                let proxy = params.proxy.as_ref().ok_or("missing proxy configuration")?;
-                self.xray_builder
-                    .build(proxy, xray_plan.socks_port, &xray_plan.config_path)
-                    .map_err(|e| e.to_string())?;
-                let mut command = std::process::Command::new(&xray_plan.executable);
-                command
-                    .args(xray_plan.args())
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                // Xray binds its own socket; release only at the handoff.
-                drop(socks_reservation.take());
-                let mut child = crate::process::spawn_managed(&mut command)
-                    .map_err(|e| format!("Xray spawn failed: {e}"))?;
-                if let Err(e) = crate::xray::wait_ready(
-                    &mut child,
-                    xray_plan.socks_port,
-                    self.xray_ready_timeout,
-                    || {
-                        cancelled = self.poll_start_commands(profile_id);
-                        !cancelled
-                    },
-                ) {
-                    self.terminate_child(&mut child);
-                    return Err(e.to_string());
-                }
-                Ok(child)
-            })();
-            match result {
-                Ok(child) => xray = Some(child),
-                Err(e) => {
-                    self.clear_start_files(profile_id, xray_config.as_deref());
-                    if cancelled {
-                        self.stop_profile(profile_id);
-                    } else {
-                        self.fail_start(profile_id, e);
-                    }
-                    return;
-                }
-            }
-        }
-        let xray_pid = xray.as_ref().map(crate::process::ManagedChild::id);
-
-        if self.poll_start_commands(profile_id) {
-            if let Some(child) = xray.as_mut() {
-                self.terminate_child(child);
-            }
-            self.clear_start_files(profile_id, xray_config.as_deref());
-            self.stop_profile(profile_id);
-            return;
-        }
-
-        // 5. Spawn Chromium
-        let mut cmd = std::process::Command::new(&plan.browser_executable);
-        cmd.args(&plan.browser_args);
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
-
-        drop(cdp_reservation);
-        let mut child = match crate::process::spawn_managed(&mut cmd) {
-            Ok(c) => c,
-            Err(e) => {
-                if let Some(child) = xray.as_mut() {
-                    self.terminate_child(child);
-                }
-                self.clear_start_files(profile_id, xray_config.as_deref());
-                self.fail_start(
-                    profile_id,
-                    format!(
-                        "failed to spawn executable {:?}: {e}",
-                        plan.browser_executable
-                    ),
-                );
-                return;
-            }
-        };
-
-        let browser_pid = child.id();
-
-        // Write the session record as soon as both children exist, before the
-        // readiness wait: a process killed during that wait would otherwise
-        // leave a browser running that no later run can find. The start is still
-        // not failed for a record that cannot be written - the browser is up -
-        // and the warning says what is lost.
-        let record = SessionRecord {
-            profile_id,
-            cdp_port,
-            socks_port,
-            started_at: journal::now_millis(),
-            left_running: false,
-            browser: ProcessRecord::captured(
-                browser_pid,
-                &plan.browser_executable,
-                &effective_args,
-                self.process_inspector.as_ref(),
-            ),
-            xray: plan.xray.as_ref().and_then(|xray_plan| {
-                xray_pid.map(|pid| {
-                    ProcessRecord::captured(
-                        pid,
-                        &xray_plan.executable,
-                        &xray_plan.args(),
-                        self.process_inspector.as_ref(),
-                    )
-                })
-            }),
-        };
-        if let Err(error) = journal::write(&self.runtime_dir, &record) {
-            self.emit(RuntimeEvent::Warning {
-                profile_id,
-                message: format!(
-                    "the session record could not be written ({error}); if this process is \
-                     killed, the browser it started will not be reclaimed by the next run"
-                ),
-            });
-        }
-
-        // 6. Probe CDP readiness
+        // Probe CDP readiness. The record is on disk and both children are
+        // running; this is the part that decides whether they become a session.
         let deadline = std::time::Instant::now() + self.cdp_ready_timeout;
         let readiness = loop {
-            cancelled = self.poll_start_commands(profile_id);
-            if cancelled {
+            attempt.note_cancelled(self.poll_start_commands(profile_id));
+            if attempt.cancelled() {
                 break Err("startup cancelled".to_string());
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -761,38 +833,38 @@ impl RuntimeSupervisor {
                 break Err("CDP readiness timed out".to_string());
             }
             let live = (|| -> Result<(), String> {
-                if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                if let Some(status) = attempt
+                    .browser_mut()
+                    .try_wait()
+                    .map_err(|e| e.to_string())?
+                {
                     return Err(format!("browser exited during CDP readiness: {status}"));
                 }
-                if let Some(child) = xray.as_mut() {
-                    match child.try_wait() {
-                        Ok(None) => {}
-                        Ok(Some(status)) => {
-                            return Err(format!("Xray exited during CDP readiness: {status}"));
-                        }
-                        Err(e) => return Err(format!("Xray status check failed: {e}")),
-                    }
+                if let Some(state) = attempt.xray_status()
+                    && let Some(status) = state.map_err(|e| e.to_string())?
+                {
+                    return Err(format!("Xray exited during CDP readiness: {status}"));
                 }
                 Ok(())
             })();
             if let Err(error) = live {
                 break Err(error);
             }
-            match self
-                .cdp_probe
-                .wait_ready(cdp_port, remaining.min(Duration::from_millis(100)))
-            {
+            match self.cdp_probe.wait_ready(
+                cdp_port_of(&attempt),
+                remaining.min(Duration::from_millis(100)),
+            ) {
                 Ok(info) => {
-                    cancelled = self.poll_start_commands(profile_id);
-                    if cancelled {
+                    attempt.note_cancelled(self.poll_start_commands(profile_id));
+                    if attempt.cancelled() {
                         break Err("startup cancelled".to_string());
                     }
-                    if !matches!(child.try_wait(), Ok(None)) {
+                    if !matches!(attempt.browser_mut().try_wait(), Ok(None)) {
                         break Err("browser exited during CDP readiness".into());
                     }
                     // Recheck Xray after the probe before advertising Running.
-                    if let Some(xray) = xray.as_mut()
-                        && !matches!(xray.try_wait(), Ok(None))
+                    if let Some(status) = attempt.xray_status()
+                        && !matches!(status, Ok(None))
                     {
                         break Err("Xray exited during CDP readiness".into());
                     }
@@ -806,9 +878,25 @@ impl RuntimeSupervisor {
         };
         match readiness {
             Ok(_info) => {
+                let cancelled = attempt.cancelled();
+                debug_assert!(!cancelled, "a cancelled start never reports readiness");
+                let browser = attempt.take_browser();
+                let xray = attempt.take_xray();
+                let xray_config = attempt.config().map(std::path::Path::to_path_buf);
+                let (cdp_port, socks_port, effective_args) = (
+                    attempt.cdp_port,
+                    attempt.socks_port,
+                    attempt.effective_args.clone(),
+                );
+                // From here the children, the config and the record belong to the
+                // running session, and must not be undone by the drop below.
+                attempt.keep();
+
+                let browser_pid = record.browser.pid;
+                let xray_pid = record.xray.as_ref().map(|xray| xray.pid);
                 let session = ActiveSession {
                     _profile_id: profile_id,
-                    browser: Held::Owned(child),
+                    browser: Held::Owned(browser),
                     xray: xray.map(Held::Owned),
                     xray_config,
                     _cdp_port: cdp_port,
@@ -862,18 +950,231 @@ impl RuntimeSupervisor {
                 });
             }
             Err(e) => {
-                // Rollback
-                self.terminate_child(&mut child);
-                if let Some(child) = xray.as_mut() {
-                    self.terminate_child(child);
-                }
-                self.clear_start_files(profile_id, xray_config.as_deref());
-                if cancelled {
-                    self.stop_profile(profile_id);
-                } else {
-                    self.fail_start(profile_id, format!("CDP readiness probe failed: {e}"));
-                }
+                // Dropping the attempt is the rollback: the browser, the Xray
+                // process, the temporary config and the record all go, in that
+                // order, whatever failed.
+                let failure = StartFailure {
+                    message: format!("CDP readiness probe failed: {e}"),
+                    cancelled: attempt.cancelled(),
+                };
+                drop(attempt);
+                self.report_start_failure(profile_id, failure);
             }
+        }
+    }
+
+    /// Everything a start does before the browser is ready to be probed.
+    ///
+    /// Acquires the ports, resolves capabilities, builds the plan, starts Xray and
+    /// Chromium and writes the session record - and returns the value that owns
+    /// all of it, or the reason there is nothing to own. It does not decide the
+    /// profile's state: its caller is what turns either answer into a snapshot and
+    /// an event, so every failure leaves the same way.
+    fn begin_attempt(
+        &mut self,
+        params: &StartParams,
+    ) -> Result<(StartAttempt, SessionRecord), StartFailure> {
+        let profile_id = params.profile.id;
+        let mut attempt = StartAttempt::new(
+            profile_id,
+            Arc::clone(&self.process_tree),
+            self.runtime_dir.clone(),
+        );
+
+        // 1. Allocate CDP port
+        let cdp_reservation = self
+            .port_allocator
+            .reserve_loopback()
+            .map_err(|e| StartFailure::failed(format!("port allocation failed: {e}")))?;
+        attempt.hold_cdp(cdp_reservation);
+
+        // 2. Allocate SOCKS port if proxy present
+        if params.proxy.is_some() {
+            let socks_reservation = self
+                .port_allocator
+                .reserve_loopback()
+                .map_err(|e| StartFailure::failed(format!("socks port allocation failed: {e}")))?;
+            attempt.hold_socks(socks_reservation);
+        }
+        let cdp_port = attempt.cdp();
+        let socks_port = attempt.socks();
+
+        // 3. Resolve capabilities
+        let capabilities = self
+            .capability_resolver
+            .resolve(&params.core)
+            .map_err(|e| StartFailure::failed(format!("capability error: {e}")))?;
+
+        // 3b. Report every switch the core cannot honour. The serializer omits
+        // them, so without this the profile would claim a fingerprint the
+        // engine never applies.
+        let compatibility = crate::compat::check(&params.core, &params.profile, &capabilities);
+        if let Some(message) = compatibility.message() {
+            self.emit(RuntimeEvent::Warning {
+                profile_id,
+                message,
+            });
+        }
+
+        // 4. Build LaunchPlan
+        let ctx = LaunchContext {
+            profile: &params.profile,
+            core: &params.core,
+            proxy: params.proxy.as_ref(),
+            capabilities: &capabilities,
+            cdp_port,
+            socks_port,
+            xray_executable: Some(self.xray_executable.clone()),
+            xray_config_dir: Some(self.runtime_dir.join(profile_id.to_string())),
+        };
+
+        let plan = self
+            .planner
+            .build(ctx)
+            .map_err(|e| StartFailure::failed(format!("launch plan error: {e}")))?;
+
+        let effective_args: Vec<String> = plan
+            .browser_args
+            .iter()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+
+        self.emit(RuntimeEvent::EffectiveLaunchArgs {
+            profile_id,
+            args: effective_args.clone(),
+        });
+        attempt.note_ports(cdp_port, socks_port, effective_args);
+
+        // The config path is remembered before it is written, so a failure
+        // partway through writing it still removes it.
+        attempt.note_config(plan.xray.as_ref().map(|xray| xray.config_path.clone()));
+
+        // Prepare and verify Xray before Chromium can issue any requests.
+        if let Some(xray_plan) = &plan.xray {
+            let proxy = params
+                .proxy
+                .as_ref()
+                .ok_or_else(|| StartFailure::failed("missing proxy configuration"))?;
+            self.xray_builder
+                .build(proxy, xray_plan.socks_port, &xray_plan.config_path)
+                .map_err(|e| StartFailure::failed(e.to_string()))?;
+
+            let mut command = std::process::Command::new(&xray_plan.executable);
+            command
+                .args(xray_plan.args())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            // Xray binds its own socket; release only at the handoff.
+            attempt.release_socks();
+
+            let child = crate::process::spawn_managed(&mut command)
+                .map_err(|e| StartFailure::failed(format!("Xray spawn failed: {e}")))?;
+            attempt.hold_xray(child);
+
+            let mut cancelled = false;
+            let ready = {
+                let child = attempt
+                    .xray_mut()
+                    .expect("the Xray process was held just above");
+                crate::xray::wait_ready(
+                    child,
+                    xray_plan.socks_port,
+                    self.xray_ready_timeout,
+                    || {
+                        cancelled = self.poll_start_commands(profile_id);
+                        !cancelled
+                    },
+                )
+            };
+            if let Err(error) = ready {
+                // Dropped on the way out, which ends the Xray process and removes
+                // the config it was reading.
+                return Err(if cancelled {
+                    StartFailure::cancelled(error.to_string())
+                } else {
+                    StartFailure::failed(error.to_string())
+                });
+            }
+        }
+
+        if self.poll_start_commands(profile_id) {
+            return Err(StartFailure::cancelled("startup cancelled"));
+        }
+
+        // 5. Spawn Chromium
+        let mut cmd = std::process::Command::new(&plan.browser_executable);
+        cmd.args(&plan.browser_args);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+
+        attempt.release_cdp();
+        let child = crate::process::spawn_managed(&mut cmd).map_err(|e| {
+            StartFailure::failed(format!(
+                "failed to spawn executable {:?}: {e}",
+                plan.browser_executable
+            ))
+        })?;
+        attempt.hold_browser(child);
+
+        let browser_pid = attempt.browser_id();
+        let xray_pid = attempt.xray_id();
+
+        // Write the session record as soon as both children exist, before the
+        // readiness wait: a process killed during that wait would otherwise
+        // leave a browser running that no later run can find. The start is still
+        // not failed for a record that cannot be written - the browser is up -
+        // and the warning says what is lost.
+        let record = SessionRecord {
+            profile_id,
+            cdp_port,
+            socks_port,
+            started_at: journal::now_millis(),
+            left_running: false,
+            browser: ProcessRecord::captured(
+                browser_pid,
+                &plan.browser_executable,
+                &attempt.effective_args,
+                self.process_inspector.as_ref(),
+            ),
+            xray: plan.xray.as_ref().and_then(|xray_plan| {
+                xray_pid.map(|pid| {
+                    ProcessRecord::captured(
+                        pid,
+                        &xray_plan.executable,
+                        &xray_plan.args(),
+                        self.process_inspector.as_ref(),
+                    )
+                })
+            }),
+        };
+        if let Err(error) = journal::write(&self.runtime_dir, &record) {
+            self.emit(RuntimeEvent::Warning {
+                profile_id,
+                message: format!(
+                    "the session record could not be written ({error}); if this process is \
+                     killed, the browser it started will not be reclaimed by the next run"
+                ),
+            });
+        }
+        // Whether or not the write landed, a failure from here removes whatever
+        // is there: a half-written record is worse than none.
+        attempt.note_record();
+
+        Ok((attempt, record))
+    }
+
+    /// Publishes what a start that did not become a session leaves behind.
+    ///
+    /// A start that was called off is stopped; a start that went wrong is failed,
+    /// with the reason. Either way everything it acquired has already been given
+    /// back: the attempt was dropped before this is called.
+    fn report_start_failure(&mut self, profile_id: ProfileId, failure: StartFailure) {
+        if failure.cancelled {
+            self.stop_profile(profile_id);
+        } else {
+            self.fail_start(profile_id, failure.message);
         }
     }
 
@@ -986,7 +1287,7 @@ impl RuntimeSupervisor {
             }
 
             if failures.is_empty() {
-                Self::remove_config(session.xray_config.as_deref());
+                remove_config(session.xray_config.as_deref());
                 journal::remove(&self.runtime_dir, profile_id);
                 self.publish_stopped(profile_id);
             } else {
@@ -1113,37 +1414,6 @@ impl RuntimeSupervisor {
             && let Some(snapshot) = snapshots.get_mut(&id)
         {
             snapshot.dropped_events = snapshot.dropped_events.saturating_add(1);
-        }
-    }
-
-    fn terminate_child(&self, child: &mut crate::process::ManagedChild) {
-        #[cfg(windows)]
-        if let Err(error) = child.terminate_tree() {
-            tracing::error!("failed to terminate managed job: {error}");
-        }
-        if matches!(child.try_wait(), Ok(None)) {
-            #[cfg(unix)]
-            let _ = self.process_tree.terminate_tree(child.id());
-            // A direct kill is a fallback if the platform tree controller fails.
-            let _ = child.kill();
-        }
-        let _ = child.wait();
-    }
-
-    /// What a failed, cancelled or rolled-back start leaves behind: the
-    /// temporary Xray config, which holds upstream credentials, and the session
-    /// record, which would otherwise name processes that are already gone.
-    fn clear_start_files(&self, profile_id: ProfileId, xray_config: Option<&std::path::Path>) {
-        Self::remove_config(xray_config);
-        journal::remove(&self.runtime_dir, profile_id);
-    }
-
-    fn remove_config(path: Option<&std::path::Path>) {
-        if let Some(path) = path
-            && let Err(e) = std::fs::remove_file(path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!("failed to remove temporary Xray config: {e}");
         }
     }
 
@@ -1869,6 +2139,20 @@ mod tests {
                     .try_iter()
                     .any(|e| matches!(e, RuntimeEvent::Started { .. }))
             );
+            // The record and the processes are the other two things a start
+            // acquires. Which of the four cases reached the record differs - two
+            // fail before both children exist - but none of them may leave one
+            // behind, and none may leave a process for the next run to reclaim.
+            assert!(
+                journal::read(&f.dir, f.params.profile.id)
+                    .expect("the journal is readable")
+                    .is_none(),
+                "a rolled back start left its record behind"
+            );
+            assert!(
+                f.supervisor.recover_orphans().is_empty(),
+                "a rolled back start left a process running"
+            );
         }
     }
 
@@ -1999,7 +2283,7 @@ mod tests {
         let mut f = Fixture::new(false, false, XRAY);
         let adopted = adopt(&mut f, 4242, true);
         let profile_id = adopted.profile_id;
-        f.supervisor.process_inspector = Box::new(SomeoneElse);
+        f.supervisor.process_inspector = Arc::new(SomeoneElse);
 
         f.supervisor.stop_profile(profile_id);
 
@@ -2026,7 +2310,7 @@ mod tests {
 
         // The process is gone now, so the retry the session stayed for works:
         // everything a normal stop cleans up is cleaned up.
-        f.supervisor.process_inspector = Box::new(Nobody);
+        f.supervisor.process_inspector = Arc::new(Nobody);
         f.supervisor.stop_profile(profile_id);
         assert_eq!(f.snapshot().state, RuntimeState::Stopped);
         assert!(!f.supervisor.active_sessions.contains_key(&profile_id));
@@ -2041,11 +2325,11 @@ mod tests {
         let mut f = Fixture::new(false, false, XRAY);
         let adopted = adopt(&mut f, 4343, false);
         let profile_id = adopted.profile_id;
-        f.supervisor.process_tree = Box::new(Refuses);
+        f.supervisor.process_tree = Arc::new(Refuses);
         // The inspector says the pid is still ours, so the stop gets as far as
         // asking the tree to end it - and the grace period is what it spends
         // waiting first.
-        f.supervisor.process_inspector = Box::new(Ours);
+        f.supervisor.process_inspector = Arc::new(Ours);
 
         f.supervisor.stop_profile(profile_id);
 

@@ -73,6 +73,12 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Changed
 
+- A start now gives back everything it acquired from one place. The ports, the
+  Xray process and its temporary configuration, the browser and the session record
+  used to be undone by five separate hand-written rollbacks, one per failure point,
+  each of which had to remember every resource acquired before it; they now live in
+  one value that undoes them when it is dropped. A failure path added later cannot
+  forget one.
 - Starting (or restarting) a profile that uses a proxy now asks the proxy first and
   refuses when nothing comes back. A launch used to go ahead on the strength of the
   engine binding its loopback port, which says nothing about whether the upstream
