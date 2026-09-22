@@ -18,17 +18,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The font stack is the only thing this workspace links against a system
-      # library (freetype-sys and yeslogic-fontconfig-sys; verified from the
-      # build-script output). gpui's X11/Wayland backend dlopens, and the UI
-      # tests render headless: no display is needed, and python3 - required by
-      # the runtime lifecycle tests - is already on the runner image.
+      # What this workspace links against, which is more than the font stack the
+      # first version of this list assumed. Two of them come from build scripts -
+      # freetype-sys and yeslogic-fontconfig-sys - and three declare their own
+      # `#[link]` in crate source, where a search of build-script output does not
+      # find them: `-lxcb` from x11rb's `allow-unsafe-code` FFI, and
+      # `-lxkbcommon` and `-lxkbcommon-x11` from xkbcommon's `x11` support. They
+      # are needed even though `--as-needed` drops them from the test binary's
+      # NEEDED list, because the linker still has to resolve `-l` to link at all.
+      # The X11 *server* is not needed and neither is a display - the UI tests
+      # render headless - and python3, which the runtime lifecycle tests use, is
+      # already on the runner image.
       - name: Install the system libraries the workspace links against
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            libfontconfig1-dev libfreetype-dev
+            libfontconfig1-dev libfreetype-dev \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:

@@ -58,14 +58,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The same two system libraries the gate installs: freetype-sys and
-      # yeslogic-fontconfig-sys are the only linked system libraries, and the
-      # rest of the UI stack dlopens.
+      # The same list the gate installs, and it has to be the list the *release*
+      # binary needs: `ldd` on the archive's binary names libxcb, libxkbcommon and
+      # libxkbcommon-x11 among its dependencies, so a job that installed only the
+      # font stack would fail to link before it ever got to packaging.
       - name: Install the system libraries the workspace links against
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            libfontconfig1-dev libfreetype-dev
+            libfontconfig1-dev libfreetype-dev \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

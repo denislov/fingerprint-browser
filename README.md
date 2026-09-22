@@ -180,8 +180,11 @@ See [Windows acceptance](docs/windows-acceptance.md) and [lifecycle](docs/lifecy
 
 ## Run
 
-Use stable Rust. Linux needs libfontconfig1-dev and libfreetype-dev. Windows needs
-the MSVC Rust toolchain and C++ build tools. Supply your own binary paths:
+Use stable Rust. Linux needs the font and X11 development packages the UI stack
+links against - `libfontconfig1-dev`, `libfreetype-dev`, `libxcb1-dev`,
+`libxkbcommon-dev`, `libxkbcommon-x11-dev` - and no display, because the window
+is only opened when you run the program, not when you build it. Windows needs the
+MSVC Rust toolchain and C++ build tools. Supply your own binary paths:
 
 ```powershell
 $env:FP_BROWSER_CHROMIUM_BIN = 'C:\tools\fingerprint-chromium\chrome.exe'
