@@ -5,13 +5,14 @@ Notable changes to this program. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html), and the rules for
 both are in [release.md](docs/release.md).
 
-Nothing has been published yet. `0.1.0` is the version in `Cargo.toml`, and the
-section for it below is what the `v0.1.0` tag will publish - the release workflow
-refuses a tag the changelog says nothing about. Work that lands after this point
-goes under `Unreleased`, and is folded into the version's section before the tag
-is cut.
+`0.1.0` is the first release, and the version in `Cargo.toml`. Work that lands
+after a release goes under `Unreleased`, and is folded into the next version's
+section before its tag is cut - the release workflow refuses a tag the changelog
+says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-09-22
 
 ### Added
 
@@ -29,11 +30,6 @@ is cut.
   left is reclaimed exactly as before, and a session record that cannot be marked
   is released and logged rather than stranded. A signal still means stop
   everything. See [exit modes](docs/exit-modes.md).
-
-## [0.1.0] - 2026-09-21
-
-### Added
-
 - One window per data directory. A second copy cannot take the lock on the data
   directory, prints which process holds it, and exits 3 - instead of opening the
   same database and reading the first copy's running browsers as orphans to stop.

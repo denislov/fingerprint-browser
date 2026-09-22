@@ -5,14 +5,13 @@ in a habit because three of them are load-bearing: the version a user reports ha
 to identify a commit, the binary a user runs has to be built the same way twice,
 and nothing may be downloaded on the user's behalf.
 
-**Status: the scripts, the workflow and the changelog section are in; nothing has
-been published yet.** The version policy, the release profile, the identity
-surfaces, the icons, the Linux archive and the Windows installer script all
-exist, and the release workflow that drives them is written. The changelog now
-has a `## [0.1.0]` section, which is the one thing the workflow checks before it
-will take a tag. What has been *run* is the Linux side, on Linux; the Windows
-installer and the workflow file have not run anywhere, and the last section says
-what that means.
+**Status: `0.1.0` is the first release.** The version policy, the release
+profile, the identity surfaces, the icons, the Linux archive and the Windows
+installer script all exist, and the release workflow that drives them is written.
+The changelog's `## [0.1.0]` section is what the tag publishes, and is the one
+thing the workflow checks before it will take a tag. What has been *run* is the
+Linux side, on Linux; the Windows installer and the workflow file have not run
+anywhere, and the last section says what that means.
 
 ## Versioning
 
@@ -29,7 +28,7 @@ what that means.
 - While the version is `0.x`, a minor bump may break a file format - but the
   changelog has to say so, in the entry, in the terms a user reads: what they
   will see and what to do about it.
-- `0.1.0` is the first version and nothing has been released at it yet.
+- `0.1.0` is the first version.
 - The **commit** is the other half of the identity and is not written by hand:
   `crates/app/build.rs` injects `git describe --always --dirty --abbrev=9` as
   `FP_BUILD_COMMIT`, so `--version`, the window's title bar path and every
