@@ -14,6 +14,14 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Fixed
 
+- A start, a browser-data copy and a configuration replacement can no longer
+  overlap on the same profile. A start returns as soon as its command is queued,
+  so the runtime's snapshot still said the profile was stopped while its browser
+  was coming up - long enough to begin copying a profile that was already
+  starting, or to begin a second copy that cleared a destination the first was
+  still writing. Each operation now takes a lease on the profiles it will use, the
+  worker that runs a copy owns that lease and gives it back when it returns, fails
+  or panics, and replacing the configuration is refused while any profile is held.
 - A profile's start page must be a page. It is appended to the browser's command
   line as an argument of its own, so a value from an imported configuration that
   spelled a switch - `--no-proxy-server`, say - was Chromium's switch to obey, and

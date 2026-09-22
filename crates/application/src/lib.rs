@@ -4,6 +4,7 @@ pub mod core_service;
 pub mod error;
 pub mod export;
 pub mod import;
+pub mod operations;
 pub mod profile_service;
 pub mod proxy_service;
 pub mod restore;
@@ -21,6 +22,7 @@ pub use import::{
     Counts, ImportError, ImportNotes, ImportPlan, ImportReport, Repointed, apply_import,
     plan_import, read_config_backup,
 };
+pub use operations::{Busy, Held, Operation, Operations};
 pub use profile_service::{
     DefaultProfileService, DeleteMode, NewProfile, ProfileService, default_user_data_dir,
 };

@@ -1395,16 +1395,21 @@ impl AppView {
     /// Starts a browser-data copy in the direction asked for.
     ///
     /// The job is gathered before anything is spawned, so an empty path, an
-    /// empty installation or a running profile is refused where the field is
-    /// rather than on a worker that could not have copied anything. A copy is
-    /// hundreds of megabytes, so the run itself is on a worker and the answer
-    /// arrives on a later tick.
+    /// empty installation, a running profile or a profile something else is
+    /// already busy with is refused where the field is rather than on a worker
+    /// that could not have copied anything. A copy is hundreds of megabytes, so
+    /// the run itself is on a worker and the answer arrives on a later tick.
+    ///
+    /// The lease the job comes with goes into that worker: it is what refuses a
+    /// start, or a second copy, of these profiles until the copy is over - and
+    /// dropping it in the thread is what gives them back, whether the copy
+    /// returned, failed, or panicked on the way.
     fn on_browser_data(&mut self, direction: Direction, cx: &mut Context<Self>) {
         if let Some(input) = self.browser_data_input.clone() {
             let typed = input.read(cx).value().to_string();
             self.state.set_browser_data_path(typed);
         }
-        let job = match self.state.browser_data_job(direction) {
+        let (job, lease) = match self.state.browser_data_job(direction) {
             Ok(job) => job,
             Err(message) => {
                 self.state.push_notice(message, true);
@@ -1416,6 +1421,7 @@ impl AppView {
         let sender = self.browser_data_tx.clone();
         std::thread::spawn(move || {
             let outcome = copier.run(&job);
+            drop(lease);
             let _ = sender.send((direction, outcome));
         });
         cx.notify();
@@ -6947,6 +6953,72 @@ mod tests {
         let message = last_message(cx, &view);
         assert!(message.contains("Copied the browser data"), "{message}");
         assert!(message.contains("/backups/browser-data"), "{message}");
+    }
+
+    /// A copy in flight is a state the window can be asked about. The lease the
+    /// job carries is held by the worker, so while the first copy is still running
+    /// a second press and a start are both refused - and both work again once it
+    /// has finished. The worker is a fake this test holds open, which is what
+    /// makes "still running" something to assert against rather than to race.
+    #[gpui_kit::test]
+    fn a_copy_in_flight_refuses_a_second_copy_and_a_start(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (copier, pause) = FakeBrowserDataCopier::paused();
+        let (view, runtime, copier) = view_with_browser_data(cx, Arc::new(copier));
+        let cx = window(cx, &view);
+        let id = seed_profile(cx, &view);
+
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        let field = view
+            .read_with(cx, |view, _| view.browser_data_input())
+            .expect("the Settings page builds the browser-data field");
+        cx.update(|window, cx| {
+            field.update(cx, |state, cx| {
+                state.set_value("/backups/browser-data", window, cx)
+            });
+        });
+        settle(cx);
+
+        // The first copy starts and stops inside the worker.
+        scroll_settings_to(cx, "browser-data-out");
+        cx.update(|window, cx| window.click("browser-data-out", cx));
+        pause.wait_until_copying();
+
+        // A second press is refused, and starts no worker of its own.
+        cx.update(|window, cx| window.click("browser-data-out", cx));
+        settle(cx);
+        let message = last_message(cx, &view);
+        assert!(message.contains("try again"), "{message}");
+        assert_eq!(copier.calls(), 1, "the refused press started no worker");
+
+        // So is starting one of the profiles the copy is holding.
+        cx.update(|window, cx| window.click("nav-Profiles", cx));
+        settle(cx);
+        cx.update(|window, cx| window.click(format!("start-{id}"), cx));
+        settle(cx);
+        let message = last_message(cx, &view);
+        assert!(message.contains("try again"), "{message}");
+        assert!(
+            runtime.commands.lock().expect("commands").is_empty(),
+            "the refused start never reached the runtime"
+        );
+
+        // The copy finishes. Everything it held is free, so the next one runs.
+        pause.release();
+        wait_for_state(cx, &view, |state| {
+            state
+                .toasts()
+                .iter()
+                .any(|toast| toast.message.contains("Copied"))
+        });
+        cx.update(|window, cx| window.click("nav-Settings", cx));
+        settle(cx);
+        scroll_settings_to(cx, "browser-data-out");
+        cx.update(|window, cx| window.click("browser-data-out", cx));
+        pause.wait_until_copying();
+        assert_eq!(copier.calls(), 2, "the copy after it finished is allowed");
+        pause.release();
     }
 
     #[gpui_kit::test]

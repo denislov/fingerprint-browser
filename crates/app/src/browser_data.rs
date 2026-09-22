@@ -72,14 +72,28 @@ pub(crate) mod testing {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// A copier a test drives: it records the jobs it was given and answers with
     /// whatever it was told to.
+    ///
+    /// [`FakeBrowserDataCopier::paused`] adds a gate, which is how a test holds a
+    /// copy open while it asks the window what it thinks of a second one. The
+    /// other constructors leave the gate open, so tests that are not about that
+    /// are not slowed down by it.
     #[derive(Default)]
     pub struct FakeBrowserDataCopier {
         outcome: Mutex<Option<Result<BrowserDataReport, String>>>,
         jobs: Mutex<Vec<BrowserDataJob>>,
         calls: AtomicUsize,
+        gate: Option<Gate>,
+    }
+
+    /// The two ends of the gate: the worker says it is inside the copy, and waits
+    /// until the test lets it finish.
+    struct Gate {
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
     }
 
     impl FakeBrowserDataCopier {
@@ -98,7 +112,27 @@ pub(crate) mod testing {
                 outcome: Mutex::new(Some(outcome)),
                 jobs: Mutex::new(Vec::new()),
                 calls: AtomicUsize::new(0),
+                gate: None,
             }
+        }
+
+        /// A copier that stops inside the copy until [`Pause::release`], and the
+        /// handle the test drives it with.
+        ///
+        /// This is what makes "a copy is in flight" a state a test can hold still
+        /// rather than race: the refusal it is about is only interesting while the
+        /// first copy is still running.
+        pub fn paused() -> (Self, Pause) {
+            let (entered, waiting) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let copier = Self {
+                gate: Some(Gate {
+                    entered,
+                    release: Mutex::new(released),
+                }),
+                ..Self::passing()
+            };
+            (copier, Pause { waiting, release })
         }
 
         pub fn calls(&self) -> usize {
@@ -109,12 +143,48 @@ pub(crate) mod testing {
         pub fn jobs(&self) -> Vec<BrowserDataJob> {
             self.jobs.lock().expect("jobs lock").clone()
         }
+
+        /// Waits at the gate, when this copier has one.
+        fn hold(&self) {
+            let Some(gate) = &self.gate else {
+                return;
+            };
+            let _ = gate.entered.send(());
+            // Bounded rather than open-ended: a test that forgets to release must
+            // fail rather than hang the suite, and what it is holding open is a
+            // fake copy.
+            if let Ok(released) = gate.release.lock() {
+                let _ = released.recv_timeout(Duration::from_secs(10));
+            }
+        }
+    }
+
+    /// The test's end of a paused copier.
+    pub struct Pause {
+        waiting: std::sync::mpsc::Receiver<()>,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    impl Pause {
+        /// Waits until the worker is inside the copy, so that what follows is
+        /// about a copy that is genuinely in flight.
+        pub fn wait_until_copying(&self) {
+            self.waiting
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the worker reaches the copy");
+        }
+
+        /// Lets it finish.
+        pub fn release(&self) {
+            let _ = self.release.send(());
+        }
     }
 
     impl BrowserDataCopier for FakeBrowserDataCopier {
         fn run(&self, job: &BrowserDataJob) -> Result<BrowserDataReport, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.jobs.lock().expect("jobs lock").push(job.clone());
+            self.hold();
             self.outcome
                 .lock()
                 .expect("outcome lock")

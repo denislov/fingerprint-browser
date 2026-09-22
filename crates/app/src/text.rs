@@ -1239,6 +1239,46 @@ impl Text {
         }
     }
 
+    /// What a profile is busy with, for the sentence that refuses an operation
+    /// needing it to itself. A phrase rather than a whole sentence, because the
+    /// two refusals below put it in different places in the two languages.
+    pub fn busy_starting(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "starting up",
+            Lang::Zh => "正在启动",
+        }
+    }
+
+    pub fn busy_copying(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "having its browser data copied",
+            Lang::Zh => "正在复制浏览器数据",
+        }
+    }
+
+    /// The refusal of an operation that needs one profile to itself, which a copy
+    /// or a start it is already busy with does not leave.
+    pub fn profile_busy(&self, name: &str, what: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{name} is {what}; try again when that finishes."),
+            Lang::Zh => format!("{name}{what}，请等它结束后再试。"),
+        }
+    }
+
+    /// The refusal of an operation that needs the whole installation to itself.
+    ///
+    /// Named rather than counted: the reader has to know which profile to wait
+    /// for, and a replacement that went ahead would leave a copy of that profile
+    /// writing into directories the new configuration no longer describes.
+    pub fn install_busy(&self, name: &str, what: &str) -> String {
+        match self.lang {
+            Lang::En => {
+                format!("Cannot replace the configuration while {name} is {what}.")
+            }
+            Lang::Zh => format!("{name}{what}，无法替换配置。"),
+        }
+    }
+
     pub fn verification_claims_toast(&self, count: usize) -> String {
         match self.lang {
             Lang::En => format!("fingerprint read back with {count} claim(s) not confirmed"),

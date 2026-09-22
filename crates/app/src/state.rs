@@ -15,8 +15,9 @@ use crate::theme::ThemeChoice;
 use crate::verifier::{EgressJob, VerificationJob, VerificationReport};
 use application::{
     AppError, BrowserDataReport, CoreService, Counts, Credentials, DeleteMode, Direction,
-    ExportOrigin, ExportReport, ImportNotes, ImportReport, NewProfile, NewProxy, ProfileService,
-    ProxyService, RestoreError, RestoreMode, RestoreReport, RuntimeService,
+    ExportOrigin, ExportReport, Held, ImportNotes, ImportReport, NewProfile, NewProxy, Operation,
+    Operations, ProfileService, ProxyService, RestoreError, RestoreMode, RestoreReport,
+    RuntimeService,
 };
 use domain::{
     BrowserCore, BrowserProfile, CoreId, ProfileId, ProxyId, ProxyOutbound, ProxyProfile,
@@ -111,6 +112,16 @@ pub struct LogRow {
 /// How many log lines are kept. The window is a session tool, not an audit
 /// system, and an unbounded vector would grow with every restart.
 const LOG_CAPACITY: usize = 500;
+
+/// How long a start may hold its profile before the window assumes it will never
+/// be answered.
+///
+/// A start's lease is normally given back within a tick, when the runtime's
+/// snapshot stops saying the profile is stopped. This is the valve for a runtime
+/// that says nothing at all - generous, because a start that is merely slow has
+/// already published its state by then, and holding a profile for longer than this
+/// would refuse every copy of it for no reason.
+const START_LEASE: Duration = Duration::from_secs(30);
 
 /// Which of the activity log's lines the page is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -674,6 +685,12 @@ pub struct AppState {
     /// both directions, because it is one place: a copy out writes there and a
     /// copy back in reads from it.
     browser_data_path: String,
+    /// Which profiles are busy, and with what.
+    ///
+    /// The runtime's snapshot cannot answer that on its own: a start returns when
+    /// its command is queued, and the state it produces is published a tick
+    /// later. Everything that must not overlap with a start or a copy asks here.
+    operations: Arc<Operations>,
 }
 
 impl AppState {
@@ -773,6 +790,7 @@ impl AppState {
             import_path: String::new(),
             restore_path: String::new(),
             browser_data_path: String::new(),
+            operations: Arc::new(Operations::default()),
         }
     }
 
@@ -834,6 +852,30 @@ impl AppState {
         let runtime = Arc::clone(&self.runtime);
         for row in &mut self.rows {
             row.snapshot = runtime.snapshot(row.profile.id);
+            // A start lease is held only until the runtime has said something
+            // about it. The snapshot is what says it: once the profile is no
+            // longer stopped, the state itself refuses a copy - a profile that is
+            // starting is active - so the lease has done its job.
+            //
+            // Nothing is released for a profile the snapshot still says is
+            // stopped, which is the window this lease exists for, and
+            // `Operations::expire` is what stops a start that is never answered
+            // from holding its profile for as long as the window is open.
+            if row
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.state != RuntimeState::Stopped)
+            {
+                self.operations.free(row.profile.id, Operation::Starting);
+            }
+        }
+
+        for profile in self.operations.expire(START_LEASE) {
+            tracing::warn!(
+                "no answer for the start of {} within {}s; the profile is free again",
+                self.profile_name(profile),
+                START_LEASE.as_secs()
+            );
         }
     }
 
@@ -1626,6 +1668,16 @@ impl AppState {
             return Err(message);
         }
 
+        // A profile that is starting, or that a copy is holding, is not in the
+        // snapshot yet or is not in it at all - and the replacement is about to
+        // delete the rows both of them are working from. Refused for the same
+        // reason a running profile is, which is the case this generalises.
+        if let Some((profile, operation)) = self.operations.any() {
+            let message = t.install_busy(&self.profile_name(profile), self.busy_phrase(operation));
+            self.set_notice(Notice::error(message.clone()));
+            return Err(message);
+        }
+
         let data_dir = self.settings.data_dir().to_path_buf();
         let result = application::read_config_backup(&source)
             .map_err(|error| t.file_read_failed(&error.to_string()))
@@ -1684,9 +1736,17 @@ impl AppState {
     /// The run happens on a worker, so this only gathers: the profiles as
     /// storage holds them, the identifiers that are active, and the directory.
     /// Every refusal that can be made before a thread is spawned is made here -
-    /// an empty path, an empty installation, a running profile - so the worker is
-    /// never started for a copy that could not run.
-    pub fn browser_data_job(&mut self, direction: Direction) -> Result<BrowserDataJob, String> {
+    /// an empty path, an empty installation, a running profile, a profile
+    /// something else is already doing something with - so the worker is never
+    /// started for a copy that could not run.
+    ///
+    /// The second half of the answer is the lease on those profiles: it is taken
+    /// here, and it is the worker that gives it back, because the worker is what
+    /// knows the copy is over.
+    pub fn browser_data_job(
+        &mut self,
+        direction: Direction,
+    ) -> Result<(BrowserDataJob, Held), String> {
         let t = self.text();
         let directory = self
             .browser_data_directory()
@@ -1714,12 +1774,29 @@ impl AppState {
             .map(|row| row.profile.id)
             .collect();
 
-        Ok(BrowserDataJob {
+        // Held from here, not from the worker's first line: the profiles a copy
+        // will write are taken before the thread exists, so nothing can start one
+        // of them in the moment between the click and the copy. Every profile is
+        // in the job - a copy covers the installation - so a copy is what makes
+        // the whole installation busy.
+        let ids: Vec<ProfileId> = profiles.iter().map(|profile| profile.id).collect();
+        let lease = self
+            .operations
+            .lease(&ids, Operation::Copying)
+            .map_err(|busy| {
+                t.profile_busy(
+                    &self.profile_name(busy.profile),
+                    self.busy_phrase(busy.operation),
+                )
+            })?;
+
+        let job = BrowserDataJob {
             direction,
             profiles,
             running: active,
             directory,
-        })
+        };
+        Ok((job, lease))
     }
 
     /// Reports the outcome of a browser-data copy the worker finished.
@@ -1888,7 +1965,13 @@ impl AppState {
     }
 
     pub fn start(&mut self, id: ProfileId) -> Result<(), AppError> {
-        self.record(self.runtime.start(id))?;
+        self.begin_starting(id)?;
+        if let Err(error) = self.record(self.runtime.start(id)) {
+            // The command never reached the runtime, so no snapshot will ever
+            // answer for it: give the profile back here rather than at the tick.
+            self.operations.free(id, Operation::Starting);
+            return Err(error);
+        }
         self.refresh_runtime();
         Ok(())
     }
@@ -1902,11 +1985,53 @@ impl AppState {
     }
 
     pub fn restart(&mut self, id: ProfileId) -> Result<(), AppError> {
-        self.record(self.runtime.restart(id))?;
+        self.begin_starting(id)?;
+        if let Err(error) = self.record(self.runtime.restart(id)) {
+            self.operations.free(id, Operation::Starting);
+            return Err(error);
+        }
         // A restarted browser is a new browser: the old reading is stale.
         self.forget_verification(id);
         self.refresh_runtime();
         Ok(())
+    }
+
+    /// Takes the profile for a start that is about to be queued.
+    ///
+    /// The lease outlives this call on purpose: `RuntimeService::start` returns as
+    /// soon as the command is queued, so releasing here would leave exactly the
+    /// window this is for - a copy that could begin while the browser is coming
+    /// up. [`AppState::refresh_runtime`] gives it back when the runtime's snapshot
+    /// stops saying the profile is stopped, and [`Operations::expire`] gives it
+    /// back if the runtime never says anything at all.
+    fn begin_starting(&self, id: ProfileId) -> Result<(), AppError> {
+        let t = self.text();
+        self.operations
+            .take(id, Operation::Starting)
+            .map_err(|busy| {
+                AppError::Other(t.profile_busy(
+                    &self.profile_name(busy.profile),
+                    self.busy_phrase(busy.operation),
+                ))
+            })
+    }
+
+    /// What an operation is, in the words a refusal uses.
+    fn busy_phrase(&self, operation: Operation) -> &'static str {
+        let t = self.text();
+        match operation {
+            Operation::Starting => t.busy_starting(),
+            Operation::Copying => t.busy_copying(),
+        }
+    }
+
+    /// The name of a profile, or its identifier when storage no longer has it.
+    fn profile_name(&self, id: ProfileId) -> String {
+        self.rows
+            .iter()
+            .find(|row| row.profile.id == id)
+            .map(|row| row.profile.name.clone())
+            .unwrap_or_else(|| id.to_string())
     }
 
     /// Writes an edited profile back, keeping the row list in step.
@@ -2232,11 +2357,24 @@ pub(crate) mod testing {
     pub struct FakeRuntime {
         snapshots: RwLock<HashMap<ProfileId, RuntimeSnapshot>>,
         pub commands: Mutex<Vec<String>>,
+        /// Whether a start publishes the state it produces.
+        ///
+        /// A real runtime answers a start a tick after the command is queued, and
+        /// the ticket's window between the two is what a start's lease covers. A
+        /// test that needs that window turns the answer off and leaves the
+        /// snapshot stopped.
+        silent: std::sync::atomic::AtomicBool,
     }
 
     impl FakeRuntime {
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// Stops publishing the state of a start, so the snapshot stays stopped:
+        /// the command is queued and nothing has answered.
+        pub fn answer_nothing(&self) {
+            self.silent.store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
         pub fn set_state(&self, id: ProfileId, state: RuntimeState) {
@@ -2317,7 +2455,9 @@ pub(crate) mod testing {
     impl RuntimeFacade for FakeRuntime {
         fn start(&self, params: StartParams) -> Result<(), RuntimeCommandError> {
             let id = params.profile_id();
-            self.set_state(id, RuntimeState::Running);
+            if !self.silent.load(std::sync::atomic::Ordering::SeqCst) {
+                self.set_state(id, RuntimeState::Running);
+            }
             self.record(&format!("start:{id}"));
             Ok(())
         }
@@ -2330,7 +2470,9 @@ pub(crate) mod testing {
 
         fn restart(&self, params: StartParams) -> Result<(), RuntimeCommandError> {
             let id = params.profile_id();
-            self.set_state(id, RuntimeState::Running);
+            if !self.silent.load(std::sync::atomic::Ordering::SeqCst) {
+                self.set_state(id, RuntimeState::Running);
+            }
             self.record(&format!("restart:{id}"));
             Ok(())
         }
@@ -5352,7 +5494,7 @@ mod tests {
         );
 
         fixture.state.set_browser_data_path("  /backups/fp  ");
-        let job = fixture
+        let (job, lease) = fixture
             .state
             .browser_data_job(Direction::ToBackup)
             .expect("a job");
@@ -5360,6 +5502,7 @@ mod tests {
         assert_eq!(job.profiles.len(), 1);
         assert!(job.running.is_empty());
         assert_eq!(job.direction, Direction::ToBackup);
+        drop(lease);
     }
 
     #[test]
@@ -5390,6 +5533,103 @@ mod tests {
             .expect_err("nothing to copy");
 
         assert!(error.contains("no profiles"), "{error}");
+    }
+
+    /// The whole point of the lease: while a copy owns these profiles, nothing
+    /// else may touch them - not a second copy, not a start, not a configuration
+    /// replacement - and when the copy is over they are free again.
+    ///
+    /// The window this closes is the one the snapshot cannot: `start` returns when
+    /// its command is queued, so a profile whose browser is coming up still reads
+    /// as stopped. The worker is what holds the copy's lease, so the test holds it
+    /// the same way - by keeping the value alive.
+    #[test]
+    fn a_copy_holds_its_profiles_until_the_worker_gives_them_back() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture.state.create_profile("Work laptop").expect("create");
+        fixture.state.set_browser_data_path("/backups/fp");
+
+        let (job, lease) = fixture
+            .state
+            .browser_data_job(Direction::ToBackup)
+            .expect("the first copy");
+        assert_eq!(job.profiles.len(), 1);
+
+        let error = fixture
+            .state
+            .browser_data_job(Direction::FromBackup)
+            .expect_err("a second copy is refused while the first runs");
+        assert!(error.contains("Work laptop"), "{error}");
+        assert!(error.contains("copied"), "{error}");
+
+        let error = fixture
+            .state
+            .start(id)
+            .expect_err("starting one of the profiles is refused");
+        assert!(error.to_string().contains("Work laptop"), "{error}");
+
+        // A replacement reads its file first, so the path has to be there for the
+        // refusal to be about the busy profile rather than about the field.
+        fixture.state.set_restore_path("/backups/fp/config.json");
+        let error = fixture
+            .state
+            .restore_configuration(RestoreMode::Replace)
+            .expect_err("replacing the configuration is refused");
+        assert!(error.contains("Work laptop"), "{error}");
+
+        // The worker finishes: everything it held is free again.
+        drop(lease);
+        let (job, lease) = fixture
+            .state
+            .browser_data_job(Direction::FromBackup)
+            .expect("the copy after it finishes");
+        assert_eq!(job.profiles.len(), 1);
+        drop(lease);
+    }
+
+    /// A start holds its profile from the command until the runtime has answered
+    /// for it. A stopped snapshot is the window between the two, and a copy is
+    /// refused for its whole width - which the snapshot alone could not do, since
+    /// it is stopped for the whole of it.
+    #[test]
+    fn a_queued_start_holds_its_profile_until_the_snapshot_answers() {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().expect("load");
+        let id = fixture.state.create_profile("Work laptop").expect("create");
+        fixture.state.set_browser_data_path("/backups/fp");
+
+        // The command is queued and nothing has answered: the profile reads as
+        // stopped, which is exactly the window the lease is for.
+        fixture.runtime.answer_nothing();
+        fixture.state.start(id).expect("the command is queued");
+        assert_eq!(
+            fixture.state.operations.held(id),
+            Some(Operation::Starting),
+            "a start that has not been answered holds its profile"
+        );
+
+        let error = fixture
+            .state
+            .browser_data_job(Direction::ToBackup)
+            .expect_err("the queued start holds the profile");
+        assert!(error.contains("starting up"), "{error}");
+
+        // The runtime answers. The snapshot refuses a copy from here on, and the
+        // lease is gone - which is what lets the profile be restarted at all.
+        fixture.runtime.set_state(id, RuntimeState::Running);
+        fixture.state.refresh_runtime();
+        assert_eq!(
+            fixture.state.operations.held(id),
+            None,
+            "an answered start gives its profile back"
+        );
+        fixture
+            .state
+            .restart(id)
+            .expect("a restart is not refused by the start before it");
     }
 
     #[test]
