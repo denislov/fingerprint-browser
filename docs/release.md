@@ -30,11 +30,14 @@ anywhere, and the last section says what that means.
   will see and what to do about it.
 - `0.1.0` is the first version.
 - The **commit** is the other half of the identity and is not written by hand:
-  `crates/app/build.rs` injects `git describe --always --dirty --abbrev=9` as
-  `FP_BUILD_COMMIT`, so `--version`, the window's title bar path and every
-  diagnostics report name the tree the binary came from. A tree with no `.git`
-  reports `unknown`, and a modified tree says `-dirty`, because a report from a
-  build that is not the commit it names cannot be reproduced.
+  `crates/app/build.rs` injects `git describe --always --dirty --abbrev=9
+  --exclude=*` as `FP_BUILD_COMMIT`, so `--version`, the window's title bar path
+  and every diagnostics report name the tree the binary came from. A tree with no
+  `.git` reports `unknown`, and a modified tree says `-dirty`, because a report
+  from a build that is not the commit it names cannot be reproduced. The tags are
+  excluded on purpose: a build made at a tag is the one most likely to be asked
+  what it came from, and without the exclusion `describe` answers with the tag -
+  `v0.1.0`, and no commit at all.
 - Tags are `v<version>` (`v0.1.0`), on the commit the artifact was built from.
   A tag that does not match `Cargo.toml` is a release that cannot be rebuilt.
 

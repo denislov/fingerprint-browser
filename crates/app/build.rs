@@ -17,11 +17,12 @@
 //!
 //! No `cargo:rerun-if-changed` is emitted for this package's sources, so cargo's
 //! default rule applies and this runs again whenever a file here changes. That
-//! default is not enough on its own, though: `git commit`, `git checkout` and
-//! `git tag` all change what `git describe` answers without touching a file in
-//! this package, which is how a committed tree came to report the commit before
-//! it - with `-dirty` in it, on a clean working tree. [`watch_git_head`] names the
-//! files the answer is actually read from.
+//! default is not enough on its own, though: `git commit` and `git checkout`
+//! change what `git describe` answers without touching a file in this package,
+//! which is how a committed tree came to report the commit before it - with
+//! `-dirty` in it, on a clean working tree. [`watch_git_head`] names the files the
+//! answer is actually read from. Tags are excluded from that answer (see `main`),
+//! so what they change is at most a rebuild.
 //!
 //! The icon lives outside this package, so a change to it is picked up on the
 //! next source change rather than immediately; that is the cost of keeping the
@@ -37,7 +38,22 @@ fn main() {
         // `--dirty` marks a build that is not the commit it names, which is the
         // difference between a report that can be reproduced and one that
         // cannot. It reads tracked files only, so `target/` does not mark it.
-        .args(["describe", "--always", "--dirty", "--abbrev=9"])
+        //
+        // `--exclude='*'` keeps `describe` from answering with a tag. Without it
+        // a build made at a tag reports the *tag* - `v0.1.0` on a clean tree, and
+        // no commit at all - because a tag on `HEAD` is the first thing
+        // `describe` looks for. The field is the commit, and a released artifact
+        // is exactly the build most likely to be asked what it came from, so the
+        // tags are excluded rather than the answer trimmed afterwards: the
+        // abbreviation, the `-dirty` marker and the `--always` fallback for a
+        // tree with no tags at all all stay what they were.
+        .args([
+            "describe",
+            "--always",
+            "--dirty",
+            "--abbrev=9",
+            "--exclude=*",
+        ])
         .output()
         .ok()
         .filter(|output| output.status.success())

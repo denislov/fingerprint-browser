@@ -93,7 +93,8 @@ the log, the operating system's own error text. Those are the same in every
 language, and a translated path would not resolve.
 
 The commit is injected at build time by `crates/app/build.rs`
-(`git describe --always --dirty --abbrev=9`), not written in the source: a
+(`git describe --always --dirty --abbrev=9 --exclude=*`, the tags excluded so a
+build made at a tag still names its commit), not written in the source: a
 checkout reports its own commit, a modified tree says so with a `-dirty` suffix,
 and a source tree with no `.git` at all still builds - it reports `unknown`.
 
