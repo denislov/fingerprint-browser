@@ -163,6 +163,9 @@ fn record(child: &ManagedChild) -> SessionRecord {
         cdp_port: 0,
         socks_port: None,
         started_at: journal::now_millis(),
+        // Unmarked: these tests are about what a crash leaves, and a marked
+        // record is what the next start adopts instead of reclaiming.
+        left_running: false,
         xray: None,
         browser: ProcessRecord::captured(
             child.id(),
@@ -182,7 +185,7 @@ fn an_identified_legacy_session_is_reclaimed_but_a_mismatched_one_is_preserved()
     let actual = entry.browser.start_time.unwrap();
     entry.browser.start_time = Some(actual + 1);
     journal::write(&fixture.0, &entry).unwrap();
-    let report = journal::reclaim(
+    let report = journal::recover(
         &fixture.0,
         &DefaultProcessInspector,
         &DefaultProcessTreeController,
@@ -202,7 +205,7 @@ fn an_identified_legacy_session_is_reclaimed_but_a_mismatched_one_is_preserved()
     );
     entry.browser.start_time = None;
     journal::write(&fixture.0, &entry).unwrap();
-    let report = journal::reclaim(
+    let report = journal::recover(
         &fixture.0,
         &DefaultProcessInspector,
         &DefaultProcessTreeController,
@@ -216,7 +219,7 @@ fn an_identified_legacy_session_is_reclaimed_but_a_mismatched_one_is_preserved()
     assert!(child.try_wait().unwrap().is_none());
     entry.browser.start_time = Some(actual);
     journal::write(&fixture.0, &entry).unwrap();
-    let report = journal::reclaim(
+    let report = journal::recover(
         &fixture.0,
         &DefaultProcessInspector,
         &DefaultProcessTreeController,
@@ -246,7 +249,7 @@ fn failed_cleanup_keeps_the_record_for_retry() {
     let mut child = spawn(&mut fixture.command("leaf")).unwrap();
     let entry = record(&child);
     journal::write(&fixture.0, &entry).unwrap();
-    let report = journal::reclaim(
+    let report = journal::recover(
         &fixture.0,
         &DefaultProcessInspector,
         &Refuse,
@@ -261,7 +264,7 @@ fn failed_cleanup_keeps_the_record_for_retry() {
     );
     child.terminate_tree().unwrap();
     child.wait().unwrap();
-    let report = journal::reclaim(
+    let report = journal::recover(
         &fixture.0,
         &DefaultProcessInspector,
         &Refuse,

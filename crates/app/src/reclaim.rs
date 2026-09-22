@@ -7,7 +7,7 @@ use crate::text::Text;
 use domain::ProfileId;
 use runtime::{ReclaimReport, Reclaimed};
 
-/// A notice for what `RuntimeSupervisor::reclaim_orphans` did, or `None` when
+/// A notice for what `RuntimeSupervisor::recover_orphans` did, or `None` when
 /// there was nothing to do. The flag is the banner's error colour: something
 /// that could not be reclaimed is an error, something that was cleaned up is
 /// information.

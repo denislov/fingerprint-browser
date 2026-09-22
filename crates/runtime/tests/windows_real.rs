@@ -246,7 +246,7 @@ fn windows_manager_crash_kills_browser_and_next_start_clears_record() {
             .to_string_lossy()
             .starts_with("fp-chromium-")
     );
-    let report = reclaim_orphans(
+    let report = recover_orphans(
         &directory.join("runtime"),
         &DefaultProcessInspector,
         &DefaultProcessTreeController,
