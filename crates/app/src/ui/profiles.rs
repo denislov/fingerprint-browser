@@ -343,9 +343,8 @@ impl AppView {
             let tester = Arc::clone(&self.tester);
             let sender = self.proxy_test_tx.clone();
             std::thread::spawn(move || {
-                let live = job.is_live();
                 let outcome = tester.test(&job);
-                let _ = sender.send((job.proxy_id, live, outcome));
+                let _ = sender.send((*job, outcome));
             });
         }
         cx.notify();
@@ -398,7 +397,7 @@ impl AppView {
         let sender = self.verification_tx.clone();
         std::thread::spawn(move || {
             let outcome = verifier.verify(&job);
-            let _ = sender.send((job.profile_id, outcome));
+            let _ = sender.send((job, outcome));
         });
         cx.notify();
     }

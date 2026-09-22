@@ -91,11 +91,17 @@ pub struct AppView {
     /// Copies browser data. Injected so a test never writes hundreds of
     /// megabytes, and never touches a disk.
     copier: Arc<dyn BrowserDataCopier>,
-    verifications: Receiver<(ProfileId, Result<VerificationReport, String>)>,
-    verification_tx: Sender<(ProfileId, Result<VerificationReport, String>)>,
+    verifications: Receiver<(
+        crate::verifier::VerificationJob,
+        Result<VerificationReport, String>,
+    )>,
+    verification_tx: Sender<(
+        crate::verifier::VerificationJob,
+        Result<VerificationReport, String>,
+    )>,
     /// Finished proxy tests, with whether the engine probed was already up.
-    proxy_tests: Receiver<(ProxyId, bool, Result<Diagnosis, Fault>)>,
-    proxy_test_tx: Sender<(ProxyId, bool, Result<Diagnosis, Fault>)>,
+    proxy_tests: Receiver<(crate::proxy_tester::ProxyTestJob, Result<Diagnosis, Fault>)>,
+    proxy_test_tx: Sender<(crate::proxy_tester::ProxyTestJob, Result<Diagnosis, Fault>)>,
     /// What the opener reported, once it was done handing the request off.
     open_results: Receiver<(PathBuf, Result<(), String>)>,
     open_tx: Sender<(PathBuf, Result<(), String>)>,
@@ -367,16 +373,8 @@ impl AppView {
     /// Collect finished readings from the worker threads.
     fn drain_verifications(&mut self) -> bool {
         let mut received = false;
-        while let Ok((id, outcome)) = self.verifications.try_recv() {
-            // A profile stopped or restarted while the reading ran: the answer
-            // describes a browser that is gone, so drop it.
-            if self
-                .state
-                .verification(id)
-                .is_some_and(Verification::is_running)
-            {
-                self.state.finish_verification(id, outcome);
-            }
+        while let Ok((job, outcome)) = self.verifications.try_recv() {
+            self.state.complete_verification(&job, outcome);
             received = true;
         }
         received
@@ -388,10 +386,8 @@ impl AppView {
     /// describes an upstream that is no longer the one on the row.
     fn drain_proxy_tests(&mut self) -> bool {
         let mut received = false;
-        while let Ok((id, live, outcome)) = self.proxy_tests.try_recv() {
-            if self.state.proxy_test(id).is_some_and(ProxyTest::is_running) {
-                self.state.finish_proxy_test(id, live, outcome);
-            }
+        while let Ok((job, outcome)) = self.proxy_tests.try_recv() {
+            self.state.complete_proxy_test(&job, outcome);
             received = true;
         }
         received

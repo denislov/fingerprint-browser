@@ -1154,6 +1154,37 @@ fn a_verification_job_carries_the_profile_and_its_capabilities() {
 }
 
 #[test]
+fn an_old_verification_does_not_replace_the_current_task() {
+    let mut fixture = fixture();
+    let id = running_profile(&mut fixture);
+    let old = fixture.state.begin_verification(id).unwrap();
+    fixture.state.forget_verification(id);
+    let current = fixture.state.begin_verification(id).unwrap();
+    fixture
+        .state
+        .complete_verification(&old, Ok(VerificationReport::default()));
+    assert!(fixture.state.verification(id).unwrap().is_running());
+    fixture
+        .state
+        .complete_verification(&current, Err("current failure".into()));
+    assert!(
+        matches!(fixture.state.verification(id), Some(Verification::Unreadable(message)) if message == "current failure")
+    );
+}
+
+#[test]
+fn verification_from_a_browser_that_exited_is_discarded() {
+    let mut fixture = fixture();
+    let id = running_profile(&mut fixture);
+    let job = fixture.state.begin_verification(id).unwrap();
+    fixture.runtime.set_state(id, RuntimeState::Stopped);
+    fixture
+        .state
+        .complete_verification(&job, Ok(VerificationReport::default()));
+    assert!(fixture.state.verification(id).is_none());
+}
+
+#[test]
 fn a_second_verification_of_the_same_profile_is_refused() {
     let mut fixture = fixture();
     let id = running_profile(&mut fixture);
@@ -2857,6 +2888,38 @@ fn through_the_proxy() -> Result<Diagnosis, Fault> {
 
 fn commands(fixture: &Fixture) -> Vec<String> {
     fixture.runtime.commands.lock().expect("commands").clone()
+}
+
+#[test]
+fn an_old_proxy_result_cannot_release_a_new_start_gate() {
+    let mut fixture = fixture();
+    let (id, proxy_id) = proxied(&mut fixture, "Work");
+    let old = fixture.state.begin_proxy_test(proxy_id).unwrap();
+    let mut proxy = fixture.state.proxy(proxy_id).unwrap();
+    proxy.name = "Edited".into();
+    fixture.state.update_proxy(proxy).unwrap();
+    let StartGate::Checking(current) = fixture.state.begin_opening(id, Opening::Start).unwrap()
+    else {
+        panic!("new check")
+    };
+    fixture.state.complete_proxy_test(&old, through_the_proxy());
+    assert!(commands(&fixture).is_empty());
+    assert!(fixture.state.proxy_test(proxy_id).unwrap().is_running());
+    fixture
+        .state
+        .complete_proxy_test(&current, through_the_proxy());
+    assert_eq!(commands(&fixture), [format!("start:{id}")]);
+    fixture
+        .state
+        .complete_proxy_test(&old, Err(Fault::new(FaultClass::Timeout, "late")));
+    assert!(
+        fixture
+            .state
+            .proxy_test(proxy_id)
+            .unwrap()
+            .exit_ip()
+            .is_some()
+    );
 }
 
 /// A profile whose traffic leaves through a proxy is only as usable as that

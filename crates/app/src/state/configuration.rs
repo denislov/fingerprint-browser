@@ -390,6 +390,10 @@ impl AppState {
         match result {
             Ok(report) => {
                 let summary = restore_summary(report, source, t);
+                self.proxy_tasks.clear();
+                self.verification_tasks.clear();
+                self.proxy_tests.clear();
+                self.verifications.clear();
                 self.set_notice(if report.needs_attention() {
                     Notice::error(summary)
                 } else {

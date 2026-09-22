@@ -668,6 +668,8 @@ pub struct AppState {
     profile_filter: String,
     notice: Option<Notice>,
     verifications: HashMap<ProfileId, Verification>,
+    verification_tasks: HashMap<ProfileId, crate::task::TaskId>,
+    proxy_tasks: HashMap<ProxyId, crate::task::TaskId>,
     /// What the last test of each proxy found.
     proxy_tests: HashMap<ProxyId, ProxyTest>,
     /// Toasts the window has not shown yet.
@@ -856,6 +858,8 @@ impl AppState {
             profile_filter: String::new(),
             notice: None,
             verifications: HashMap::new(),
+            verification_tasks: HashMap::new(),
+            proxy_tasks: HashMap::new(),
             proxy_tests: HashMap::new(),
             toasts: Vec::new(),
             log: Vec::new(),

@@ -48,6 +48,8 @@ pub struct EgressJob {
 /// Everything a worker needs to verify one profile without touching the view.
 #[derive(Debug, Clone)]
 pub struct VerificationJob {
+    pub task: crate::task::TaskId,
+    pub session: u64,
     pub profile_id: ProfileId,
     pub port: u16,
     pub profile: FingerprintProfile,
@@ -221,6 +223,8 @@ mod tests {
 
     fn job(port: u16) -> VerificationJob {
         VerificationJob {
+            task: crate::task::TaskId::new(),
+            session: 0,
             profile_id: ProfileId::new(),
             port,
             profile: FingerprintProfile::new_random(1),

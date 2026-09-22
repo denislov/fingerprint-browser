@@ -59,6 +59,8 @@ impl AppState {
             .capabilities()
             .ok_or_else(|| AppError::Conflict(t.core_has_no_version(&core.name)))?;
         Ok(VerificationJob {
+            task: crate::task::TaskId::new(),
+            session: row.snapshot.as_ref().map_or(0, |s| s.acknowledged_start),
             profile_id: id,
             port,
             profile: row.profile.fingerprint.clone(),
@@ -74,7 +76,29 @@ impl AppState {
     /// Clears a verification result, e.g. after the profile restarted: a new
     /// browser has a new fingerprint.
     pub fn forget_verification(&mut self, id: ProfileId) {
+        self.verification_tasks.remove(&id);
         self.verifications.remove(&id);
+    }
+
+    pub fn complete_verification(
+        &mut self,
+        job: &VerificationJob,
+        outcome: Result<VerificationReport, String>,
+    ) {
+        if self.verification_tasks.get(&job.profile_id) != Some(&job.task) {
+            return;
+        }
+        let current = self.runtime.snapshot(job.profile_id);
+        if !current.is_some_and(|s| {
+            s.state.is_running()
+                && s.acknowledged_start == job.session
+                && s.cdp_port == Some(job.port)
+        }) {
+            self.forget_verification(job.profile_id);
+            return;
+        }
+        self.verification_tasks.remove(&job.profile_id);
+        self.finish_verification(job.profile_id, outcome);
     }
 
     /// Records the outcome of a verification the view ran on a worker.
@@ -125,6 +149,7 @@ impl AppState {
             return Err(AppError::Other(t.verification_busy(&id.to_string())));
         }
         let job = self.verification_job(id)?;
+        self.verification_tasks.insert(id, job.task);
         self.verifications.insert(id, Verification::Running);
         Ok(job)
     }
@@ -169,7 +194,9 @@ impl AppState {
 
     /// Writes an edited profile back, keeping the row list in step.
     pub fn update_profile(&mut self, profile: BrowserProfile) -> Result<(), AppError> {
+        let id = profile.id;
         self.record(self.profiles.update(profile))?;
+        self.forget_verification(id);
         self.load_rows()?;
         self.refresh_runtime();
         Ok(())

@@ -8,7 +8,7 @@ Behavioral fixes precede structural cleanup.
 - [x] Protect browser-data sources and unowned recovery directories; separate copy tests.
 - [x] Coordinate configuration restoration with configuration writes, starts and copies.
 - [x] Keep queued starts protected until their own runtime acknowledgement.
-- [ ] Match asynchronous diagnostics to individual tasks.
+- [x] Match asynchronous diagnostics to individual tasks.
 - [ ] Enforce diagnostic deadlines throughout partial reads and writes.
 - [ ] Preserve decoded proxy credentials.
 - [ ] Atomically replace configuration backups and settings files.
@@ -33,6 +33,11 @@ acknowledge handled and cancelled requests. The UI releases a queued-start lease
 only for its own acknowledgement, never for an old failure or elapsed time.
 An unresponsive supervisor therefore keeps data-changing operations blocked;
 timeouts alone cannot prove a queued start will never execute.
+
+Stage 4: diagnostic results carry their originating task, and fingerprint
+readings also match the runtime session. An edited proxy's obsolete result
+cannot release a new start gate. Concurrent old/new proxy workers have separate
+temporary engine directories. Restore invalidates all previous readings.
 
 Real-browser, real-Xray and platform-specific tests require their corresponding
 runtime environment; ordinary workspace tests do not replace those checks.

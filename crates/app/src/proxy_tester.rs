@@ -37,6 +37,7 @@ pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Everything a worker needs to test one proxy without touching the view.
 #[derive(Debug, Clone)]
 pub struct ProxyTestJob {
+    pub task: crate::task::TaskId,
     pub proxy_id: ProxyId,
     pub proxy: ProxyProfile,
     /// The address endpoint to ask. Read from the settings when the test is
@@ -83,10 +84,14 @@ impl XrayProxyTester {
 
 impl ProxyTester for XrayProxyTester {
     fn test(&self, job: &ProxyTestJob) -> Result<Diagnosis, Fault> {
-        // One directory per proxy, under the runtime directory the supervisor
-        // already uses: a temporary engine is not a second kind of thing, it is
-        // the same thing without a profile behind it.
-        let directory = self.runtime_dir.join(job.proxy_id.to_string());
+        // An edited proxy can be tested again before its old worker returns.
+        // Each worker owns its own credentials file and cleanup directory.
+        let directory = self.runtime_dir.join(format!(
+            "{}-{}-{}",
+            job.proxy_id,
+            std::process::id(),
+            job.task.0
+        ));
         let engine = match job.live_port {
             Some(socks_port) => Engine::Running { socks_port },
             None => Engine::Temporary {
@@ -192,6 +197,7 @@ mod tests {
     fn a_proxy_that_leads_nowhere_reports_a_fault_not_a_reading() {
         let tester = XrayProxyTester::new("bin/definitely-not-xray", "data/runtime");
         let job = ProxyTestJob {
+            task: crate::task::TaskId::new(),
             proxy_id: ProxyId::new(),
             proxy: ProxyProfile {
                 id: ProxyId::new(),
@@ -223,6 +229,7 @@ mod tests {
     #[test]
     fn a_job_with_a_port_is_a_live_one() {
         let mut job = ProxyTestJob {
+            task: crate::task::TaskId::new(),
             proxy_id: ProxyId::new(),
             proxy: ProxyProfile {
                 id: ProxyId::new(),

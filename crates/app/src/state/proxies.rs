@@ -106,13 +106,23 @@ impl AppState {
             .get(id)?
             .ok_or_else(|| AppError::NotFound(t.proxy_not_found(&id.to_string())))?;
         let job = ProxyTestJob {
+            task: crate::task::TaskId::new(),
             proxy_id: id,
             proxy,
             echo_url: self.settings.echo_url().to_string(),
             live_port: self.live_port_for(id),
         };
+        self.proxy_tasks.insert(id, job.task);
         self.proxy_tests.insert(id, ProxyTest::Running);
         Ok(job)
+    }
+
+    pub fn complete_proxy_test(&mut self, job: &ProxyTestJob, outcome: Result<Diagnosis, Fault>) {
+        if self.proxy_tasks.get(&job.proxy_id) != Some(&job.task) {
+            return;
+        }
+        self.proxy_tasks.remove(&job.proxy_id);
+        self.finish_proxy_test(job.proxy_id, job.is_live(), outcome);
     }
 
     /// Records the outcome of a test the view ran on a worker.
@@ -224,6 +234,7 @@ impl AppState {
     /// Clears a test result. Editing a proxy is enough: a different upstream is
     /// a different answer, and the old one would read as a claim about the new.
     pub fn forget_proxy_test(&mut self, id: ProxyId) {
+        self.proxy_tasks.remove(&id);
         self.proxy_tests.remove(&id);
         let reason = self.text().proxy_check_dropped();
         self.cancel_pending_starts(id, reason);

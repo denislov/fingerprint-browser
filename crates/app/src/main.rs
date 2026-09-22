@@ -26,6 +26,7 @@ mod settings;
 #[cfg(unix)]
 mod signal;
 mod state;
+mod task;
 mod text;
 mod theme;
 mod tray;
