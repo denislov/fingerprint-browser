@@ -376,8 +376,22 @@ impl ProxyRepository for SqliteProxyRepository {
             .lock()
             .map_err(|e| StorageError::Other(e.to_string()))?;
         let id_str = id.to_string();
-        conn.execute("DELETE FROM proxies WHERE id = ?1", params![id_str])?;
-        Ok(())
+        conn.execute("DELETE FROM proxies WHERE id = ?1", params![id_str])
+            .map(|_| ())
+            .map_err(|error| match refusal(error) {
+                // A profile still names this proxy, and the foreign key refuses
+                // the delete rather than clearing the reference. Named, because
+                // "conflict" alone does not say which profile to look at.
+                Refusal::Reference => {
+                    StorageError::Conflict(used_by(&conn, "profiles", "proxy_id", &id_str, "proxy"))
+                }
+                // Unreachable for a delete: no unique key is written and every
+                // column of the statement exists. Mapped rather than panicked,
+                // because a classification is not worth a crash.
+                Refusal::Duplicate => StorageError::Conflict(format!("proxy {id} is still used")),
+                Refusal::Schema(detail) => StorageError::Invalid(format!("proxy {id}: {detail}")),
+                Refusal::Other(error) => StorageError::Database(error),
+            })
     }
 }
 
@@ -474,8 +488,16 @@ impl CoreRepository for SqliteCoreRepository {
             .lock()
             .map_err(|e| StorageError::Other(e.to_string()))?;
         let id_str = id.to_string();
-        conn.execute("DELETE FROM cores WHERE id = ?1", params![id_str])?;
-        Ok(())
+        conn.execute("DELETE FROM cores WHERE id = ?1", params![id_str])
+            .map(|_| ())
+            .map_err(|error| match refusal(error) {
+                Refusal::Reference => {
+                    StorageError::Conflict(used_by(&conn, "profiles", "core_id", &id_str, "core"))
+                }
+                Refusal::Duplicate => StorageError::Conflict(format!("core {id} is still used")),
+                Refusal::Schema(detail) => StorageError::Invalid(format!("core {id}: {detail}")),
+                Refusal::Other(error) => StorageError::Database(error),
+            })
     }
 }
 
@@ -545,9 +567,23 @@ fn save_core(conn: &Connection, core: &BrowserCore) -> Result<(), StorageError> 
             now,
             now
         ],
-    )?;
-
-    Ok(())
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        // This statement is an upsert, so a taken identifier is not a refusal,
+        // and a core references nothing. The two arms are here because the
+        // classification is total, not because they can happen - and a value the
+        // schema will not take is very much reachable, where "database error"
+        // would not say which column it was.
+        match refusal(error) {
+            Refusal::Schema(detail) => StorageError::Invalid(format!("core {}: {detail}", core.id)),
+            Refusal::Duplicate => StorageError::Conflict(format!("core {} is taken", core.id)),
+            Refusal::Reference => {
+                StorageError::Dangling(format!("core {} names what is not stored", core.id))
+            }
+            Refusal::Other(error) => StorageError::Database(error),
+        }
+    })
 }
 
 /// One proxy, written on whatever connection is given.
@@ -567,9 +603,16 @@ fn save_proxy(conn: &Connection, proxy: &ProxyProfile) -> Result<(), StorageErro
             updated_at = excluded.updated_at
         "#,
         params![id_str, proxy.name, outbound_json, now, now],
-    )?;
-
-    Ok(())
+    )
+    .map(|_| ())
+    .map_err(|error| match refusal(error) {
+        Refusal::Schema(detail) => StorageError::Invalid(format!("proxy {}: {detail}", proxy.id)),
+        Refusal::Duplicate => StorageError::Conflict(format!("proxy {} is taken", proxy.id)),
+        Refusal::Reference => {
+            StorageError::Dangling(format!("proxy {} names what is not stored", proxy.id))
+        }
+        Refusal::Other(error) => StorageError::Database(error),
+    })
 }
 
 /// One profile, written on whatever connection is given.
@@ -611,29 +654,183 @@ fn insert_profile(conn: &Connection, profile: &BrowserProfile) -> Result<(), Sto
         ],
     );
 
-    match result {
-        Ok(_) => Ok(()),
-        // The constraint SQLite reports here is not always the one the reader
-        // would guess: a duplicate key and a foreign key that resolves to nothing
-        // share `ConstraintViolation`, and only the extended code says which.
-        // Read as one, "profile already exists" is what a profile naming a core
-        // that is not stored would be told, which is both wrong and unfixable.
-        Err(rusqlite::Error::SqliteFailure(code, _))
-            if code.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
-            match code.extended_code {
-                rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY => {
-                    Err(StorageError::Dangling(format!(
-                        "profile {} names a core or a proxy that is not stored",
-                        profile.id
-                    )))
-                }
-                _ => Err(StorageError::Conflict(format!(
-                    "profile with id {} already exists",
-                    profile.id
-                ))),
-            }
+    result.map(|_| ()).map_err(|error| match refusal(error) {
+        // The identifier is taken. Which of the two constraints it was does not
+        // change the answer: the row cannot go in as it stands.
+        Refusal::Duplicate => {
+            StorageError::Conflict(format!("profile {} already exists", profile.id))
         }
-        Err(e) => Err(StorageError::Database(e)),
+        // A reference resolves to nothing, and SQLite's message does not say
+        // which one, so the question is asked directly.
+        Refusal::Reference => StorageError::Dangling(missing_reference(conn, profile)),
+        Refusal::Schema(detail) => {
+            StorageError::Invalid(format!("profile {}: {detail}", profile.id))
+        }
+        Refusal::Other(error) => StorageError::Database(error),
+    })
+}
+
+/// Why SQLite refused a write, as far as its extended error code can say.
+///
+/// A duplicate key, a foreign key that resolves to nothing and a value the schema
+/// itself refuses all arrive as `ConstraintViolation`; only the extended code
+/// tells them apart, and nothing outside this module should have to read SQLite's
+/// English message to find out which one happened.
+enum Refusal {
+    /// The identifier is already taken.
+    Duplicate,
+    /// A foreign key refused the statement - either a reference that resolves to
+    /// nothing, or a delete that would leave a referencing row dangling.
+    ///
+    /// One variant for both because SQLite reports them with two different codes
+    /// and the same meaning to a caller: an insert or update naming something
+    /// missing comes back as `FOREIGNKEY`, and a delete that a `RESTRICT` action
+    /// refuses comes back as `TRIGGER`, because SQLite implements the action as an
+    /// internal trigger program. Which reference, and which record still points at
+    /// it, is the caller's to name.
+    Reference,
+    /// The record cannot be stored as it stands - a `NOT NULL` that was not met,
+    /// or a `CHECK` that did not hold - with SQLite's own account of the column.
+    Schema(String),
+    /// Anything else, including every failure that is not a constraint at all.
+    Other(rusqlite::Error),
+}
+
+fn refusal(error: rusqlite::Error) -> Refusal {
+    let (code, extended, detail) = match &error {
+        rusqlite::Error::SqliteFailure(code, detail) => (code.code, code.extended_code, detail),
+        _ => return Refusal::Other(error),
+    };
+    if code != rusqlite::ErrorCode::ConstraintViolation {
+        return Refusal::Other(error);
+    }
+    match extended {
+        rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY | rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE => {
+            Refusal::Duplicate
+        }
+        rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY | rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER => {
+            Refusal::Reference
+        }
+        rusqlite::ffi::SQLITE_CONSTRAINT_NOTNULL | rusqlite::ffi::SQLITE_CONSTRAINT_CHECK => {
+            Refusal::Schema(
+                detail
+                    .clone()
+                    .unwrap_or_else(|| "the schema refused it".to_string()),
+            )
+        }
+        _ => Refusal::Other(error),
+    }
+}
+
+/// Which of a profile's references is not stored, named.
+///
+/// The two have different consequences - a profile without its core cannot be
+/// launched at all, and a profile without its proxy would go direct - so the
+/// answer names the one that is missing rather than saying "a core or a proxy".
+/// Read on the way out of a refused write, which is why it is a query rather than
+/// a check: the write is the thing that decided, and this is only the sentence.
+fn missing_reference(conn: &Connection, profile: &BrowserProfile) -> String {
+    if stored(conn, "cores", &profile.core_id.to_string()).is_none() {
+        return format!(
+            "profile {} names core {} which is not stored",
+            profile.id, profile.core_id
+        );
+    }
+    if let Some(proxy_id) = profile.proxy_id
+        && stored(conn, "proxies", &proxy_id.to_string()).is_none()
+    {
+        return format!(
+            "profile {} names proxy {proxy_id} which is not stored",
+            profile.id
+        );
+    }
+    // A reference this connection can resolve now, so the write was refused for
+    // something else - a race with another writer, or a constraint this does not
+    // model. Said as what it is rather than guessed at.
+    format!(
+        "profile {} names a reference the schema refused",
+        profile.id
+    )
+}
+
+/// Why a delete was refused, naming what still uses the record.
+///
+/// `table` and `column` are literals from this module, never built from input, so
+/// the statement this builds is one of a fixed few.
+fn used_by(conn: &Connection, table: &str, column: &str, id: &str, kind: &str) -> String {
+    let sql = format!("SELECT name FROM {table} WHERE {column} = ?1 LIMIT 1");
+    match conn.query_row(&sql, params![id], |row| row.get::<_, String>(0)) {
+        Ok(user) => format!("{kind} {id} is still used by {user}"),
+        // The reference is there somewhere - the delete was refused - so a
+        // profile whose name cannot be read is still worth the sentence.
+        Err(_) => format!("{kind} {id} is still used"),
+    }
+}
+
+/// Whether a record with this identifier is stored, by name.
+fn stored(conn: &Connection, table: &str, id: &str) -> Option<String> {
+    let sql = format!("SELECT name FROM {table} WHERE id = ?1");
+    conn.query_row(&sql, params![id], |row| row.get::<_, String>(0))
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::ffi;
+
+    /// A constraint failure as SQLite hands it over: one primary code, and the
+    /// extended code that is the only thing saying which constraint it was.
+    fn failure(extended: i32) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            ffi::Error {
+                code: rusqlite::ErrorCode::ConstraintViolation,
+                extended_code: extended,
+            },
+            Some("constraint failed: profiles.name".to_string()),
+        )
+    }
+
+    /// SQLite reports four different mistakes with one code, and everything
+    /// downstream branches on the answer - so every code this program can meet is
+    /// pinned here, including the one that used to be read as "already exists".
+    #[test]
+    fn every_constraint_sqlite_reports_is_classified_by_its_extended_code() {
+        for duplicate in [
+            ffi::SQLITE_CONSTRAINT_PRIMARYKEY,
+            ffi::SQLITE_CONSTRAINT_UNIQUE,
+        ] {
+            assert!(
+                matches!(refusal(failure(duplicate)), Refusal::Duplicate),
+                "{duplicate} is a taken identifier"
+            );
+        }
+        // Both of the codes a foreign key comes back as: an insert or update that
+        // names something missing, and a delete an action refused.
+        for reference in [
+            ffi::SQLITE_CONSTRAINT_FOREIGNKEY,
+            ffi::SQLITE_CONSTRAINT_TRIGGER,
+        ] {
+            assert!(
+                matches!(refusal(failure(reference)), Refusal::Reference),
+                "{reference} is a foreign key refusing the statement"
+            );
+        }
+        for refused in [ffi::SQLITE_CONSTRAINT_NOTNULL, ffi::SQLITE_CONSTRAINT_CHECK] {
+            let Refusal::Schema(detail) = refusal(failure(refused)) else {
+                panic!("{refused} is the schema refusing the record");
+            };
+            assert!(detail.contains("profiles.name"), "{detail}");
+        }
+
+        // An extended code this build has never heard of is a database failure,
+        // not a guess: "already exists" about an unknown failure is exactly the
+        // mistake this classification was written to stop making.
+        assert!(matches!(refusal(failure(0)), Refusal::Other(_)));
+        // And a failure that is not a constraint at all is not classified either.
+        assert!(matches!(
+            refusal(rusqlite::Error::QueryReturnedNoRows),
+            Refusal::Other(_)
+        ));
     }
 }

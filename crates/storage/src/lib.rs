@@ -344,60 +344,6 @@ mod tests {
         }
     }
 
-    /// The rule the proxy service already enforces, made one the database cannot
-    /// be talked around: a proxy a profile uses does not delete, and the profile
-    /// keeps its reference rather than having it quietly cleared.
-    #[test]
-    fn a_proxy_a_profile_uses_cannot_be_deleted() {
-        let storage = SqliteStorage::in_memory().expect("init in-memory sqlite");
-        let core_repo = storage.cores();
-        let proxy_repo = storage.proxies();
-        let profile_repo = storage.profiles();
-
-        let core = BrowserCore {
-            id: CoreId::new(),
-            name: "Chromium".to_string(),
-            executable: PathBuf::from("/opt/chromium/chrome"),
-            version: "148.0.0.0".to_string(),
-            major: 148,
-        };
-        core_repo.save(&core).expect("save core");
-        let in_use = proxy("Zurich exit");
-        proxy_repo.save(&in_use).expect("save proxy");
-        let mut work = profile(&core.id, "Work laptop");
-        work.proxy_id = Some(in_use.id);
-        profile_repo.insert(&work).expect("save profile");
-
-        let error = proxy_repo
-            .delete(in_use.id)
-            .expect_err("a proxy a profile uses cannot be deleted");
-        assert!(
-            matches!(error, StorageError::Database(_)),
-            "the database refuses it: {error}"
-        );
-        let stored = profile_repo
-            .get(work.id)
-            .expect("get profile")
-            .expect("the profile is still here");
-        assert_eq!(
-            stored.proxy_id,
-            Some(in_use.id),
-            "a refused delete must not clear the reference on its way out"
-        );
-
-        // A proxy nobody uses is still deletable, and so is a profile that used
-        // one: the constraint is about the reference, not about proxies.
-        let spare = proxy("Spare");
-        proxy_repo.save(&spare).expect("save proxy");
-        proxy_repo
-            .delete(spare.id)
-            .expect("an unused proxy can be deleted");
-        profile_repo.delete(work.id).expect("delete profile");
-        proxy_repo
-            .delete(in_use.id)
-            .expect("the proxy is deletable once nothing uses it");
-    }
-
     /// A database written before that rule keeps every row it had - including the
     /// profiles whose proxy was already `NULL`, which is a profile without a
     /// proxy and not a dangling reference.
@@ -536,6 +482,124 @@ mod tests {
         assert_eq!(cores.list().expect("cores"), vec![core]);
         assert_eq!(proxies.list().expect("proxies"), vec![proxy]);
         assert_eq!(profiles.list().expect("profiles"), vec![work]);
+    }
+
+    /// One body of assertions, run against both backends.
+    ///
+    /// The memory backend is what the application's tests run against, so a rule
+    /// that lives only in the SQLite schema is a rule those tests do not exercise,
+    /// and a rule that lives only in the memory backend is one the program does
+    /// not have. This is the list of answers both have to give.
+    fn a_repository_contract(
+        cores: &dyn CoreRepository,
+        proxies: &dyn ProxyRepository,
+        profiles: &dyn ProfileRepository,
+    ) {
+        let core = BrowserCore {
+            id: CoreId::new(),
+            name: "Chromium".to_string(),
+            executable: PathBuf::from("/opt/chromium/chrome"),
+            version: "148.0.0.0".to_string(),
+            major: 148,
+        };
+        cores.save(&core).expect("save a core");
+        let proxy = proxy("Zurich exit");
+        proxies.save(&proxy).expect("save a proxy");
+        let mut work = profile(&core.id, "Work laptop");
+        work.proxy_id = Some(proxy.id);
+        profiles.insert(&work).expect("save a profile");
+
+        // A taken identifier is a conflict, and the record already there is not
+        // touched.
+        let mut again = profile(&core.id, "Another");
+        again.id = work.id;
+        let error = profiles
+            .insert(&again)
+            .expect_err("one identifier, one profile");
+        assert!(
+            matches!(error, StorageError::Conflict(_)),
+            "a taken identifier is a conflict: {error}"
+        );
+        assert_eq!(
+            profiles.list().expect("profiles").len(),
+            1,
+            "and nothing was written"
+        );
+
+        // A reference that resolves to nothing is its own answer, and the message
+        // says which reference it was: the two have different fixes.
+        let no_core = profile(&CoreId::new(), "No core");
+        let error = profiles
+            .insert(&no_core)
+            .expect_err("a profile without its core cannot be stored");
+        assert!(
+            matches!(&error, StorageError::Dangling(reason) if reason.contains("core")),
+            "{error}"
+        );
+
+        let mut no_proxy = profile(&core.id, "No proxy");
+        no_proxy.proxy_id = Some(ProxyId::new());
+        let error = profiles
+            .insert(&no_proxy)
+            .expect_err("a profile naming a proxy that is not stored");
+        assert!(
+            matches!(&error, StorageError::Dangling(reason) if reason.contains("proxy")),
+            "{error}"
+        );
+
+        // A reference in use is not silently dropped: the record that something
+        // still names cannot be deleted, and the profile keeps its reference.
+        let error = proxies
+            .delete(proxy.id)
+            .expect_err("a proxy a profile uses cannot be deleted");
+        assert!(
+            matches!(&error, StorageError::Conflict(reason) if reason.contains("Work laptop")),
+            "{error}"
+        );
+        assert_eq!(
+            profiles
+                .get(work.id)
+                .expect("get the profile")
+                .expect("the profile is there")
+                .proxy_id,
+            Some(proxy.id),
+            "a refused delete must not clear the reference on its way out"
+        );
+        let error = cores
+            .delete(core.id)
+            .expect_err("a core a profile launches with cannot be deleted");
+        assert!(matches!(error, StorageError::Conflict(_)), "{error}");
+
+        // And once nothing names them, both are deletable - the rule is about the
+        // reference, not about the record.
+        profiles.delete(work.id).expect("delete the profile");
+        proxies.delete(proxy.id).expect("the proxy is free now");
+        cores.delete(core.id).expect("and so is the core");
+        assert!(cores.list().expect("cores").is_empty());
+        assert!(proxies.list().expect("proxies").is_empty());
+    }
+
+    #[test]
+    fn the_database_keeps_the_repository_contract() {
+        let storage = SqliteStorage::in_memory().expect("init in-memory sqlite");
+        let (cores, proxies, profiles) = (storage.cores(), storage.proxies(), storage.profiles());
+        a_repository_contract(&cores, &proxies, &profiles);
+    }
+
+    /// The same body, against the backend the application's tests use - wired the
+    /// way a configuration wires it, since without that this backend has no
+    /// reference rules at all.
+    #[test]
+    fn the_memory_backend_keeps_the_repository_contract() {
+        let cores = Arc::new(MemCoreRepository::new());
+        let proxies = Arc::new(MemProxyRepository::new());
+        let profiles = Arc::new(MemProfileRepository::new());
+        let _configuration = MemConfiguration::new(
+            Arc::clone(&cores),
+            Arc::clone(&proxies),
+            Arc::clone(&profiles),
+        );
+        a_repository_contract(cores.as_ref(), proxies.as_ref(), profiles.as_ref());
     }
 
     #[test]

@@ -14,6 +14,14 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Fixed
 
+- A record the database refuses is now reported as what it actually is. Every
+  constraint failure used to be reported as "id already exists", so a profile
+  naming a core that was not stored was told its identifier was taken; the
+  classification now reads SQLite's extended error code and separates a taken
+  identifier, a missing reference (naming which one), a value the schema refuses,
+  and a real database failure. The in-memory backend, which had no reference rules
+  at all - so the application's own tests proved nothing about them - now refuses
+  the same writes for the same reasons, and one contract test runs against both.
 - A profile whose browser could not be stopped is no longer reported as stopped.
   When a session adopted from a previous run could not be identified, read or
   terminated, the stop failure went to the log while the session record, the

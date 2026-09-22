@@ -22,6 +22,15 @@ pub enum StorageError {
     #[error("dangling reference: {0}")]
     Dangling(String),
 
+    /// The schema itself refused the record: a column that may not be null, or a
+    /// check that did not hold.
+    ///
+    /// Neither a clash with what is stored nor a missing reference nor a broken
+    /// database: this record cannot be stored as it stands, and the message names
+    /// the column that says so.
+    #[error("record rejected by the schema: {0}")]
+    Invalid(String),
+
     #[error("serialization error: {0}")]
     Serialization(String),
 

@@ -2,16 +2,99 @@ use crate::error::StorageError;
 use crate::traits::{ConfigurationRepository, CoreRepository, ProfileRepository, ProxyRepository};
 use domain::{BrowserCore, BrowserProfile, CoreId, ProfileId, ProxyId, ProxyProfile};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
+
+/// The other two repositories, when this one is part of a configuration.
+///
+/// Weak, not strong: the three point at each other, and a cycle of strong
+/// references would keep every in-memory storage alive for the life of the
+/// process. A reference that cannot be upgraded means the storage is gone, which
+/// is the same answer as "there is nothing left to check against".
+#[derive(Default)]
+struct Wired {
+    cores: Option<Weak<MemCoreRepository>>,
+    proxies: Option<Weak<MemProxyRepository>>,
+}
 
 #[derive(Default)]
 pub struct MemProfileRepository {
     profiles: RwLock<HashMap<ProfileId, BrowserProfile>>,
+    wired: RwLock<Wired>,
 }
 
 impl MemProfileRepository {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Makes this repository refuse a profile whose core or proxy is not stored.
+    ///
+    /// The memory backend has no foreign keys of its own, so the questions SQLite
+    /// answers inside the insert are answered here instead. Without this a profile
+    /// could name a core that does not exist, and every application test that runs
+    /// against this backend would be proving nothing about the rule the database
+    /// enforces.
+    pub fn check_references(
+        &self,
+        cores: &Arc<MemCoreRepository>,
+        proxies: &Arc<MemProxyRepository>,
+    ) {
+        let mut wired = self
+            .wired
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        wired.cores = Some(Arc::downgrade(cores));
+        wired.proxies = Some(Arc::downgrade(proxies));
+    }
+
+    /// Which of a profile's references is not stored, named, or `None` when there
+    /// is nothing to check against.
+    fn missing_reference(&self, profile: &BrowserProfile) -> Option<String> {
+        let wired = self.wired.read().ok()?;
+        if let Some(cores) = wired.cores.as_ref().and_then(Weak::upgrade)
+            && cores.get(profile.core_id).ok()?.is_none()
+        {
+            return Some(format!(
+                "profile {} names core {} which is not stored",
+                profile.id, profile.core_id
+            ));
+        }
+        if let Some(proxy_id) = profile.proxy_id
+            && let Some(proxies) = wired.proxies.as_ref().and_then(Weak::upgrade)
+            && proxies.get(proxy_id).ok()?.is_none()
+        {
+            return Some(format!(
+                "profile {} names proxy {proxy_id} which is not stored",
+                profile.id
+            ));
+        }
+        None
+    }
+
+    /// Refuses a profile that names something which is not stored.
+    fn check(&self, profile: &BrowserProfile) -> Result<(), StorageError> {
+        match self.missing_reference(profile) {
+            Some(reason) => Err(StorageError::Dangling(reason)),
+            None => Ok(()),
+        }
+    }
+
+    /// The name of the profile that still points at this core, if one does.
+    fn named_by_core(&self, id: CoreId) -> Option<String> {
+        self.used_by(|profile| profile.core_id == id)
+    }
+
+    /// The name of the profile that still points at this proxy, if one does.
+    fn named_by_proxy(&self, id: ProxyId) -> Option<String> {
+        self.used_by(|profile| profile.proxy_id == Some(id))
+    }
+
+    fn used_by(&self, matches: impl Fn(&BrowserProfile) -> bool) -> Option<String> {
+        let guard = self.profiles.read().ok()?;
+        guard
+            .values()
+            .find(|profile| matches(profile))
+            .map(|profile| profile.name.clone())
     }
 }
 
@@ -33,6 +116,9 @@ impl ProfileRepository for MemProfileRepository {
     }
 
     fn insert(&self, profile: &BrowserProfile) -> Result<(), StorageError> {
+        // Before the lock: the check reads the other two repositories, and taking
+        // this one first would order the locks the other way round from a delete.
+        self.check(profile)?;
         let mut guard = self
             .profiles
             .write()
@@ -48,6 +134,9 @@ impl ProfileRepository for MemProfileRepository {
     }
 
     fn update(&self, profile: &BrowserProfile) -> Result<(), StorageError> {
+        // An update can change which core or proxy a profile names, so it is the
+        // same rule as an insert.
+        self.check(profile)?;
         let mut guard = self
             .profiles
             .write()
@@ -75,11 +164,32 @@ impl ProfileRepository for MemProfileRepository {
 #[derive(Default)]
 pub struct MemProxyRepository {
     proxies: RwLock<HashMap<ProxyId, ProxyProfile>>,
+    /// The profiles that may point at a proxy, when this repository is part of a
+    /// configuration. See [`MemProfileRepository::check_references`].
+    used_by: RwLock<Option<Weak<MemProfileRepository>>>,
 }
 
 impl MemProxyRepository {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Makes deleting a proxy a profile still uses fail, the way the database's
+    /// foreign key makes it fail.
+    pub fn check_usage(&self, profiles: &Arc<MemProfileRepository>) {
+        let mut used_by = self
+            .used_by
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        *used_by = Some(Arc::downgrade(profiles));
+    }
+
+    /// Why the delete is refused, naming what still uses it.
+    fn in_use(&self, id: ProxyId) -> Option<String> {
+        let used_by = self.used_by.read().ok()?;
+        let profiles = used_by.as_ref()?.upgrade()?;
+        let user = profiles.named_by_proxy(id)?;
+        Some(format!("proxy {id} is still used by {user}"))
     }
 }
 
@@ -110,6 +220,12 @@ impl ProxyRepository for MemProxyRepository {
     }
 
     fn delete(&self, id: ProxyId) -> Result<(), StorageError> {
+        // Asked before the lock is taken: the answer comes from the profiles, and
+        // taking this repository's lock first would order the two the other way
+        // round from an insert.
+        if let Some(reason) = self.in_use(id) {
+            return Err(StorageError::Conflict(reason));
+        }
         let mut guard = self
             .proxies
             .write()
@@ -122,11 +238,31 @@ impl ProxyRepository for MemProxyRepository {
 #[derive(Default)]
 pub struct MemCoreRepository {
     cores: RwLock<HashMap<CoreId, BrowserCore>>,
+    /// The profiles that may point at a core, when this repository is part of a
+    /// configuration.
+    used_by: RwLock<Option<Weak<MemProfileRepository>>>,
 }
 
 impl MemCoreRepository {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Makes deleting a core a profile still uses fail, exactly as a proxy does.
+    pub fn check_usage(&self, profiles: &Arc<MemProfileRepository>) {
+        let mut used_by = self
+            .used_by
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        *used_by = Some(Arc::downgrade(profiles));
+    }
+
+    /// Why the delete is refused, naming what still uses it.
+    fn in_use(&self, id: CoreId) -> Option<String> {
+        let used_by = self.used_by.read().ok()?;
+        let profiles = used_by.as_ref()?.upgrade()?;
+        let user = profiles.named_by_core(id)?;
+        Some(format!("core {id} is still used by {user}"))
     }
 }
 
@@ -157,6 +293,9 @@ impl CoreRepository for MemCoreRepository {
     }
 
     fn delete(&self, id: CoreId) -> Result<(), StorageError> {
+        if let Some(reason) = self.in_use(id) {
+            return Err(StorageError::Conflict(reason));
+        }
         let mut guard = self
             .cores
             .write()
@@ -174,6 +313,14 @@ impl MemProfileRepository {
     /// does not care whether an identifier was already present, because by the
     /// time it runs the old configuration is gone.
     pub fn replace_all(&self, profiles: &[BrowserProfile]) -> Result<(), StorageError> {
+        // Checked first, and against the cores and proxies already written by the
+        // same replacement: the whole batch is what a database would enforce its
+        // foreign keys against, and a profile naming a core the batch does not
+        // hold has to fail here too or the two backends disagree about what a
+        // replacement may store.
+        for profile in profiles {
+            self.check(profile)?;
+        }
         let mut guard = self
             .profiles
             .write()
@@ -236,6 +383,12 @@ impl MemConfiguration {
         proxies: Arc<MemProxyRepository>,
         profiles: Arc<MemProfileRepository>,
     ) -> Self {
+        // The three are one configuration, so each has to be able to see the
+        // others: this backend has no foreign keys of its own, and the questions
+        // SQLite answers for itself are asked here instead.
+        profiles.check_references(&cores, &proxies);
+        cores.check_usage(&profiles);
+        proxies.check_usage(&profiles);
         Self {
             cores,
             proxies,
