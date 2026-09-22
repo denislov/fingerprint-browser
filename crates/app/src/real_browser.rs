@@ -8,7 +8,7 @@
 //! This is deliberately headless: it proves the wiring behind the buttons, not
 //! the pixels. The window itself is covered by the headless UI test in `ui.rs`.
 
-use crate::state::AppState;
+use crate::state::{AppState, Services};
 use application::{DefaultProfileService, ProfileService, RuntimeService};
 use domain::{BrowserCore, CoreCapabilities, CoreId, LaunchPlan, ProfileId, RuntimeState};
 use runtime::{
@@ -118,10 +118,13 @@ impl Harness {
             ..crate::settings::Environment::default()
         });
         let mut state = AppState::for_test(
-            profiles,
-            runtime_service,
-            Arc::new(cores),
-            proxy_service,
+            Services {
+                profiles,
+                runtime: runtime_service,
+                cores: Arc::new(cores),
+                proxies: proxy_service,
+                configuration: Arc::new(storage.clone()),
+            },
             settings,
         );
         state.load().expect("initial load");

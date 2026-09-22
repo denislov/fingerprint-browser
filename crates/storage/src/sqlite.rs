@@ -1,6 +1,6 @@
 use crate::error::StorageError;
 use crate::migrations::run_migrations;
-use crate::traits::{CoreRepository, ProfileRepository, ProxyRepository};
+use crate::traits::{ConfigurationRepository, CoreRepository, ProfileRepository, ProxyRepository};
 use domain::{
     BrowserCore, BrowserProfile, CoreId, FingerprintProfile, ProfileId, ProxyId, ProxyOutbound,
     ProxyProfile, StartTarget, WindowProfile,
@@ -164,7 +164,7 @@ impl ProfileRepository for SqliteProfileRepository {
             SELECT id, name, core_id, user_data_dir, fingerprint_json,
                    proxy_id, window_width, window_height, start_target_json
             FROM profiles
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, id ASC
             "#,
         )?;
 
@@ -220,52 +220,7 @@ impl ProfileRepository for SqliteProfileRepository {
             .conn
             .lock()
             .map_err(|e| StorageError::Other(e.to_string()))?;
-
-        let id_str = profile.id.to_string();
-        let core_id_str = profile.core_id.to_string();
-        let user_data_str = profile.user_data_dir.to_string_lossy().to_string();
-        let fingerprint_json = serde_json::to_string(&profile.fingerprint)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        let proxy_id_str = profile.proxy_id.map(|p| p.to_string());
-        let start_target_json = serde_json::to_string(&profile.start_target)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        let now = now_ts();
-
-        let res = conn.execute(
-            r#"
-            INSERT INTO profiles (
-                id, name, core_id, user_data_dir, fingerprint_json,
-                proxy_id, window_width, window_height, start_target_json,
-                created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-            "#,
-            params![
-                id_str,
-                profile.name,
-                core_id_str,
-                user_data_str,
-                fingerprint_json,
-                proxy_id_str,
-                profile.window.width,
-                profile.window.height,
-                start_target_json,
-                now,
-                now,
-            ],
-        );
-
-        match res {
-            Ok(_) => Ok(()),
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                Err(StorageError::Conflict(format!(
-                    "profile with id {} already exists",
-                    profile.id
-                )))
-            }
-            Err(e) => Err(StorageError::Database(e)),
-        }
+        insert_profile(&conn, profile)
     }
 
     fn update(&self, profile: &BrowserProfile) -> Result<(), StorageError> {
@@ -380,8 +335,9 @@ impl ProxyRepository for SqliteProxyRepository {
             .conn
             .lock()
             .map_err(|e| StorageError::Other(e.to_string()))?;
-        let mut stmt =
-            conn.prepare("SELECT id, name, outbound_json FROM proxies ORDER BY created_at ASC")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, outbound_json FROM proxies ORDER BY created_at ASC, id ASC",
+        )?;
         let mut rows = stmt.query([])?;
         let mut list = Vec::new();
 
@@ -411,24 +367,7 @@ impl ProxyRepository for SqliteProxyRepository {
             .conn
             .lock()
             .map_err(|e| StorageError::Other(e.to_string()))?;
-        let id_str = proxy.id.to_string();
-        let outbound_json = serde_json::to_string(&proxy.outbound)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        let now = now_ts();
-
-        conn.execute(
-            r#"
-            INSERT INTO proxies (id, name, outbound_json, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                outbound_json = excluded.outbound_json,
-                updated_at = excluded.updated_at
-            "#,
-            params![id_str, proxy.name, outbound_json, now, now],
-        )?;
-
-        Ok(())
+        save_proxy(&conn, proxy)
     }
 
     fn delete(&self, id: ProxyId) -> Result<(), StorageError> {
@@ -493,7 +432,7 @@ impl CoreRepository for SqliteCoreRepository {
             .lock()
             .map_err(|e| StorageError::Other(e.to_string()))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, executable, version, major FROM cores ORDER BY created_at ASC",
+            "SELECT id, name, executable, version, major FROM cores ORDER BY created_at ASC, id ASC",
         )?;
         let mut rows = stmt.query([])?;
         let mut list = Vec::new();
@@ -526,33 +465,7 @@ impl CoreRepository for SqliteCoreRepository {
             .conn
             .lock()
             .map_err(|e| StorageError::Other(e.to_string()))?;
-        let id_str = core.id.to_string();
-        let executable_str = core.executable.to_string_lossy().to_string();
-        let now = now_ts();
-
-        conn.execute(
-            r#"
-            INSERT INTO cores (id, name, executable, version, major, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                executable = excluded.executable,
-                version = excluded.version,
-                major = excluded.major,
-                updated_at = excluded.updated_at
-            "#,
-            params![
-                id_str,
-                core.name,
-                executable_str,
-                core.version,
-                core.major,
-                now,
-                now
-            ],
-        )?;
-
-        Ok(())
+        save_core(&conn, core)
     }
 
     fn delete(&self, id: CoreId) -> Result<(), StorageError> {
@@ -563,5 +476,164 @@ impl CoreRepository for SqliteCoreRepository {
         let id_str = id.to_string();
         conn.execute("DELETE FROM cores WHERE id = ?1", params![id_str])?;
         Ok(())
+    }
+}
+
+impl ConfigurationRepository for SqliteStorage {
+    fn replace(
+        &self,
+        cores: &[BrowserCore],
+        proxies: &[ProxyProfile],
+        profiles: &[BrowserProfile],
+    ) -> Result<(), StorageError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| StorageError::Other(e.to_string()))?;
+        let tx = conn.transaction()?;
+
+        // Removed in the order the foreign keys allow and written in the reverse,
+        // exactly as the services would do it one call at a time; the difference
+        // is that none of it is visible until the commit.
+        tx.execute("DELETE FROM profiles", [])?;
+        tx.execute("DELETE FROM proxies", [])?;
+        tx.execute("DELETE FROM cores", [])?;
+        for core in cores {
+            save_core(&tx, core)?;
+        }
+        for proxy in proxies {
+            save_proxy(&tx, proxy)?;
+        }
+        for profile in profiles {
+            insert_profile(&tx, profile)?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+/// One core, written on whatever connection is given.
+///
+/// A free function rather than a method because the same statement has to serve
+/// two callers: a repository writing one record, and a replacement writing all of
+/// them inside one transaction. Two copies of the SQL would be two places for the
+/// column list to drift, and the drift would only show up as data read back
+/// wrong.
+fn save_core(conn: &Connection, core: &BrowserCore) -> Result<(), StorageError> {
+    let id_str = core.id.to_string();
+    let executable_str = core.executable.to_string_lossy().to_string();
+    let now = now_ts();
+
+    conn.execute(
+        r#"
+        INSERT INTO cores (id, name, executable, version, major, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            executable = excluded.executable,
+            version = excluded.version,
+            major = excluded.major,
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            id_str,
+            core.name,
+            executable_str,
+            core.version,
+            core.major,
+            now,
+            now
+        ],
+    )?;
+
+    Ok(())
+}
+
+/// One proxy, written on whatever connection is given.
+fn save_proxy(conn: &Connection, proxy: &ProxyProfile) -> Result<(), StorageError> {
+    let id_str = proxy.id.to_string();
+    let outbound_json = serde_json::to_string(&proxy.outbound)
+        .map_err(|e| StorageError::Serialization(e.to_string()))?;
+    let now = now_ts();
+
+    conn.execute(
+        r#"
+        INSERT INTO proxies (id, name, outbound_json, created_at, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            outbound_json = excluded.outbound_json,
+            updated_at = excluded.updated_at
+        "#,
+        params![id_str, proxy.name, outbound_json, now, now],
+    )?;
+
+    Ok(())
+}
+
+/// One profile, written on whatever connection is given.
+///
+/// Unlike the other two this is an insert and not an upsert, because a profile's
+/// rows are what a browser's data directory is tied to: overwriting one silently
+/// would be a way to lose the record of a directory that is still on disk.
+fn insert_profile(conn: &Connection, profile: &BrowserProfile) -> Result<(), StorageError> {
+    let id_str = profile.id.to_string();
+    let core_id_str = profile.core_id.to_string();
+    let user_data_str = profile.user_data_dir.to_string_lossy().to_string();
+    let fingerprint_json = serde_json::to_string(&profile.fingerprint)
+        .map_err(|e| StorageError::Serialization(e.to_string()))?;
+    let proxy_id_str = profile.proxy_id.map(|p| p.to_string());
+    let start_target_json = serde_json::to_string(&profile.start_target)
+        .map_err(|e| StorageError::Serialization(e.to_string()))?;
+    let now = now_ts();
+
+    let result = conn.execute(
+        r#"
+        INSERT INTO profiles (
+            id, name, core_id, user_data_dir, fingerprint_json,
+            proxy_id, window_width, window_height, start_target_json,
+            created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        "#,
+        params![
+            id_str,
+            profile.name,
+            core_id_str,
+            user_data_str,
+            fingerprint_json,
+            proxy_id_str,
+            profile.window.width,
+            profile.window.height,
+            start_target_json,
+            now,
+            now,
+        ],
+    );
+
+    match result {
+        Ok(_) => Ok(()),
+        // The constraint SQLite reports here is not always the one the reader
+        // would guess: a duplicate key and a foreign key that resolves to nothing
+        // share `ConstraintViolation`, and only the extended code says which.
+        // Read as one, "profile already exists" is what a profile naming a core
+        // that is not stored would be told, which is both wrong and unfixable.
+        Err(rusqlite::Error::SqliteFailure(code, _))
+            if code.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            match code.extended_code {
+                rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY => {
+                    Err(StorageError::Dangling(format!(
+                        "profile {} names a core or a proxy that is not stored",
+                        profile.id
+                    )))
+                }
+                _ => Err(StorageError::Conflict(format!(
+                    "profile with id {} already exists",
+                    profile.id
+                ))),
+            }
+        }
+        Err(e) => Err(StorageError::Database(e)),
     }
 }

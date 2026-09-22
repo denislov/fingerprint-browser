@@ -27,7 +27,9 @@ pub use profile_service::{
     DefaultProfileService, DeleteMode, NewProfile, ProfileService, default_user_data_dir,
 };
 pub use proxy_service::{DefaultProxyService, NewProxy, ProxyService};
-pub use restore::{RestoreError, RestoreMode, RestoreReport, apply_restore, plan_restore};
+pub use restore::{
+    RestoreError, RestoreMode, RestorePlan, RestoreReport, apply_restore, plan_restore,
+};
 pub use runtime_service::RuntimeService;
 
 #[cfg(test)]

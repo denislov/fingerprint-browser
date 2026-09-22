@@ -5,12 +5,12 @@ pub mod sqlite;
 pub mod traits;
 
 pub use error::StorageError;
-pub use memory::{MemCoreRepository, MemProfileRepository, MemProxyRepository};
+pub use memory::{MemConfiguration, MemCoreRepository, MemProfileRepository, MemProxyRepository};
 pub use migrations::run_migrations;
 pub use sqlite::{
     SqliteCoreRepository, SqliteProfileRepository, SqliteProxyRepository, SqliteStorage,
 };
-pub use traits::{CoreRepository, ProfileRepository, ProxyRepository};
+pub use traits::{ConfigurationRepository, CoreRepository, ProfileRepository, ProxyRepository};
 
 #[cfg(test)]
 mod tests {
@@ -256,5 +256,76 @@ mod tests {
         // Delete
         profile_repo.delete(profile_id).expect("delete profile");
         assert!(profile_repo.get(profile_id).expect("get profile").is_none());
+    }
+
+    /// A replacement that fails part way through leaves the configuration it
+    /// started from.
+    ///
+    /// The failure is a profile naming a core the batch does not hold, which the
+    /// database refuses with a foreign key violation on the *second* insert: the
+    /// first profile is already written when it happens. A sequence of repository
+    /// calls would have committed that first profile and the deletions before it,
+    /// which is the "neither the old configuration nor the new one" state the
+    /// transaction exists to make impossible.
+    #[test]
+    fn a_replacement_that_fails_part_way_leaves_the_old_configuration() {
+        use crate::ConfigurationRepository as _;
+
+        let storage = SqliteStorage::in_memory().expect("init in-memory sqlite");
+        let core_repo = storage.cores();
+        let profile_repo = storage.profiles();
+
+        // What is installed now, and what has to still be installed afterwards.
+        let installed_core = BrowserCore {
+            id: CoreId::new(),
+            name: "Installed core".to_string(),
+            executable: PathBuf::from("/opt/chromium/chrome"),
+            version: "148.0.0.0".to_string(),
+            major: 148,
+        };
+        core_repo.save(&installed_core).expect("save core");
+        profile_repo
+            .insert(&profile(&installed_core.id, "Installed profile"))
+            .expect("save profile");
+
+        // What the replacement would write: one profile for the new core and one
+        // for a core that is not in the batch at all.
+        let new_core = BrowserCore {
+            id: CoreId::new(),
+            name: "New core".to_string(),
+            ..installed_core.clone()
+        };
+        let good = profile(&new_core.id, "New profile");
+        let dangling = profile(&CoreId::new(), "Dangling profile");
+
+        let error = storage
+            .replace(&[new_core], &[], &[good, dangling])
+            .expect_err("a profile without its core cannot be stored");
+        assert!(
+            matches!(error, StorageError::Dangling(_)),
+            "a profile naming a core that is not stored is a dangling reference, not a duplicate: {error}"
+        );
+
+        // Everything the failure touched is as it was.
+        assert_eq!(core_repo.list().expect("list").len(), 1);
+        assert_eq!(core_repo.list().expect("list")[0].id, installed_core.id);
+        let profiles = profile_repo.list().expect("list");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "Installed profile");
+    }
+
+    /// A profile for a transaction test, with the fields the test does not care
+    /// about filled in.
+    fn profile(core_id: &CoreId, name: &str) -> BrowserProfile {
+        BrowserProfile {
+            id: ProfileId::new(),
+            name: name.to_string(),
+            core_id: *core_id,
+            user_data_dir: PathBuf::from("data/profiles/test"),
+            fingerprint: FingerprintProfile::new_random(7),
+            proxy_id: None,
+            window: WindowProfile::new(1280, 800),
+            start_target: StartTarget::Blank,
+        }
     }
 }

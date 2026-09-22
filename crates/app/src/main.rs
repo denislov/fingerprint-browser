@@ -44,11 +44,13 @@ use runtime::{
     ChannelRuntimeFacade, RuntimeCommand, RuntimeFacade, RuntimeSupervisor,
     RuntimeSupervisorChannels, SupervisorComponents,
 };
-use state::AppState;
+use state::{AppState, Services};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
-use storage::{CoreRepository, ProfileRepository, ProxyRepository, SqliteStorage};
+use storage::{
+    ConfigurationRepository, CoreRepository, ProfileRepository, ProxyRepository, SqliteStorage,
+};
 use ui::AppView;
 use verifier::CdpFingerprintVerifier;
 
@@ -171,6 +173,9 @@ fn main() {
     let profile_repo: Arc<dyn ProfileRepository> = Arc::new(storage.profiles());
     let core_repo: Arc<dyn CoreRepository> = Arc::new(storage.cores());
     let proxy_repo: Arc<dyn ProxyRepository> = Arc::new(storage.proxies());
+    // The same connection the three repositories write through, addressed as one
+    // configuration: a restore replaces all of it or none of it.
+    let configuration: Arc<dyn ConfigurationRepository> = Arc::new(storage.clone());
 
     let core_notice = core_detect::maintain(core_repo.as_ref(), t);
 
@@ -235,10 +240,13 @@ fn main() {
     ));
 
     let mut app_state = AppState::new(
-        profile_service,
-        runtime_service,
-        core_service,
-        proxy_service,
+        Services {
+            profiles: profile_service,
+            runtime: runtime_service,
+            cores: core_service,
+            proxies: proxy_service,
+            configuration,
+        },
         settings,
     );
     let _ = app_state.load();

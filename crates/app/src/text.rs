@@ -1220,6 +1220,21 @@ impl Text {
         }
     }
 
+    /// The file itself cannot become this installation, and nothing was changed.
+    ///
+    /// Said as a refusal rather than a list of what went wrong: the reason is the
+    /// backend's own sentence, and the half the reader has to be told is that the
+    /// old configuration is still there, because the failure happened before
+    /// anything was replaced.
+    pub fn restore_refused(&self, reason: &str) -> String {
+        match self.lang {
+            Lang::En => {
+                format!("Nothing was restored: {reason}. The current configuration is unchanged.")
+            }
+            Lang::Zh => format!("未做任何还原：{reason}。当前配置保持不变。"),
+        }
+    }
+
     /// The browser-data copy would read a directory Chromium is still writing.
     pub fn copy_running(&self, names: &str) -> String {
         match self.lang {

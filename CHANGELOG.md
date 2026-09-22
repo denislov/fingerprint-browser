@@ -14,6 +14,16 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Fixed
 
+- Restoring a configuration backup is now all or nothing. It used to delete every
+  stored core, proxy and profile and then write the file's records one at a time,
+  with the file only being validated as each record was written - so a file with an
+  empty core name, a profile naming a core that was not in it, or a disk that
+  filled up halfway left an installation holding neither the old configuration nor
+  the new one. Restore now validates the whole file first (the rules a form is
+  held to, plus repeated identifiers, dangling references, and a backup whose
+  credentials were exported away, each refused with its own sentence) and then
+  replaces everything in a single database transaction, so a failure at any point
+  leaves the previous configuration exactly as it was.
 - A start, a browser-data copy and a configuration replacement can no longer
   overlap on the same profile. A start returns as soon as its command is queued,
   so the runtime's snapshot still said the profile was stopped while its browser

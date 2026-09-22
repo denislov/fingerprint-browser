@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use storage::ConfigurationRepository;
 
 /// A user-facing message shown in the window banner.
 ///
@@ -638,6 +639,10 @@ pub struct AppState {
     runtime: Arc<RuntimeService>,
     cores: Arc<dyn CoreService>,
     proxies: Arc<dyn ProxyService>,
+    /// The whole configuration as one thing, for the one operation that replaces
+    /// it: a restore that went through the three services above would remove the
+    /// old rows and write the new ones one commit at a time.
+    configuration: Arc<dyn ConfigurationRepository>,
     settings: Settings,
     page: Page,
     rows: Vec<ProfileRow>,
@@ -693,28 +698,30 @@ pub struct AppState {
     operations: Arc<Operations>,
 }
 
+/// What the window's state writes through.
+///
+/// One value rather than five parameters, because every constructor here needs
+/// all of them and a caller that passes them one by one is a caller that can pass
+/// them in the wrong order - which, for five `Arc<dyn Trait>`s, is a mistake the
+/// compiler cannot catch.
+pub struct Services {
+    pub profiles: Arc<dyn ProfileService>,
+    pub runtime: Arc<RuntimeService>,
+    pub cores: Arc<dyn CoreService>,
+    pub proxies: Arc<dyn ProxyService>,
+    /// The whole configuration as one thing, for the one operation that replaces
+    /// it.
+    pub configuration: Arc<dyn ConfigurationRepository>,
+}
+
 impl AppState {
-    pub fn new(
-        profiles: Arc<dyn ProfileService>,
-        runtime: Arc<RuntimeService>,
-        cores: Arc<dyn CoreService>,
-        proxies: Arc<dyn ProxyService>,
-        settings: Settings,
-    ) -> Self {
+    pub fn new(services: Services, settings: Settings) -> Self {
         let (log_file, log_file_error) =
             match LogFile::open(&settings.data_dir().join(crate::log_file::LOG_DIR)) {
                 Ok(file) => (Some(file), None),
                 Err(error) => (None, Some(error)),
             };
-        Self::assemble(
-            profiles,
-            runtime,
-            cores,
-            proxies,
-            settings,
-            log_file,
-            log_file_error,
-        )
+        Self::assemble(services, settings, log_file, log_file_error)
     }
 
     /// The same state with a specific activity log, or none at all.
@@ -723,51 +730,39 @@ impl AppState {
     /// a test that drives the sink's failure path builds its own [`LogFile`].
     #[cfg(test)]
     pub(crate) fn with_log(
-        profiles: Arc<dyn ProfileService>,
-        runtime: Arc<RuntimeService>,
-        cores: Arc<dyn CoreService>,
-        proxies: Arc<dyn ProxyService>,
+        services: Services,
         settings: Settings,
         log_file: Option<LogFile>,
         log_file_error: Option<String>,
     ) -> Self {
-        Self::assemble(
-            profiles,
-            runtime,
-            cores,
-            proxies,
-            settings,
-            log_file,
-            log_file_error,
-        )
+        Self::assemble(services, settings, log_file, log_file_error)
     }
 
     /// The window's state with no activity log on disk.
     #[cfg(test)]
-    pub(crate) fn for_test(
-        profiles: Arc<dyn ProfileService>,
-        runtime: Arc<RuntimeService>,
-        cores: Arc<dyn CoreService>,
-        proxies: Arc<dyn ProxyService>,
-        settings: Settings,
-    ) -> Self {
-        Self::with_log(profiles, runtime, cores, proxies, settings, None, None)
+    pub(crate) fn for_test(services: Services, settings: Settings) -> Self {
+        Self::with_log(services, settings, None, None)
     }
 
     fn assemble(
-        profiles: Arc<dyn ProfileService>,
-        runtime: Arc<RuntimeService>,
-        cores: Arc<dyn CoreService>,
-        proxies: Arc<dyn ProxyService>,
+        services: Services,
         settings: Settings,
         log_file: Option<LogFile>,
         log_file_error: Option<String>,
     ) -> Self {
+        let Services {
+            profiles,
+            runtime,
+            cores,
+            proxies,
+            configuration,
+        } = services;
         Self {
             profiles,
             runtime,
             cores,
             proxies,
+            configuration,
             settings,
             page: Page::Profiles,
             rows: Vec::new(),
@@ -1694,15 +1689,13 @@ impl AppState {
                                         present.profiles,
                                     ))
                                 }
+                                // The file's own faults. Each says what is wrong
+                                // with it, because there is nothing the reader
+                                // could do to the installation to make it fit.
+                                other => t.restore_refused(&other.to_string()),
                             })?;
-                        application::apply_restore(
-                            plan,
-                            &present,
-                            &*self.cores,
-                            &*self.proxies,
-                            &*self.profiles,
-                        )
-                        .map_err(|error| t.config_write_failed(&error.to_string()))
+                        application::apply_restore(plan, &present, self.configuration.as_ref())
+                            .map_err(|error| t.config_write_failed(&error.to_string()))
                     })
             });
 
@@ -2893,10 +2886,17 @@ mod tests {
             ..crate::settings::Environment::default()
         });
         let state = AppState::with_log(
-            service,
-            runtime_service,
-            core_service,
-            proxy_service,
+            Services {
+                profiles: service,
+                runtime: runtime_service,
+                cores: core_service,
+                proxies: proxy_service,
+                configuration: Arc::new(storage::MemConfiguration::new(
+                    core_repo.clone(),
+                    proxy_repo.clone(),
+                    profile_repo.clone(),
+                )),
+            },
             settings,
             log_file,
             log_file_error,

@@ -19,9 +19,13 @@ What is in the program today:
 - `crates/application/src/import.rs` - the planner that decides what a document
   would do to an installation, and the applier that writes it in dependency
   order and reports what landed.
-- `crates/application/src/restore.rs` - the same plan read against an empty
-  snapshot, plus the precondition that refuses a populated installation without a
-  confirmation, and the removal of what is here before the file's records land.
+- `crates/application/src/restore.rs` - the strict half: every record in the file
+  validated, repeated identifiers and dangling references refused, and the
+  precondition that refuses a populated installation without a confirmation - all
+  before anything is touched.
+- `crates/storage/src/traits.rs` - `ConfigurationRepository::replace`, the one
+  transaction that removes what is here and writes the file's whole
+  configuration, or neither.
 - `crates/application/src/browser_data.rs` - the separate artifact: copying each
   `profiles/<id>` directory into a backup directory and back out, refused while a
   profile is running.
@@ -430,19 +434,30 @@ All six are in. Things about them worth knowing:
 - Import never re-probes and never re-derives. `create` mints an identifier and
   `update` re-reads a core's version, so the services gained insert-as-given
   methods for exactly this caller, and a record arrives as the file says it was.
-- **Restore is import read against an empty snapshot.** `plan_restore` calls
-  `plan_import` with `ConfigSnapshot::default()`, so the file's copy of an
-  identifier always wins instead of being kept and reported as taken - which is
-  the whole difference between "be this file" and "add these". The precondition
-  lives in that function rather than at the call site, so a mistaken restore
-  cannot reach a writer: `OnlyWhenEmpty` refuses a populated installation and
-  carries the counts the window needs to say what is in the way.
-- **Restore removes before it writes, in the reverse of the write order** -
-  profiles, then proxies, then cores - because a profile is what references a
-  core and a proxy. That order is also what keeps the services' own rules from
-  refusing the removal: by the time a proxy is reached, no profile names it. A
-  removal the database refuses is recorded and does not stop the write phase,
-  exactly as an item refused during an import does not stop the rest.
+- **Restore is not an import read against an empty snapshot.** The comparison was
+  the original design, and it was wrong in the half that mattered: an import that
+  writes most of a file and reports the rest is a good import, and a restore that
+  does the same is an installation that is neither what it was nor what the file
+  asked for. Restore therefore has its own planner and its own applier. The
+  planner validates every record with the rules a form is held to, refuses a
+  repeated identifier, refuses a profile naming a core or a proxy the file does
+  not hold (there is nothing else the name could resolve to - the whole
+  configuration is being replaced), and refuses a file whose credentials were
+  exported away, because for some outbounds the password is what makes the record
+  valid at all; the sentence says which of those it is, since the reader's next
+  move is a different export rather than a repair. The file's copy of an
+  identifier still wins over a stored one - that much of the old comparison
+  holds - and the precondition still lives in the planner rather than at the call
+  site, so a mistaken restore cannot reach a writer.
+- **Restore replaces in one transaction.** `ConfigurationRepository::replace`
+  removes profiles, proxies and cores and writes the file's records inside a
+  single database transaction: a refused record, a foreign key that resolves to
+  nothing, a full disk or a crash mid-way leaves the old configuration exactly
+  where it was, rather than the half-replaced state a sequence of repository
+  calls would commit. The removal order (profiles, then proxies, then cores) is
+  still the reverse of the write order, for the same reason as before - it is what
+  keeps the referential rules satisfied - but it is no longer observable from
+  outside the transaction.
 - **Browser data is not touched by a restore.** Deleting a profile keeps its
   directory on disk, so a restart of the same identifier finds its sessions where
   they were - which is what makes a restored configuration line up with a

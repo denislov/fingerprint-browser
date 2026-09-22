@@ -443,20 +443,24 @@ Implemented so far, and where it lives:
   proxy - goes to the banner and stays until dismissed; a clean import is a
   toast. A moved directory is reported in the sentence but raises no alarm,
   because moving every directory is what importing onto another machine *does*.
-- **Restore is the import read against an empty snapshot** - `plan_restore` hands
-  `plan_import` a `ConfigSnapshot::default()`, so the file's copy of an identifier
-  wins instead of being kept and reported as taken. The precondition lives in that
-  function rather than at the call site, so a mistaken restore cannot reach a
-  writer: `OnlyWhenEmpty` refuses a populated installation and carries the counts
-  the window turns into a sentence. The **Restore configuration** card sits under
-  the import one, and the confirmation is behind its button, only when there is
-  something to replace.
-- Restore **removes before it writes, in the reverse of the write order** -
-  profiles, then proxies, then cores - because that is what keeps the services'
-  own referential rules from refusing the removal. Browser data is not touched:
-  deleting a profile keeps its directory, so a restart of the same identifier
-  finds its sessions where they were, which is what makes a restored
-  configuration line up with a browser-data copy.
+- **Restore is not the import read against an empty snapshot.** It was, and the
+  half that mattered was wrong: an import that writes most of a file and reports
+  the rest is a good import, and a restore that does the same is an installation
+  that is neither what it was nor what the file asked for. Restore has its own
+  planner - every record validated, repeated identifiers and dangling references
+  refused, a file exported without credentials refused with its own sentence - and
+  its own applier, which replaces all three lists in one transaction
+  (`ConfigurationRepository::replace`): a refused record, a broken reference or a
+  crash mid-way leaves the old configuration exactly where it was. The file's copy
+  of an identifier still wins over a stored one, and the precondition still lives
+  in the planner rather than at the call site, so a mistaken restore cannot reach
+  a writer: `OnlyWhenEmpty` refuses a populated installation and carries the
+  counts the window turns into a sentence. The **Restore configuration** card sits
+  under the import one, and the confirmation is behind its button, only when there
+  is something to replace.
+- Browser data is not touched: deleting a profile keeps its directory, so a
+  restart of the same identifier finds its sessions where they were, which is what
+  makes a restored configuration line up with a browser-data copy.
 - `crates/application/src/browser_data.rs` is the second artifact: each
   `profiles/<id>` directory copied to or from a directory the user names, whole
   and replacing rather than merging. Only stopped profiles are copied, and the

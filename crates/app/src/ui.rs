@@ -4032,6 +4032,14 @@ mod tests {
         core_repo
             .save(&core(CoreId::new()))
             .expect("seed a browser core");
+        // Built from the same three repositories the services get, before they
+        // are moved into them: the replacement a test drives has to be visible to
+        // the services, which is what "one configuration" means.
+        let configuration = Arc::new(storage::MemConfiguration::new(
+            core_repo.clone(),
+            proxy_repo.clone(),
+            profile_repo.clone(),
+        ));
 
         let runtime = Arc::new(FakeRuntime::new());
         let profiles = Arc::new(DefaultProfileService::new(
@@ -4052,10 +4060,13 @@ mod tests {
             None => crate::state::testing::settings(),
         };
         let state = AppState::with_log(
-            profiles,
-            runtime_service,
-            cores,
-            proxies,
+            crate::state::Services {
+                profiles,
+                runtime: runtime_service,
+                cores,
+                proxies,
+                configuration,
+            },
             settings,
             log_file,
             None,
@@ -6403,10 +6414,24 @@ mod tests {
             runtime,
         ));
         let cores = crate::state::testing::core_service(core_repo.clone(), profile_repo.clone());
+        let configuration = Arc::new(storage::MemConfiguration::new(
+            core_repo.clone(),
+            proxy_repo.clone(),
+            profile_repo.clone(),
+        ));
         let proxies: Arc<dyn ProxyService> =
             Arc::new(DefaultProxyService::new(proxy_repo, profile_repo));
         let settings = crate::state::testing::settings();
-        let state = AppState::for_test(profiles, runtime_service, cores, proxies, settings);
+        let state = AppState::for_test(
+            crate::state::Services {
+                profiles,
+                runtime: runtime_service,
+                cores,
+                proxies,
+                configuration,
+            },
+            settings,
+        );
         let (_command_tx, event_rx) = crossbeam_channel::bounded(16);
         let view = cx.new(|cx| {
             let mut view = AppView::new(

@@ -153,7 +153,7 @@ fingerprint-browser/
 - 配置备份交换文档的构建与读取（`config_backup`）：只负责文档本身；
 - 导出（`export`）：读三个列表、按凭据选择构建文档并写盘，产出逐项报告；
 - 导入（`import`）：纯规划器（`plan_import`，决定新增/保留/跳过/路径改写）+ 按依赖顺序落库的执行器（`apply_import`，阶段间读回实际集合）；不覆盖任何已存在记录；
-- 还原（`restore`）：同一文档的另一种读法——`plan_restore` 对**空快照**调用 `plan_import`，因此文件里的标识符总是胜过已存记录；非空安装的前置条件（`OnlyWhenEmpty`）在规划函数里而不在调用点，误操作到不了写入器；随后按 profile → proxy → core 逆序删除再写入；
+- 还原（`restore`）：同一文档的另一种读法，但走**严格**路径而不是复用 `plan_import`——文件里的标识符总是胜过已存记录；非空安装的前置条件（`OnlyWhenEmpty`）在规划函数里而不在调用点，误操作到不了写入器；规划阶段先做全量领域校验，再查重复 ID 与悬空引用（profile 指向文件里没有的 core/proxy），凭据被省略的备份在这一步就被明确拒绝并说明原因；写入是 storage 的**配置级事务**（`ConfigurationRepository::replace`），按 profile → proxy → core 逆序删除、再按相反顺序写入，任一步失败整体回滚，旧配置分毫不动；
 - 浏览器数据拷贝（`browser_data`）：把 `profiles/<id>` 目录整体拷出到用户指定目录、或从该目录拷回；运行中的档案按名拒绝且发生在写第一个字节之前，从未启动过的档案记为跳过而非失败，目标目录即源目录时按名拒绝（先清空目标会删掉源）；
 - 将 runtime event 转为 UI 可消费状态。
 
