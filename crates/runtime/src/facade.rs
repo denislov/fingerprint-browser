@@ -5,6 +5,8 @@ use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
+    /// Last start/restart fully handled or cancelled by the supervisor.
+    pub acknowledged_start: u64,
     pub profile_id: ProfileId,
     pub state: RuntimeState,
     pub browser_pid: Option<u32>,

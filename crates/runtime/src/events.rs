@@ -2,14 +2,21 @@ use domain::{BrowserCore, BrowserProfile, ProfileId, ProxyProfile, RuntimeState}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartParams {
+    /// Identifies this start, including its eventual cancellation acknowledgement.
+    pub request_id: u64,
     pub profile: BrowserProfile,
     pub core: BrowserCore,
     pub proxy: Option<ProxyProfile>,
 }
 
 impl StartParams {
+    pub fn next_request_id() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
     pub fn new(profile: BrowserProfile, core: BrowserCore) -> Self {
         Self {
+            request_id: Self::next_request_id(),
             profile,
             core,
             proxy: None,
@@ -18,6 +25,7 @@ impl StartParams {
 
     pub fn with_proxy(profile: BrowserProfile, core: BrowserCore, proxy: ProxyProfile) -> Self {
         Self {
+            request_id: Self::next_request_id(),
             profile,
             core,
             proxy: Some(proxy),

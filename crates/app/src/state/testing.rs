@@ -10,6 +10,7 @@ use storage::{MemCoreRepository, MemProfileRepository};
 /// depending on process startup.
 #[derive(Default)]
 pub struct FakeRuntime {
+    requests: Mutex<HashMap<ProfileId, u64>>,
     snapshots: RwLock<HashMap<ProfileId, RuntimeSnapshot>>,
     pub commands: Mutex<Vec<String>>,
     /// Whether a start publishes the state it produces.
@@ -38,6 +39,7 @@ impl FakeRuntime {
             .entry(id)
             .or_insert_with(|| snapshot(id, RuntimeState::Stopped));
         snapshot.state = state;
+        snapshot.acknowledged_start = self.requests.lock().unwrap().get(&id).copied().unwrap_or(0);
     }
 
     /// Publishes the debug port a running browser exposes.
@@ -93,6 +95,7 @@ impl FakeRuntime {
 
 fn snapshot(id: ProfileId, state: RuntimeState) -> RuntimeSnapshot {
     RuntimeSnapshot {
+        acknowledged_start: 0,
         profile_id: id,
         state,
         browser_pid: None,
@@ -110,6 +113,7 @@ fn snapshot(id: ProfileId, state: RuntimeState) -> RuntimeSnapshot {
 impl RuntimeFacade for FakeRuntime {
     fn start(&self, params: StartParams) -> Result<(), RuntimeCommandError> {
         let id = params.profile_id();
+        self.requests.lock().unwrap().insert(id, params.request_id);
         if !self.silent.load(std::sync::atomic::Ordering::SeqCst) {
             self.set_state(id, RuntimeState::Running);
         }
@@ -125,6 +129,7 @@ impl RuntimeFacade for FakeRuntime {
 
     fn restart(&self, params: StartParams) -> Result<(), RuntimeCommandError> {
         let id = params.profile_id();
+        self.requests.lock().unwrap().insert(id, params.request_id);
         if !self.silent.load(std::sync::atomic::Ordering::SeqCst) {
             self.set_state(id, RuntimeState::Running);
         }

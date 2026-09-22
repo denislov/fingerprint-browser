@@ -3277,6 +3277,40 @@ fn a_queued_start_holds_its_profile_until_the_snapshot_answers() {
 }
 
 #[test]
+fn retrying_a_failed_start_keeps_its_lease_until_its_own_answer() {
+    for old in [
+        RuntimeState::Failed {
+            message: "old failure".into(),
+        },
+        RuntimeState::Crashed {
+            message: "old crash".into(),
+        },
+    ] {
+        let mut fixture = fixture();
+        seed_core(&fixture);
+        fixture.state.load().unwrap();
+        let id = fixture.state.create_profile("Retry").unwrap();
+        fixture.runtime.set_state(id, old);
+        fixture.runtime.answer_nothing();
+        fixture.state.start(id).unwrap();
+        fixture.state.refresh_runtime();
+        fixture.state.set_browser_data_path("/backups/fp");
+        assert_eq!(fixture.state.operations.held(id), Some(Operation::Starting));
+        assert!(fixture.state.browser_data_job(Direction::ToBackup).is_err());
+        // Even a failed retry ends its lease, once it is this request's answer.
+        fixture.runtime.set_state(
+            id,
+            RuntimeState::Failed {
+                message: "new failure".into(),
+            },
+        );
+        fixture.state.refresh_runtime();
+        assert_eq!(fixture.state.operations.held(id), None);
+        assert!(fixture.state.browser_data_job(Direction::ToBackup).is_ok());
+    }
+}
+
+#[test]
 fn finishing_a_browser_data_copy_says_what_happened() {
     let mut fixture = fixture();
     fixture.state.finish_browser_data(

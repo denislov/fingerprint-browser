@@ -7,7 +7,7 @@ Behavioral fixes precede structural cleanup.
 
 - [x] Protect browser-data sources and unowned recovery directories; separate copy tests.
 - [x] Coordinate configuration restoration with configuration writes, starts and copies.
-- [ ] Keep queued starts protected until their own runtime acknowledgement.
+- [x] Keep queued starts protected until their own runtime acknowledgement.
 - [ ] Match asynchronous diagnostics to individual tasks.
 - [ ] Enforce diagnostic deadlines throughout partial reads and writes.
 - [ ] Preserve decoded proxy credentials.
@@ -27,6 +27,12 @@ Stage 2: application and app tests pass. A restore job owns an exclusive
 installation lease. Service mutations and browser-data workers share the same
 coordinator; conflicting actions are rejected without blocking the UI. Tests
 cover direct service mutation, queued starts, copies and lease release on unwind.
+
+Stage 3: start/restart requests carry monotonically increasing IDs. Snapshots
+acknowledge handled and cancelled requests. The UI releases a queued-start lease
+only for its own acknowledgement, never for an old failure or elapsed time.
+An unresponsive supervisor therefore keeps data-changing operations blocked;
+timeouts alone cannot prove a queued start will never execute.
 
 Real-browser, real-Xray and platform-specific tests require their corresponding
 runtime environment; ordinary workspace tests do not replace those checks.

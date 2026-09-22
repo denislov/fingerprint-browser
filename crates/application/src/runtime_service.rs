@@ -67,16 +67,18 @@ impl RuntimeService {
         };
 
         Ok(StartParams {
+            request_id: StartParams::next_request_id(),
             profile,
             core,
             proxy,
         })
     }
 
-    pub fn start(&self, profile_id: ProfileId) -> Result<(), AppError> {
+    pub fn start(&self, profile_id: ProfileId) -> Result<u64, AppError> {
         let params = self.launch_params(profile_id)?;
+        let request = params.request_id;
         self.runtime.start(params)?;
-        Ok(())
+        Ok(request)
     }
 
     pub fn stop(&self, profile_id: ProfileId) -> Result<(), AppError> {
@@ -84,10 +86,11 @@ impl RuntimeService {
         Ok(())
     }
 
-    pub fn restart(&self, profile_id: ProfileId) -> Result<(), AppError> {
+    pub fn restart(&self, profile_id: ProfileId) -> Result<u64, AppError> {
         let params = self.launch_params(profile_id)?;
+        let request = params.request_id;
         self.runtime.restart(params)?;
-        Ok(())
+        Ok(request)
     }
 
     pub fn snapshot(&self, profile_id: ProfileId) -> Option<RuntimeSnapshot> {
@@ -122,6 +125,7 @@ mod tests {
             sent.push((
                 "stop",
                 StartParams {
+                    request_id: 0,
                     profile: profile(profile_id, CoreId::new()),
                     core: core(CoreId::new()),
                     proxy: None,

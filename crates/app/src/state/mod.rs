@@ -119,21 +119,11 @@ pub struct LogRow {
 /// system, and an unbounded vector would grow with every restart.
 const LOG_CAPACITY: usize = 500;
 
-/// How long a start may hold its profile before the window assumes it will never
-/// be answered.
-///
-/// A start's lease is normally given back within a tick, when the runtime's
-/// snapshot stops saying the profile is stopped. This is the valve for a runtime
-/// that says nothing at all - generous, because a start that is merely slow has
-/// already published its state by then, and holding a profile for longer than this
-/// would refuse every copy of it for no reason.
-const START_LEASE: Duration = Duration::from_secs(30);
-
 /// How long a proxy check may hold its profile before the window assumes no
 /// answer is coming.
 ///
-/// Longer than [`START_LEASE`] on purpose: the check itself is bounded by the
-/// engine's readiness deadline and the request's timeout, and a lease that
+/// The check itself is bounded by the engine's readiness deadline and the
+/// request's timeout, and a lease that
 /// expired underneath a check that is still running would hand the profile out
 /// while its proxy is still being asked. This is the outer bound for a worker
 /// that never reported at all.
@@ -730,6 +720,7 @@ pub struct AppState {
     /// answer is matched against - one entry per profile, because a profile is
     /// exactly as busy as the lease above says it is.
     pending_starts: BTreeMap<ProfileId, PendingStart>,
+    queued_starts: HashMap<ProfileId, u64>,
     /// The maintenance task a worker is running, if one is.
     ///
     /// One at a time, because the four of them read and write the same file and
@@ -882,6 +873,7 @@ impl AppState {
             browser_data_path: String::new(),
             operations: Arc::new(Operations::default()),
             pending_starts: BTreeMap::new(),
+            queued_starts: HashMap::new(),
             maintenance: None,
         }
     }
@@ -946,20 +938,17 @@ impl AppState {
         for row in &mut self.rows {
             row.checking_proxy = self.pending_starts.contains_key(&row.profile.id);
             row.snapshot = runtime.snapshot(row.profile.id);
-            // A start lease is held only until the runtime has said something
-            // about it. The snapshot is what says it: once the profile is no
-            // longer stopped, the state itself refuses a copy - a profile that is
-            // starting is active - so the lease has done its job.
-            //
-            // Nothing is released for a profile the snapshot still says is
-            // stopped, which is the window this lease exists for, and
-            // `Operations::expire` is what stops a start that is never answered
-            // from holding its profile for as long as the window is open.
-            if row
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.state != RuntimeState::Stopped)
+            // Old failure/running snapshots do not answer a newly queued start.
+            if self
+                .queued_starts
+                .get(&row.profile.id)
+                .is_some_and(|request| {
+                    row.snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.acknowledged_start >= *request)
+                })
             {
+                self.queued_starts.remove(&row.profile.id);
                 self.operations.free(row.profile.id, Operation::Starting);
             }
         }
@@ -976,23 +965,6 @@ impl AppState {
         for profile in unanswered {
             let reason = self.text().proxy_check_timed_out();
             self.cancel_pending_start(profile, reason);
-        }
-
-        for profile in self.operations.expire(START_LEASE) {
-            if self.pending_starts.contains_key(&profile) {
-                // A proxy is still being asked about this profile, and the lease
-                // is what keeps it to itself while that happens. Taking it again
-                // restarts the clock rather than handing the profile out from
-                // under a check that is still running - and `CHECK_LEASE` above is
-                // what stops that from being forever.
-                let _ = self.operations.take(profile, Operation::Starting);
-                continue;
-            }
-            tracing::warn!(
-                "no answer for the start of {} within {}s; the profile is free again",
-                self.profile_name(profile),
-                START_LEASE.as_secs()
-            );
         }
     }
 

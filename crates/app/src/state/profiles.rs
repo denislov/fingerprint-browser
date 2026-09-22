@@ -180,9 +180,8 @@ impl AppState {
     /// The lease outlives this call on purpose: `RuntimeService::start` returns as
     /// soon as the command is queued, so releasing here would leave exactly the
     /// window this is for - a copy that could begin while the browser is coming
-    /// up. [`AppState::refresh_runtime`] gives it back when the runtime's snapshot
-    /// stops saying the profile is stopped, and [`Operations::expire`] gives it
-    /// back if the runtime never says anything at all.
+    /// up. [`AppState::refresh_runtime`] gives it back only when the snapshot
+    /// acknowledges this particular request, including failed or cancelled starts.
     pub(super) fn begin_starting(&self, id: ProfileId) -> Result<(), AppError> {
         let _installation = self.installation.shared()?;
         let t = self.text();
@@ -294,7 +293,8 @@ impl AppState {
             Opening::Start => self.runtime.start(id),
             Opening::Restart => self.runtime.restart(id),
         };
-        self.record(result)?;
+        let request = self.record(result)?;
+        self.queued_starts.insert(id, request);
         if how == Opening::Restart {
             // A restarted browser is a new browser: the old reading is stale.
             self.forget_verification(id);

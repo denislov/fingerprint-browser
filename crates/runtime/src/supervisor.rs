@@ -695,6 +695,7 @@ impl RuntimeSupervisor {
             },
         );
         self.update_full_snapshot(RuntimeSnapshot {
+            acknowledged_start: 0,
             profile_id,
             state: RuntimeState::Running,
             browser_pid: Some(adopted.browser.pid),
@@ -788,7 +789,9 @@ impl RuntimeSupervisor {
     fn handle_command(&mut self, cmd: RuntimeCommand) -> bool {
         match cmd {
             RuntimeCommand::Start(params) => {
+                let (id, request) = (params.profile.id, params.request_id);
                 self.start_profile(params);
+                self.acknowledge_start(id, request);
                 true
             }
             RuntimeCommand::Stop(profile_id) => {
@@ -797,8 +800,10 @@ impl RuntimeSupervisor {
             }
             RuntimeCommand::Restart(params) => {
                 let id = params.profile.id;
+                let request = params.request_id;
                 self.stop_profile(id);
                 self.start_profile(params);
+                self.acknowledge_start(id, request);
                 true
             }
             RuntimeCommand::ReleaseAll => {
@@ -962,6 +967,7 @@ impl RuntimeSupervisor {
                 }
 
                 self.update_full_snapshot(RuntimeSnapshot {
+                    acknowledged_start: 0,
                     profile_id,
                     state: RuntimeState::Running,
                     browser_pid: Some(browser_pid),
@@ -1239,8 +1245,12 @@ impl RuntimeSupervisor {
                     return true;
                 }
                 RuntimeCommand::Stop(id) => {
+                    let mut cancelled = 0;
                     self.pending_commands.retain(|command| match command {
                         RuntimeCommand::Start(p) | RuntimeCommand::Restart(p) => {
+                            if p.profile_id() == id {
+                                cancelled = cancelled.max(p.request_id);
+                            }
                             p.profile_id() != id
                         }
                         _ => true,
@@ -1249,6 +1259,7 @@ impl RuntimeSupervisor {
                         return true;
                     }
                     self.stop_profile(id);
+                    self.acknowledge_start(id, cancelled);
                 }
                 RuntimeCommand::Start(params) if params.profile_id() == starting => {
                     self.emit(RuntimeEvent::Warning {
@@ -1482,6 +1493,7 @@ impl RuntimeSupervisor {
                 lock.insert(
                     profile_id,
                     RuntimeSnapshot {
+                        acknowledged_start: 0,
                         profile_id,
                         state,
                         browser_pid: None,
@@ -1502,11 +1514,20 @@ impl RuntimeSupervisor {
     fn update_full_snapshot(&self, mut snapshot: RuntimeSnapshot) {
         if let Ok(mut lock) = self.snapshots.write() {
             if let Some(previous) = lock.get(&snapshot.profile_id) {
+                snapshot.acknowledged_start = previous.acknowledged_start;
                 snapshot.dropped_events = previous.dropped_events;
                 snapshot.last_error = previous.last_error.clone();
                 snapshot.last_warning = previous.last_warning.clone();
             }
             lock.insert(snapshot.profile_id, snapshot);
+        }
+    }
+
+    fn acknowledge_start(&self, id: ProfileId, request: u64) {
+        if let Ok(mut snapshots) = self.snapshots.write()
+            && let Some(snapshot) = snapshots.get_mut(&id)
+        {
+            snapshot.acknowledged_start = snapshot.acknowledged_start.max(request);
         }
     }
 }
@@ -2380,6 +2401,25 @@ mod command_queue {
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn cancelling_a_queued_start_acknowledges_that_request() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (events, _) = crossbeam_channel::unbounded();
+        let snapshots = Arc::new(RwLock::new(HashMap::new()));
+        let mut supervisor = super::RuntimeSupervisor::new(rx, events, Arc::clone(&snapshots));
+        let params = crate::test_support::start_params(&std::env::temp_dir().join("cancel-ack"));
+        let (id, request) = (params.profile_id(), params.request_id);
+        supervisor
+            .pending_commands
+            .push_back(RuntimeCommand::Start(params));
+        tx.send(RuntimeCommand::Stop(id)).unwrap();
+        assert!(!supervisor.poll_start_commands(ProfileId::new()));
+        assert!(supervisor.pending_commands.is_empty());
+        let snapshot = snapshots.read().unwrap().get(&id).cloned().unwrap();
+        assert_eq!(snapshot.acknowledged_start, request);
+        assert_eq!(snapshot.state, domain::RuntimeState::Stopped);
+    }
 
     fn facade(
         command_tx: Sender<RuntimeCommand>,

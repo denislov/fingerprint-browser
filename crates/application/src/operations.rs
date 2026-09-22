@@ -140,29 +140,17 @@ impl Operations {
             .map(|(profile, lease)| (*profile, lease.operation))
     }
 
-    /// Drops the starts that have gone unanswered for longer than `age`, and names
-    /// them.
-    ///
-    /// A start's lease is given back when the runtime's snapshot stops saying the
-    /// profile is stopped, which takes a tick. This is the valve for a runtime that
-    /// never says anything: without it, a start that was never answered would hold
-    /// its profile for as long as the window is open, and no copy of it could ever
-    /// run. A copy's lease has no such limit - a copy of hundreds of megabytes
-    /// legitimately takes minutes, and the worker that owns it is what ends it.
-    pub fn expire(&self, age: Duration) -> Vec<ProfileId> {
+    /// Reports overdue starts without releasing them. A timeout is not proof
+    /// that a queued command has been cancelled; only its acknowledgement is.
+    pub fn overdue(&self, age: Duration) -> Vec<ProfileId> {
         let now = Instant::now();
-        let mut held = self.lock();
-        let expired: Vec<ProfileId> = held
-            .iter()
+        let held = self.lock();
+        held.iter()
             .filter(|(_, lease)| {
                 lease.operation == Operation::Starting && now.duration_since(lease.taken) >= age
             })
             .map(|(profile, _)| *profile)
-            .collect();
-        for profile in &expired {
-            held.remove(profile);
-        }
-        expired
+            .collect()
     }
 
     /// The map, whatever a panic while holding it did to the lock.
@@ -303,7 +291,7 @@ mod tests {
     /// The valve: only a start expires, and only once it is older than the age it
     /// is asked about. A copy is ended by its worker, however long that takes.
     #[test]
-    fn only_a_start_expires() {
+    fn overdue_starts_remain_held_until_acknowledged() {
         let operations = operations();
         let starting = ProfileId::new();
         let copying = ProfileId::new();
@@ -314,9 +302,9 @@ mod tests {
             .take(copying, Operation::Copying)
             .expect("the copy");
 
-        assert!(operations.expire(Duration::from_secs(3600)).is_empty());
-        assert_eq!(operations.expire(Duration::ZERO), vec![starting]);
-        assert_eq!(operations.held(starting), None);
+        assert!(operations.overdue(Duration::from_secs(3600)).is_empty());
+        assert_eq!(operations.overdue(Duration::ZERO), vec![starting]);
+        assert_eq!(operations.held(starting), Some(Operation::Starting));
         assert_eq!(
             operations.held(copying),
             Some(Operation::Copying),
