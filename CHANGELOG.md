@@ -75,7 +75,9 @@ says nothing about, and the notes are that section rather than the whole file.
   the launch is queued only once a byte has come back through the engine the
   profile will use. The row reads `Starting` while it runs, **Stop** calls the
   start off, a profile with no proxy is unaffected, and a refusal names the
-  profile, the proxy and the stage of the path that failed. See
+  profile, the proxy and the stage of the path that failed. Every wait ends
+  somewhere: a reading, a stop, an edit to the proxy that was being asked, or a
+  deadline, so a check nobody answers cannot leave a profile unstartable. See
   [proxy testing](README.md#proxy-testing).
 - Closing the window to the background now really takes it off the screen, on
   Linux as well as on Windows. "In the background" used to mean *minimized*, which

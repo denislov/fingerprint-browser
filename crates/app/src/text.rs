@@ -1401,6 +1401,23 @@ impl Text {
         }
     }
 
+    /// Why a start that was waiting for its proxy was called off: the proxy is no
+    /// longer the one that was being asked.
+    pub fn proxy_check_dropped(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "the proxy was changed while it was being checked",
+            Lang::Zh => "检查代理的过程中代理被修改了",
+        }
+    }
+
+    /// Why a start that was waiting for its proxy was called off: no answer came.
+    pub fn proxy_check_timed_out(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "the check did not answer in time",
+            Lang::Zh => "代理检查超时未返回结果",
+        }
+    }
+
     /// Why a start could not even be checked: no such proxy, or one that cannot
     /// be tested at all.
     pub fn start_not_checked(&self, profile: &str, reason: &str) -> String {

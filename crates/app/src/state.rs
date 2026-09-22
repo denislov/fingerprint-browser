@@ -27,7 +27,7 @@ use runtime::{Diagnosis, Discrepancy, Fault, RuntimeComponent, RuntimeEvent, Run
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use storage::ConfigurationRepository;
 
 /// A user-facing message shown in the window banner.
@@ -123,6 +123,16 @@ const LOG_CAPACITY: usize = 500;
 /// already published its state by then, and holding a profile for longer than this
 /// would refuse every copy of it for no reason.
 const START_LEASE: Duration = Duration::from_secs(30);
+
+/// How long a proxy check may hold its profile before the window assumes no
+/// answer is coming.
+///
+/// Longer than [`START_LEASE`] on purpose: the check itself is bounded by the
+/// engine's readiness deadline and the request's timeout, and a lease that
+/// expired underneath a check that is still running would hand the profile out
+/// while its proxy is still being asked. This is the outer bound for a worker
+/// that never reported at all.
+const CHECK_LEASE: Duration = Duration::from_secs(60);
 
 /// Which of the activity log's lines the page is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -713,7 +723,22 @@ pub struct AppState {
     /// The command is not queued until the answer is in, so this is what the
     /// answer is matched against - one entry per profile, because a profile is
     /// exactly as busy as the lease above says it is.
-    pending_starts: BTreeMap<ProfileId, (ProxyId, Opening)>,
+    pending_starts: BTreeMap<ProfileId, PendingStart>,
+}
+
+/// A start that is waiting for its proxy to answer.
+#[derive(Debug, Clone, Copy)]
+struct PendingStart {
+    proxy: ProxyId,
+    how: Opening,
+    /// When the check was asked for.
+    ///
+    /// Every wait has to end somewhere: the answer resolves it, a proxy that is
+    /// edited cancels it, and this is what calls it off if neither happens - a
+    /// worker that died, or an answer that was dropped. Without it a start that
+    /// nobody ever answers would hold its profile's lease for the rest of the
+    /// session.
+    asked: Instant,
 }
 
 /// Which way a profile is about to be opened.
@@ -910,12 +935,27 @@ impl AppState {
             }
         }
 
+        // A check nobody ever answered is called off here rather than left to
+        // hold its profile: the worker may have died, or the answer may have been
+        // dropped with the proxy it was for.
+        let unanswered: Vec<ProfileId> = self
+            .pending_starts
+            .iter()
+            .filter(|(_, pending)| pending.asked.elapsed() >= CHECK_LEASE)
+            .map(|(profile, _)| *profile)
+            .collect();
+        for profile in unanswered {
+            let reason = self.text().proxy_check_timed_out();
+            self.cancel_pending_start(profile, reason);
+        }
+
         for profile in self.operations.expire(START_LEASE) {
             if self.pending_starts.contains_key(&profile) {
                 // A proxy is still being asked about this profile, and the lease
                 // is what keeps it to itself while that happens. Taking it again
                 // restarts the clock rather than handing the profile out from
-                // under a check that is still running.
+                // under a check that is still running - and `CHECK_LEASE` above is
+                // what stops that from being forever.
                 let _ = self.operations.take(profile, Operation::Starting);
                 continue;
             }
@@ -1326,10 +1366,12 @@ impl AppState {
     pub fn update_proxy(&mut self, proxy: ProxyProfile) -> Result<(), AppError> {
         let t = self.text();
         self.record(self.proxies.update(proxy.clone()))?;
-        // The old result was about the old upstream, and would read as a claim
-        // about the new one.
-        self.forget_proxy_test(proxy.id);
         self.set_notice(Notice::info(t.proxy_saved(&proxy.name)));
+        // The old result was about the old upstream, and would read as a claim
+        // about the new one. Last, so that a start this edit called off is what
+        // the banner says: a profile left waiting would otherwise read as one
+        // that was never asked to start.
+        self.forget_proxy_test(proxy.id);
         Ok(())
     }
 
@@ -1342,10 +1384,10 @@ impl AppState {
             .map(|proxy| proxy.name)
             .unwrap_or_else(|| t.a_removed_profile.to_string());
         self.record(self.proxies.delete(id))?;
+        self.set_notice(Notice::info(t.proxy_deleted(&name)));
         // Nothing points at this id any more, so a result kept for it could
         // only ever be shown against a different proxy.
         self.forget_proxy_test(id);
-        self.set_notice(Notice::info(t.proxy_deleted(&name)));
         Ok(())
     }
 
@@ -2055,19 +2097,24 @@ impl AppState {
         // button, or another profile's start. Its answer is the answer this
         // opening needs, so it waits for it instead of refusing and making the
         // reader press Start again a few seconds later.
+        let pending = PendingStart {
+            proxy: proxy_id,
+            how,
+            asked: Instant::now(),
+        };
         if self
             .proxy_tests
             .get(&proxy_id)
             .is_some_and(ProxyTest::is_running)
         {
-            self.pending_starts.insert(id, (proxy_id, how));
+            self.pending_starts.insert(id, pending);
             self.set_checking_proxy(id, true);
             return Ok(StartGate::Awaiting);
         }
 
         match self.begin_proxy_test(proxy_id) {
             Ok(job) => {
-                self.pending_starts.insert(id, (proxy_id, how));
+                self.pending_starts.insert(id, pending);
                 self.set_checking_proxy(id, true);
                 Ok(StartGate::Checking(Box::new(job)))
             }
@@ -2155,6 +2202,41 @@ impl AppState {
     fn set_checking_proxy(&mut self, id: ProfileId, checking: bool) {
         if let Some(row) = self.rows.iter_mut().find(|row| row.profile.id == id) {
             row.checking_proxy = checking;
+        }
+    }
+
+    /// Calls off a start that is waiting for a proxy, and says why.
+    ///
+    /// The lease goes back first: whatever went wrong with the check, the profile
+    /// is free again, and a wait that nobody is going to answer must not be what
+    /// keeps it that way.
+    fn cancel_pending_start(&mut self, profile: ProfileId, reason: &str) {
+        self.pending_starts.remove(&profile);
+        self.operations.free(profile, Operation::Starting);
+        self.set_checking_proxy(profile, false);
+        let message = {
+            let t = self.text();
+            t.start_not_checked(&self.profile_name(profile), reason)
+        };
+        self.set_notice(Notice::error(message.clone()));
+        self.toast(ToastKind::Error, message);
+    }
+
+    /// Calls off every start that is waiting on one proxy.
+    ///
+    /// A proxy that was edited or removed cannot answer the question that was
+    /// asked about it - the old reading is a claim about the old upstream - so the
+    /// checks waiting on it are called off rather than left waiting for an answer
+    /// that will never be matched to them.
+    fn cancel_pending_starts(&mut self, proxy: ProxyId, reason: &str) {
+        let waiting: Vec<ProfileId> = self
+            .pending_starts
+            .iter()
+            .filter(|(_, pending)| pending.proxy == proxy)
+            .map(|(profile, _)| *profile)
+            .collect();
+        for profile in waiting {
+            self.cancel_pending_start(profile, reason);
         }
     }
 
@@ -2410,8 +2492,8 @@ impl AppState {
         let waiting: Vec<(ProfileId, Opening)> = self
             .pending_starts
             .iter()
-            .filter(|(_, (proxy_id, _))| *proxy_id == id)
-            .map(|(profile, (_, how))| (*profile, *how))
+            .filter(|(_, pending)| pending.proxy == id)
+            .map(|(profile, pending)| (*profile, pending.how))
             .collect();
         for (profile, _) in &waiting {
             self.pending_starts.remove(profile);
@@ -2489,6 +2571,8 @@ impl AppState {
     /// a different answer, and the old one would read as a claim about the new.
     pub fn forget_proxy_test(&mut self, id: ProxyId) {
         self.proxy_tests.remove(&id);
+        let reason = self.text().proxy_check_dropped();
+        self.cancel_pending_starts(id, reason);
     }
 
     /// What the last test of this proxy found, if there was one.
@@ -5995,6 +6079,96 @@ mod tests {
             .finish_proxy_test(proxy_id, false, through_the_proxy());
         assert!(commands(&fixture).is_empty());
         assert_eq!(fixture.state.operations.held(id), None);
+    }
+
+    /// Every wait has to end somewhere. The answer resolves it, a stop calls it
+    /// off, and this is the third way out: the proxy is edited while the check is
+    /// in flight, so the answer - when it comes - is a claim about an upstream
+    /// that no longer exists and is dropped instead of matched to this start.
+    #[test]
+    fn editing_a_proxy_calls_off_the_start_that_was_waiting_for_it() {
+        let mut fixture = fixture();
+        let (id, proxy_id) = proxied(&mut fixture, "Work laptop");
+        fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect("the gate");
+
+        let mut proxy = fixture.state.proxy(proxy_id).expect("the proxy");
+        proxy.outbound = socks5("10.0.0.2", 1080);
+        fixture.state.update_proxy(proxy).expect("edit");
+
+        assert_eq!(
+            fixture.state.row(id).expect("the row").state(),
+            RuntimeState::Stopped
+        );
+        assert_eq!(
+            fixture.state.operations.held(id),
+            None,
+            "a start nobody will answer must not hold its profile"
+        );
+        let message = last_message(&fixture);
+        assert!(message.contains("Work laptop"), "{message}");
+        assert!(
+            message.contains("changed while it was being checked"),
+            "{message}"
+        );
+
+        // The late answer is dropped with the reading it was for, so nothing
+        // starts and nothing is left over.
+        fixture
+            .state
+            .finish_proxy_test(proxy_id, false, through_the_proxy());
+        assert!(commands(&fixture).is_empty());
+    }
+
+    /// And the fourth: a worker that never reports at all. The wait is bounded
+    /// rather than kept until the window closes, because a lease that outlives
+    /// the thing that took it is a profile that can never be started again.
+    #[test]
+    fn a_check_that_never_answers_gives_its_profile_back() {
+        let mut fixture = fixture();
+        let (id, proxy_id) = proxied(&mut fixture, "Work laptop");
+        fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect("the gate");
+        // The check is as old as the bound allows, which is what it looks like
+        // from here when the worker died.
+        fixture.state.pending_starts.insert(
+            id,
+            PendingStart {
+                proxy: proxy_id,
+                how: Opening::Start,
+                asked: Instant::now()
+                    .checked_sub(CHECK_LEASE + Duration::from_secs(1))
+                    .expect("the clock goes back"),
+            },
+        );
+
+        fixture.state.refresh_runtime();
+
+        assert_eq!(
+            fixture.state.row(id).expect("the row").state(),
+            RuntimeState::Stopped
+        );
+        assert_eq!(fixture.state.operations.held(id), None);
+        assert_eq!(
+            fixture.state.proxy_test(proxy_id),
+            Some(&ProxyTest::Running),
+            "the reading is still the row's business, not the start's"
+        );
+        let message = last_message(&fixture);
+        assert!(message.contains("did not answer in time"), "{message}");
+
+        // And the profile can be started again, which is the whole point. The
+        // reading is still in flight, so the second attempt waits for it rather
+        // than asking a second time - what matters is that it is not refused.
+        let again = fixture
+            .state
+            .begin_opening(id, Opening::Start)
+            .expect("a second attempt");
+        assert!(matches!(again, StartGate::Awaiting));
     }
 
     /// While the check runs the profile is busy, which is the lease doing its

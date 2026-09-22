@@ -129,8 +129,10 @@ means the browser is not started at all: the row says `Starting` while the check
 runs, and the refusal names the profile, the proxy and the stage of the path that
 failed. Nothing else about the app changes - a profile without a proxy starts
 immediately, and the check is the same one the Proxies page runs, so the reading
-it produces is the reading the row shows. The cost is one round trip per launch;
-the alternative is a browser that runs, looks healthy, and leaks.
+it produces is the reading the row shows. Every wait ends somewhere - the reading
+itself, **Stop**, an edit to the proxy that was being asked, or a deadline - so a
+check that never reports cannot leave a profile unstartable. The cost is one round
+trip per launch; the alternative is a browser that runs, looks healthy, and leaks.
 
 ### Where a browser's own traffic leaves from
 
