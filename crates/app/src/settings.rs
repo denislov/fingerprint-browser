@@ -1046,14 +1046,16 @@ mod tests {
         let elsewhere = home.join("elsewhere");
         let legacy = home.join(".config/fp-browser/config.json");
         std::fs::create_dir_all(legacy.parent().expect("parent")).expect("legacy dir");
-        std::fs::write(
-            &legacy,
-            format!(
-                r#"{{"data_dir": "{}", "theme": "light"}}"#,
-                elsewhere.display()
-            ),
-        )
-        .expect("legacy config");
+        // The file an older version would have written, built by the JSON writer
+        // rather than a `format!`: a Windows path is full of backslashes and half
+        // of them are not valid escapes, so the hand-written version produced a
+        // config file this program could not read - on the one platform this test
+        // is never run on locally.
+        let body = serde_json::json!({
+            "data_dir": elsewhere.display().to_string(),
+            "theme": "light",
+        });
+        std::fs::write(&legacy, serde_json::to_vec(&body).expect("json")).expect("legacy config");
 
         let environment = Environment {
             host,
