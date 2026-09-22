@@ -86,7 +86,11 @@ impl Held {
     /// The handle behind an owned component, for a test that has to end a child
     /// the way only its owner can. An adopted component has no handle - which is
     /// the whole distinction - so asking for one is a mistake worth a panic.
-    #[cfg(test)]
+    ///
+    /// Gated exactly like the test module that is its only caller: `cfg(test)`
+    /// alone leaves it unused on Windows, where the supervisor's tests do not
+    /// compile because they spawn Unix processes, and the gate refuses warnings.
+    #[cfg(all(test, unix))]
     fn owned_mut(&mut self) -> &mut crate::process::ManagedChild {
         match self {
             Self::Owned(child) => child,
