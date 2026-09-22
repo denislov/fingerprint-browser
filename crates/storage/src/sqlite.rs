@@ -1,3 +1,5 @@
+mod codec;
+
 use crate::error::StorageError;
 use crate::migrations::run_migrations;
 use crate::traits::{ConfigurationRepository, CoreRepository, ProfileRepository, ProxyRepository};
@@ -110,48 +112,7 @@ impl ProfileRepository for SqliteProfileRepository {
         let id_str = id.to_string();
         let mut rows = stmt.query(params![id_str])?;
 
-        if let Some(row) = rows.next()? {
-            let id_raw: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let core_id_raw: String = row.get(2)?;
-            let user_data_dir_str: String = row.get(3)?;
-            let fingerprint_json: String = row.get(4)?;
-            let proxy_id_raw: Option<String> = row.get(5)?;
-            let width: u32 = row.get(6)?;
-            let height: u32 = row.get(7)?;
-            let start_target_json: String = row.get(8)?;
-
-            let profile_id = ProfileId(
-                Uuid::parse_str(&id_raw).map_err(|e| StorageError::Serialization(e.to_string()))?,
-            );
-            let core_id = CoreId(
-                Uuid::parse_str(&core_id_raw)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?,
-            );
-            let proxy_id = match proxy_id_raw {
-                Some(p) => Some(ProxyId(
-                    Uuid::parse_str(&p).map_err(|e| StorageError::Serialization(e.to_string()))?,
-                )),
-                None => None,
-            };
-            let fingerprint: FingerprintProfile = serde_json::from_str(&fingerprint_json)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            let start_target: StartTarget = serde_json::from_str(&start_target_json)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-
-            Ok(Some(BrowserProfile {
-                id: profile_id,
-                name,
-                core_id,
-                user_data_dir: PathBuf::from(user_data_dir_str),
-                fingerprint,
-                proxy_id,
-                window: WindowProfile::new(width, height),
-                start_target,
-            }))
-        } else {
-            Ok(None)
-        }
+        rows.next()?.map(codec::profile).transpose()
     }
 
     fn list(&self) -> Result<Vec<BrowserProfile>, StorageError> {
@@ -172,44 +133,7 @@ impl ProfileRepository for SqliteProfileRepository {
         let mut list = Vec::new();
 
         while let Some(row) = rows.next()? {
-            let id_raw: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let core_id_raw: String = row.get(2)?;
-            let user_data_dir_str: String = row.get(3)?;
-            let fingerprint_json: String = row.get(4)?;
-            let proxy_id_raw: Option<String> = row.get(5)?;
-            let width: u32 = row.get(6)?;
-            let height: u32 = row.get(7)?;
-            let start_target_json: String = row.get(8)?;
-
-            let profile_id = ProfileId(
-                Uuid::parse_str(&id_raw).map_err(|e| StorageError::Serialization(e.to_string()))?,
-            );
-            let core_id = CoreId(
-                Uuid::parse_str(&core_id_raw)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?,
-            );
-            let proxy_id = match proxy_id_raw {
-                Some(p) => Some(ProxyId(
-                    Uuid::parse_str(&p).map_err(|e| StorageError::Serialization(e.to_string()))?,
-                )),
-                None => None,
-            };
-            let fingerprint: FingerprintProfile = serde_json::from_str(&fingerprint_json)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-            let start_target: StartTarget = serde_json::from_str(&start_target_json)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-
-            list.push(BrowserProfile {
-                id: profile_id,
-                name,
-                core_id,
-                user_data_dir: PathBuf::from(user_data_dir_str),
-                fingerprint,
-                proxy_id,
-                window: WindowProfile::new(width, height),
-                start_target,
-            });
+            list.push(codec::profile(row)?);
         }
 
         Ok(list)
@@ -239,8 +163,9 @@ impl ProfileRepository for SqliteProfileRepository {
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         let now = now_ts();
 
-        let affected = conn.execute(
-            r#"
+        let affected = conn
+            .execute(
+                r#"
             UPDATE profiles SET
                 name = ?2,
                 core_id = ?3,
@@ -253,19 +178,20 @@ impl ProfileRepository for SqliteProfileRepository {
                 updated_at = ?10
             WHERE id = ?1
             "#,
-            params![
-                id_str,
-                profile.name,
-                core_id_str,
-                user_data_str,
-                fingerprint_json,
-                proxy_id_str,
-                profile.window.width,
-                profile.window.height,
-                start_target_json,
-                now,
-            ],
-        )?;
+                params![
+                    id_str,
+                    profile.name,
+                    core_id_str,
+                    user_data_str,
+                    fingerprint_json,
+                    proxy_id_str,
+                    profile.window.width,
+                    profile.window.height,
+                    start_target_json,
+                    now,
+                ],
+            )
+            .map_err(|error| profile_write_error(&conn, profile, error))?;
 
         if affected == 0 {
             return Err(StorageError::NotFound(format!(
@@ -309,25 +235,7 @@ impl ProxyRepository for SqliteProxyRepository {
         let id_str = id.to_string();
         let mut rows = stmt.query(params![id_str])?;
 
-        if let Some(row) = rows.next()? {
-            let id_raw: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let outbound_json: String = row.get(2)?;
-
-            let proxy_id = ProxyId(
-                Uuid::parse_str(&id_raw).map_err(|e| StorageError::Serialization(e.to_string()))?,
-            );
-            let outbound: ProxyOutbound = serde_json::from_str(&outbound_json)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-
-            Ok(Some(ProxyProfile {
-                id: proxy_id,
-                name,
-                outbound,
-            }))
-        } else {
-            Ok(None)
-        }
+        rows.next()?.map(codec::proxy).transpose()
     }
 
     fn list(&self) -> Result<Vec<ProxyProfile>, StorageError> {
@@ -342,21 +250,7 @@ impl ProxyRepository for SqliteProxyRepository {
         let mut list = Vec::new();
 
         while let Some(row) = rows.next()? {
-            let id_raw: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let outbound_json: String = row.get(2)?;
-
-            let proxy_id = ProxyId(
-                Uuid::parse_str(&id_raw).map_err(|e| StorageError::Serialization(e.to_string()))?,
-            );
-            let outbound: ProxyOutbound = serde_json::from_str(&outbound_json)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
-
-            list.push(ProxyProfile {
-                id: proxy_id,
-                name,
-                outbound,
-            });
+            list.push(codec::proxy(row)?);
         }
 
         Ok(list)
@@ -417,27 +311,7 @@ impl CoreRepository for SqliteCoreRepository {
         let id_str = id.to_string();
         let mut rows = stmt.query(params![id_str])?;
 
-        if let Some(row) = rows.next()? {
-            let id_raw: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let executable_str: String = row.get(2)?;
-            let version: String = row.get(3)?;
-            let major: u32 = row.get(4)?;
-
-            let core_id = CoreId(
-                Uuid::parse_str(&id_raw).map_err(|e| StorageError::Serialization(e.to_string()))?,
-            );
-
-            Ok(Some(BrowserCore {
-                id: core_id,
-                name,
-                executable: PathBuf::from(executable_str),
-                version,
-                major,
-            }))
-        } else {
-            Ok(None)
-        }
+        rows.next()?.map(codec::core).transpose()
     }
 
     fn list(&self) -> Result<Vec<BrowserCore>, StorageError> {
@@ -452,23 +326,7 @@ impl CoreRepository for SqliteCoreRepository {
         let mut list = Vec::new();
 
         while let Some(row) = rows.next()? {
-            let id_raw: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let executable_str: String = row.get(2)?;
-            let version: String = row.get(3)?;
-            let major: u32 = row.get(4)?;
-
-            let core_id = CoreId(
-                Uuid::parse_str(&id_raw).map_err(|e| StorageError::Serialization(e.to_string()))?,
-            );
-
-            list.push(BrowserCore {
-                id: core_id,
-                name,
-                executable: PathBuf::from(executable_str),
-                version,
-                major,
-            });
+            list.push(codec::core(row)?);
         }
 
         Ok(list)
@@ -654,7 +512,17 @@ fn insert_profile(conn: &Connection, profile: &BrowserProfile) -> Result<(), Sto
         ],
     );
 
-    result.map(|_| ()).map_err(|error| match refusal(error) {
+    result
+        .map(|_| ())
+        .map_err(|error| profile_write_error(conn, profile, error))
+}
+
+fn profile_write_error(
+    conn: &Connection,
+    profile: &BrowserProfile,
+    error: rusqlite::Error,
+) -> StorageError {
+    match refusal(error) {
         // The identifier is taken. Which of the two constraints it was does not
         // change the answer: the row cannot go in as it stands.
         Refusal::Duplicate => {
@@ -667,7 +535,7 @@ fn insert_profile(conn: &Connection, profile: &BrowserProfile) -> Result<(), Sto
             StorageError::Invalid(format!("profile {}: {detail}", profile.id))
         }
         Refusal::Other(error) => StorageError::Database(error),
-    })
+    }
 }
 
 /// Why SQLite refused a write, as far as its extended error code can say.

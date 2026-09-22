@@ -548,6 +548,17 @@ mod tests {
             "{error}"
         );
 
+        for (mut invalid, reference) in [(no_core, "core"), (no_proxy, "proxy")] {
+            invalid.id = work.id;
+            let error = profiles.update(&invalid).expect_err("dangling update");
+            assert!(
+                matches!(&error, StorageError::Dangling(reason) if reason.contains(reference)),
+                "{error}"
+            );
+            assert_eq!(profiles.get(work.id).unwrap().unwrap(), work);
+            assert_eq!(profiles.list().unwrap(), vec![work.clone()]);
+        }
+
         // A reference in use is not silently dropped: the record that something
         // still names cannot be deleted, and the profile keeps its reference.
         let error = proxies
