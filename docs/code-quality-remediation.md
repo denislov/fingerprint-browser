@@ -9,7 +9,7 @@ Behavioral fixes precede structural cleanup.
 - [x] Coordinate configuration restoration with configuration writes, starts and copies.
 - [x] Keep queued starts protected until their own runtime acknowledgement.
 - [x] Match asynchronous diagnostics to individual tasks.
-- [ ] Enforce diagnostic deadlines throughout partial reads and writes.
+- [x] Enforce diagnostic deadlines throughout partial reads and writes.
 - [ ] Preserve decoded proxy credentials.
 - [ ] Atomically replace configuration backups and settings files.
 - [ ] Align SQLite insert/update errors and share row decoding.
@@ -38,6 +38,10 @@ Stage 4: diagnostic results carry their originating task, and fingerprint
 readings also match the runtime session. An edited proxy's obsolete result
 cannot release a new start gate. Concurrent old/new proxy workers have separate
 temporary engine directories. Restore invalidates all previous readings.
+
+Stage 5: diagnostic socket operations recheck a single absolute deadline before
+each read/write. Connection establishment consumes the same budget. A local
+drip-feed peer regression verifies that partial progress cannot renew a timeout.
 
 Real-browser, real-Xray and platform-specific tests require their corresponding
 runtime environment; ordinary workspace tests do not replace those checks.

@@ -298,6 +298,7 @@ struct Bounded {
 
 impl Bounded {
     fn connect(socks_port: u16, timeout: Duration) -> Result<Self, Fault> {
+        let deadline = Instant::now() + timeout;
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, socks_port));
         let stream = TcpStream::connect_timeout(&address, timeout).map_err(|error| {
             Fault::new(
@@ -305,10 +306,7 @@ impl Bounded {
                 format!("the loopback SOCKS endpoint at {address} accepted no connection: {error}"),
             )
         })?;
-        Ok(Self {
-            stream,
-            deadline: Instant::now() + timeout,
-        })
+        Ok(Self { stream, deadline })
     }
 
     fn remaining(&self) -> Result<Duration, Fault> {
@@ -322,20 +320,29 @@ impl Bounded {
         Ok(left)
     }
 
-    fn write_all(&mut self, bytes: &[u8]) -> Result<(), Fault> {
-        let left = self.remaining()?;
-        self.stream
-            .set_write_timeout(Some(left))
-            .map_err(io_fault)?;
-        self.stream.write_all(bytes).map_err(io_fault)
+    fn write_all(&mut self, mut bytes: &[u8]) -> Result<(), Fault> {
+        while !bytes.is_empty() {
+            let left = self.remaining()?;
+            self.stream
+                .set_write_timeout(Some(left))
+                .map_err(io_fault)?;
+            match self.stream.write(bytes) {
+                Ok(0) => return Err(io_fault(std::io::Error::from(ErrorKind::WriteZero))),
+                Ok(written) => bytes = &bytes[written..],
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => return Err(io_fault(error)),
+            }
+        }
+        self.remaining()?;
+        Ok(())
     }
 
     fn read_exact(&mut self, buffer: &mut [u8]) -> Result<(), Fault> {
-        let left = self.remaining()?;
-        self.stream.set_read_timeout(Some(left)).map_err(io_fault)?;
         // A short read is not a complete answer: the reply must arrive whole.
         let mut filled = 0;
         while filled < buffer.len() {
+            let left = self.remaining()?;
+            self.stream.set_read_timeout(Some(left)).map_err(io_fault)?;
             match self.stream.read(&mut buffer[filled..]) {
                 Ok(0) => {
                     return Err(Fault::new(
@@ -348,6 +355,7 @@ impl Bounded {
                 Err(error) => return Err(io_fault(error)),
             }
         }
+        self.remaining()?;
         Ok(())
     }
 
@@ -1479,6 +1487,28 @@ mod tests {
             "the probe must give up on its own deadline, took {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn partial_reads_share_one_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for byte in b"127.0.0.1" {
+                thread::sleep(Duration::from_millis(70));
+                if stream.write_all(&[*byte]).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut socket = Bounded::connect(port, Duration::from_millis(150)).unwrap();
+        let error = socket
+            .read_exact(&mut [0; 9])
+            .expect_err("progress does not renew the deadline");
+        assert_eq!(error.class, FaultClass::Timeout);
+        drop(socket);
+        peer.join().unwrap();
     }
 
     #[test]
