@@ -23,7 +23,7 @@ jobs:
     outputs:
       version: ${{ steps.read.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - id: read
         name: Read the version and compare it with the tag
@@ -56,7 +56,7 @@ jobs:
     needs: manifest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The same list the gate installs, and it has to be the list the *release*
       # binary needs: `ldd` on the archive's binary names libxcb, libxkbcommon and
@@ -69,7 +69,10 @@ jobs:
             libfontconfig1-dev libfreetype-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      # The version `rust-toolchain.toml` pins; see the note there. Both jobs
+      # here build artifacts people keep, so the compiler is the one thing
+      # that should not be decided by the calendar.
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
 
       - name: Build and package
@@ -100,8 +103,8 @@ jobs:
     needs: manifest
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
 
       # The image usually has Inno Setup; installing it is idempotent, and the
@@ -132,7 +135,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/download-artifact@v4
         with:

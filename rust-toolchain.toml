@@ -1,0 +1,18 @@
+# The compiler the gate and the release artifacts are built with, named once.
+#
+# Without this file "the gate passes" is relative to whatever `stable` happened
+# to be that day, and two compilers do not agree: the checkout this repository
+# was released from had 1.96.0 while the runner installed 1.98.1, which has a
+# clippy lint 1.96.0 does not - so a green gate here and a red one there were
+# both correct answers to different questions, and the release took five rounds
+# of failures that only CI could see. A release is a build someone else can
+# reproduce, and that starts with the compiler rather than with a channel name.
+#
+# `.github/workflows/` installs this same version rather than `stable`, so the
+# runner does not resolve to a different compiler than this file does. Bumping
+# the version is one edit here and three in those files; they are meant to move
+# together, and the gate cannot tell you when they have not.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

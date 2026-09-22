@@ -40,6 +40,11 @@ anywhere, and the last section says what that means.
   `v0.1.0`, and no commit at all.
 - Tags are `v<version>` (`v0.1.0`), on the commit the artifact was built from.
   A tag that does not match `Cargo.toml` is a release that cannot be rebuilt.
+- The **compiler** is pinned in `rust-toolchain.toml`, and `.github/workflows/`
+  installs that version rather than `stable`. Two compilers do not agree about
+  lints, so "the gate passes" has to name one: `0.1.0` was held up by a clippy
+  lint that 1.98.1 has and the checkout's 1.96.0 does not, which made a green
+  gate here and a red one on the runner both true.
 
 ## What a release contains
 
@@ -152,11 +157,19 @@ section for the version is refused rather than published with empty notes.
 
 **What has been verified where.** The Linux job's commands have been run on
 Linux, including the archive, the install into a scratch home, running the
-installed binary and the checksum check. The Windows installer and the workflow
-file itself have **not** been run anywhere yet: this repository has no Windows
-machine, and a workflow only runs on GitHub. Treat the first release as the thing
-that verifies them - and if the Windows job fails, the failure is in
-`packaging/windows/`, which is the one file here written blind.
+installed binary and the checksum check. The Windows side has been run too - by
+hand first, then by the `v0.1.0` tag - which makes the runner the first Windows
+machine this project has had: the gate (`scripts/check.ps1`, so the Windows-only
+halves compile and their tests pass) and the packaging script (the
+resource-section check, then the installer build) both ran and passed, and the
+release was published from them.
+
+What a runner cannot do is still unverified: nothing has **run** the installer,
+and the program has never been started on Windows. So the two Windows-only paths
+`0.1.0` ships - the tray icon and the single-instance lock - are compiled,
+type-checked and tested where a test can run without a desktop, and not seen
+working. If something is wrong there, look in the Windows-only code or in
+`packaging/windows/`.
 
 ## Cutting a release
 
@@ -171,8 +184,8 @@ that verifies them - and if the Windows job fails, the failure is in
    Linux, `scripts/check.ps1` on Windows.
 4. **Exercise the packaging without publishing.** Run `Release` from the Actions
    tab (`workflow_dispatch`): it runs `manifest`, `linux` and `windows` and skips
-   `publish`. This is the only way the Windows installer and the workflow file
-   themselves are ever run, and a failure here costs nothing.
+   `publish`. This is the Windows path - the installer and the workflow file
+   themselves - and a failure here costs nothing.
 5. **Tag and push.** `git tag v<version>` on that commit, then push the tag.
    `publish` attaches both artifacts with their checksums and takes the release
    notes from the changelog section for the version.

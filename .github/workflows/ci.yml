@@ -16,7 +16,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # What this workspace links against, which is more than the font stack the
       # first version of this list assumed. Two of them come from build scripts -
@@ -37,7 +37,11 @@ jobs:
             libfontconfig1-dev libfreetype-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      # The version `rust-toolchain.toml` pins, named rather than `stable`: a
+      # runner that resolves `stable` for itself is a second compiler, and the
+      # difference between two of them is the difference between a green gate and
+      # a red one. Bump this and the file together.
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
 
