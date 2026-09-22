@@ -13,7 +13,7 @@ Behavioral fixes precede structural cleanup.
 - [x] Preserve decoded proxy credentials.
 - [x] Atomically replace configuration backups and settings files.
 - [x] Align SQLite insert/update errors and share row decoding.
-- [ ] Extract large modules by responsibility and correct stale documentation.
+- [x] Extract large modules by responsibility and correct stale documentation.
 
 ## Validation
 
@@ -54,6 +54,16 @@ destination and remove the temporary file. App, application and storage tests pa
 Stage 8: SQLite profile writes share constraint classification; get/list share
 one row decoder per entity. Both backend contract tests now check dangling-core
 and dangling-proxy updates and verify the original row survives refusal.
+
+Structural cleanup: runtime ownership, command handover, launch orchestration,
+diagnostic transport and temporary engines are separate modules. URI parsing is
+split by protocol and transport. AppState read models, activity and summaries,
+UI worker dispatch and lifecycle, settings actions, settings persistence and
+resolution, editor rendering, and text formatting have separate homes. Large
+state/UI test suites are grouped by scenario with shared fixtures. Existing
+public entry points are retained; obsolete foreign-key and timeout comments
+were corrected. Runtime/domain tests and strict Clippy passed before the app
+reorganization; the full workspace is validated again after it.
 
 Real-browser, real-Xray and platform-specific tests require their corresponding
 runtime environment; ordinary workspace tests do not replace those checks.
