@@ -73,6 +73,13 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Changed
 
+- A new profile's fingerprint seed now comes from the operating system's entropy
+  rather than from the clock. The seed is what makes two profiles' fingerprints
+  differ, so a repeated seed is two profiles a site can correlate and a guessable
+  one is a fingerprint a site can anticipate - and the low 32 bits of a nanosecond
+  count repeat every four seconds and are guessable from any timestamp the machine
+  reports. The source is injected, so the tests that have to know what the seed was
+  can say.
 - The runtime's test-support builders are now shared, and the command queue's rules
   are tested on every platform. The supervisor's test module spawns shell scripts,
   so it is Unix-only; the parts of the state machine that need no process - a full

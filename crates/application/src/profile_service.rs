@@ -58,26 +58,55 @@ pub trait ProfileService: Send + Sync {
     fn list(&self) -> Result<Vec<BrowserProfile>, AppError>;
 }
 
+/// Draws the seed a new fingerprint is built from.
+///
+/// Injected for the same reason a core's version probe is: the real source is the
+/// operating system's entropy, which a test cannot ask for on purpose, and a test
+/// that has to compare two profiles' fingerprints needs to know what the seed was.
+pub type SeedSource = Box<dyn Fn() -> u32 + Send + Sync>;
+
 pub struct DefaultProfileService {
     repo: Arc<dyn ProfileRepository>,
     default_base_dir: PathBuf,
+    seed_source: SeedSource,
 }
 
 impl DefaultProfileService {
     pub fn new(repo: Arc<dyn ProfileRepository>, default_base_dir: PathBuf) -> Self {
+        Self::with_seed_source(repo, default_base_dir, Box::new(random_seed))
+    }
+
+    pub fn with_seed_source(
+        repo: Arc<dyn ProfileRepository>,
+        default_base_dir: PathBuf,
+        seed_source: SeedSource,
+    ) -> Self {
         Self {
             repo,
             default_base_dir,
+            seed_source,
         }
     }
 
     fn generate_seed(&self) -> u32 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let duration = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        (duration.as_nanos() & 0xFFFF_FFFF) as u32
+        (self.seed_source)()
     }
+}
+
+/// A seed from the operating system's entropy source.
+///
+/// The low 32 bits of the clock used to be the source, and they are the wrong one
+/// for this. The seed is what makes two profiles' fingerprints differ, so a
+/// repeated seed is two profiles a site can correlate, and a predictable one is a
+/// fingerprint a site can anticipate: a nanosecond count's low bits repeat every
+/// four seconds and are guessable from any timestamp the machine reports. A v4
+/// UUID is drawn from the OS's entropy, and four bytes of one is the cheapest
+/// portable way to ask for that - the same call that mints every identifier in
+/// this program.
+fn random_seed() -> u32 {
+    let uuid = uuid::Uuid::new_v4();
+    let bytes = uuid.as_bytes();
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
 impl ProfileService for DefaultProfileService {
@@ -87,10 +116,12 @@ impl ProfileService for DefaultProfileService {
             .user_data_dir
             .unwrap_or_else(|| default_user_data_dir(&self.default_base_dir, id));
 
-        let seed = self.generate_seed();
-        let fingerprint = draft
-            .fingerprint
-            .unwrap_or_else(|| FingerprintProfile::new_random(seed));
+        // Drawn only when it is needed: a caller that brought its own fingerprint
+        // is not asking the entropy source for anything.
+        let fingerprint = match draft.fingerprint {
+            Some(fingerprint) => fingerprint,
+            None => FingerprintProfile::new_random(self.generate_seed()),
+        };
 
         let profile = BrowserProfile {
             id,

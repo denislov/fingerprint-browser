@@ -24,7 +24,7 @@ pub use import::{
 };
 pub use operations::{Busy, Held, Operation, Operations};
 pub use profile_service::{
-    DefaultProfileService, NewProfile, ProfileService, default_user_data_dir,
+    DefaultProfileService, NewProfile, ProfileService, SeedSource, default_user_data_dir,
 };
 pub use proxy_service::{DefaultProxyService, NewProxy, ProxyService};
 pub use restore::{
@@ -35,16 +35,17 @@ pub use runtime_service::RuntimeService;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{CoreId, RuntimeState};
+    use domain::{CoreId, FingerprintProfile, RuntimeState};
     use runtime::{
         ChannelRuntimeFacade, RuntimeCommand, RuntimeEvent, RuntimeSupervisor,
         RuntimeSupervisorChannels,
     };
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::{Arc, RwLock};
+    use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
-    use storage::{CoreRepository, MemProfileRepository};
+    use storage::{CoreRepository, MemProfileRepository, ProfileRepository};
 
     #[test]
     fn test_profile_service_create_and_duplicate() {
@@ -85,6 +86,102 @@ mod tests {
         let remaining = service.list().expect("list profiles");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, dup.id);
+    }
+
+    /// The seed a fingerprint is built from comes from the injected source, so a
+    /// test can decide what it is - and the source is the operating system's
+    /// entropy rather than the clock, because a repeated or guessable seed is two
+    /// profiles a site can correlate.
+    #[test]
+    fn a_new_profile_takes_its_seed_from_the_injected_source() {
+        let repo = Arc::new(MemProfileRepository::new());
+        let drawn = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&drawn);
+        let service = DefaultProfileService::with_seed_source(
+            Arc::clone(&repo) as Arc<dyn ProfileRepository>,
+            PathBuf::from("data"),
+            Box::new(move || {
+                let mut drawn = seen.lock().expect("drawn");
+                let seed = 1000 + drawn.len() as u32;
+                drawn.push(seed);
+                seed
+            }),
+        );
+
+        let first = service
+            .create(NewProfile {
+                name: "One".to_string(),
+                core_id: CoreId::new(),
+                user_data_dir: None,
+                fingerprint: None,
+                proxy_id: None,
+                window: None,
+                start_target: None,
+            })
+            .expect("create");
+        let second = service
+            .create(NewProfile {
+                name: "Two".to_string(),
+                core_id: CoreId::new(),
+                user_data_dir: None,
+                fingerprint: None,
+                proxy_id: None,
+                window: None,
+                start_target: None,
+            })
+            .expect("create");
+
+        assert_eq!(first.fingerprint.seed, 1000);
+        assert_eq!(second.fingerprint.seed, 1001);
+        assert_eq!(*drawn.lock().expect("drawn"), vec![1000, 1001]);
+
+        // A fingerprint that was given to `create` is used as it is: the seed is
+        // for the ones that were not.
+        let given = FingerprintProfile::new_random(7);
+        let third = service
+            .create(NewProfile {
+                name: "Three".to_string(),
+                core_id: CoreId::new(),
+                user_data_dir: None,
+                fingerprint: Some(given.clone()),
+                proxy_id: None,
+                window: None,
+                start_target: None,
+            })
+            .expect("create");
+        assert_eq!(third.fingerprint.seed, given.seed);
+        assert_eq!(drawn.lock().expect("drawn").len(), 2);
+    }
+
+    /// The real source is the operating system's, so two profiles made one after
+    /// the other do not share a fingerprint. The clock's low bits used to be the
+    /// source, and this is the property they cannot be tested for - which is why
+    /// the source is injectable above.
+    #[test]
+    fn the_default_seed_source_does_not_repeat_itself() {
+        let repo = Arc::new(MemProfileRepository::new());
+        let service = DefaultProfileService::new(
+            Arc::clone(&repo) as Arc<dyn ProfileRepository>,
+            PathBuf::from("data"),
+        );
+        let seeds: HashSet<u32> = (0..64)
+            .map(|n| {
+                service
+                    .create(NewProfile {
+                        name: format!("Profile {n}"),
+                        core_id: CoreId::new(),
+                        user_data_dir: None,
+                        fingerprint: None,
+                        proxy_id: None,
+                        window: None,
+                        start_target: None,
+                    })
+                    .expect("create")
+                    .fingerprint
+                    .seed
+            })
+            .collect();
+        assert_eq!(seeds.len(), 64, "every profile got its own seed");
     }
 
     #[test]
