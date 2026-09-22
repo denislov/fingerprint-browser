@@ -14,6 +14,20 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Fixed
 
+- A profile whose browser could not be stopped is no longer reported as stopped.
+  When a session adopted from a previous run could not be identified, read or
+  terminated, the stop failure went to the log while the session record, the
+  temporary Xray configuration and the profile's state were all cleared anyway - so
+  a live browser was left running with nothing tracking it, nothing refusing to
+  start it again, and no record for the next run to find. The stop now reports what
+  happened; a failure keeps the record, the configuration and the session, leaves
+  the profile running so it can be stopped again, and says so in the window.
+- Deleting a proxy a profile uses no longer quietly leaves that profile without a
+  proxy. The database's foreign key cleared the reference (`ON DELETE SET NULL`)
+  while the service refused the same deletion, so any path that did not go through
+  the service - or two of them at once - silently changed a profile's network
+  egress. The key is now restrictive, which is the same rule where nothing can go
+  around it.
 - Restoring a configuration backup is now all or nothing. It used to delete every
   stored core, proxy and profile and then write the file's records one at a time,
   with the file only being validated as each record was written - so a file with an

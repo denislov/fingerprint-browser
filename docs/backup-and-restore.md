@@ -250,11 +250,10 @@ Further rules:
   which changes the fingerprint it claims, which is not a decision an import is
   allowed to make quietly.
 - **A profile whose proxy is missing is imported with no proxy**, and reported.
-  With `proxies.id` a foreign key and `ON DELETE SET NULL`, the database cannot
-  hold a dangling proxy reference, so an export cannot produce one either; this
-  rule exists because the file is a document a person may edit, and a file is
-  untrusted input. Reported per item, not fatal to the whole import - the same
-  treatment an unreadable journal record already gets.
+  `profiles.proxy_id` is a foreign key, so the database cannot hold a dangling
+  proxy reference; this rule exists because the file is a document a person may
+  edit, and a file is untrusted input. Reported per item, not fatal to the whole
+  import - the same treatment an unreadable journal record already gets.
 - A well-formed file makes those two cases impossible. They are still handled,
   because "the format forbids it" is not the same as "it cannot arrive".
 

@@ -15,6 +15,7 @@ pub use traits::{ConfigurationRepository, CoreRepository, ProfileRepository, Pro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::migrations::MIGRATIONS;
     use domain::{
         BrowserBrand, BrowserCore, BrowserProfile, CoreId, FingerprintProfile, HttpOutbound,
         Platform, ProfileId, ProxyId, ProxyOutbound, ProxyProfile, ShadowsocksOutbound,
@@ -22,6 +23,7 @@ mod tests {
         VlessOutbound, VmessOutbound, WebRtcPolicy, WindowProfile,
     };
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[test]
     fn test_sqlite_migration_idempotent() {
@@ -327,5 +329,232 @@ mod tests {
             window: WindowProfile::new(1280, 800),
             start_target: StartTarget::Blank,
         }
+    }
+
+    fn proxy(name: &str) -> ProxyProfile {
+        ProxyProfile {
+            id: ProxyId::new(),
+            name: name.to_string(),
+            outbound: ProxyOutbound::Socks5(Socks5Outbound {
+                host: "127.0.0.1".to_string(),
+                port: 1080,
+                username: None,
+                password: None,
+            }),
+        }
+    }
+
+    /// The rule the proxy service already enforces, made one the database cannot
+    /// be talked around: a proxy a profile uses does not delete, and the profile
+    /// keeps its reference rather than having it quietly cleared.
+    #[test]
+    fn a_proxy_a_profile_uses_cannot_be_deleted() {
+        let storage = SqliteStorage::in_memory().expect("init in-memory sqlite");
+        let core_repo = storage.cores();
+        let proxy_repo = storage.proxies();
+        let profile_repo = storage.profiles();
+
+        let core = BrowserCore {
+            id: CoreId::new(),
+            name: "Chromium".to_string(),
+            executable: PathBuf::from("/opt/chromium/chrome"),
+            version: "148.0.0.0".to_string(),
+            major: 148,
+        };
+        core_repo.save(&core).expect("save core");
+        let in_use = proxy("Zurich exit");
+        proxy_repo.save(&in_use).expect("save proxy");
+        let mut work = profile(&core.id, "Work laptop");
+        work.proxy_id = Some(in_use.id);
+        profile_repo.insert(&work).expect("save profile");
+
+        let error = proxy_repo
+            .delete(in_use.id)
+            .expect_err("a proxy a profile uses cannot be deleted");
+        assert!(
+            matches!(error, StorageError::Database(_)),
+            "the database refuses it: {error}"
+        );
+        let stored = profile_repo
+            .get(work.id)
+            .expect("get profile")
+            .expect("the profile is still here");
+        assert_eq!(
+            stored.proxy_id,
+            Some(in_use.id),
+            "a refused delete must not clear the reference on its way out"
+        );
+
+        // A proxy nobody uses is still deletable, and so is a profile that used
+        // one: the constraint is about the reference, not about proxies.
+        let spare = proxy("Spare");
+        proxy_repo.save(&spare).expect("save proxy");
+        proxy_repo
+            .delete(spare.id)
+            .expect("an unused proxy can be deleted");
+        profile_repo.delete(work.id).expect("delete profile");
+        proxy_repo
+            .delete(in_use.id)
+            .expect("the proxy is deletable once nothing uses it");
+    }
+
+    /// A database written before that rule keeps every row it had - including the
+    /// profiles whose proxy was already `NULL`, which is a profile without a
+    /// proxy and not a dangling reference.
+    #[test]
+    fn a_database_from_the_previous_schema_upgrades_without_losing_rows() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open sqlite");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("pragmas");
+        conn.execute_batch(MIGRATIONS[0].1)
+            .expect("the first schema");
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (1, '001_initial_schema', 0)",
+            [],
+        )
+        .expect("record the first migration");
+        conn.execute(
+            "INSERT INTO cores VALUES ('core', 'Chromium', '/opt/chrome', '148', 148, 0, 0)",
+            [],
+        )
+        .expect("seed a core");
+        conn.execute(
+            "INSERT INTO proxies VALUES ('proxy', 'Zurich', '{}', 0, 0)",
+            [],
+        )
+        .expect("seed a proxy");
+        conn.execute(
+            "INSERT INTO profiles VALUES ('one', 'Work', 'core', '/data/one', '{}', 'proxy', 800, 600, 'null', 0, 0)",
+            [],
+        )
+        .expect("seed a profile with a proxy");
+        conn.execute(
+            "INSERT INTO profiles VALUES ('two', 'Plain', 'core', '/data/two', '{}', NULL, 800, 600, 'null', 0, 0)",
+            [],
+        )
+        .expect("seed a profile without one");
+
+        run_migrations(&mut conn).expect("the upgrade runs");
+
+        let with_proxy: Option<String> = conn
+            .query_row(
+                "SELECT proxy_id FROM profiles WHERE id = 'one'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the profile survived the rebuild");
+        assert_eq!(with_proxy.as_deref(), Some("proxy"));
+        let without: Option<String> = conn
+            .query_row(
+                "SELECT proxy_id FROM profiles WHERE id = 'two'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("so did the one without a proxy");
+        assert_eq!(without, None);
+        assert!(
+            conn.execute("DELETE FROM proxies WHERE id = 'proxy'", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("DELETE FROM proxies WHERE id = 'nonexistent'", [])
+                .is_ok()
+        );
+    }
+
+    /// A database from a newer build is refused rather than opened: this build
+    /// does not know what the migrations it never heard of mean.
+    #[test]
+    fn a_database_from_a_newer_build_is_refused() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open sqlite");
+        conn.execute_batch(MIGRATIONS[0].1)
+            .expect("the first schema");
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (99, 'future', 0)",
+            [],
+        )
+        .expect("a newer schema");
+
+        let error = run_migrations(&mut conn).expect_err("a newer schema is not this build's");
+        assert!(
+            matches!(
+                error,
+                StorageError::SchemaTooNew {
+                    found: 99,
+                    supported: 2
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    /// The one operation both backends have, answered the same way by both.
+    ///
+    /// The application tests its strict restore against the memory backend and
+    /// the program runs it against the database, so "the same" is the property
+    /// that makes those tests evidence for anything.
+    fn replaces_the_whole_configuration(
+        configuration: &dyn ConfigurationRepository,
+        cores: &dyn CoreRepository,
+        proxies: &dyn ProxyRepository,
+        profiles: &dyn ProfileRepository,
+    ) {
+        // What is there before, none of which may survive.
+        let old_core = BrowserCore {
+            id: CoreId::new(),
+            name: "Old core".to_string(),
+            executable: PathBuf::from("/opt/old/chrome"),
+            version: "120.0.0.0".to_string(),
+            major: 120,
+        };
+        cores.save(&old_core).expect("seed a core");
+        let old_proxy = proxy("Old proxy");
+        proxies.save(&old_proxy).expect("seed a proxy");
+        let mut old_profile = profile(&old_core.id, "Old profile");
+        old_profile.proxy_id = Some(old_proxy.id);
+        profiles.insert(&old_profile).expect("seed a profile");
+
+        let core = BrowserCore {
+            id: CoreId::new(),
+            name: "New core".to_string(),
+            executable: PathBuf::from("/opt/new/chrome"),
+            version: "148.0.0.0".to_string(),
+            major: 148,
+        };
+        let proxy = proxy("New proxy");
+        let mut work = profile(&core.id, "Work laptop");
+        work.proxy_id = Some(proxy.id);
+
+        configuration
+            .replace(
+                std::slice::from_ref(&core),
+                std::slice::from_ref(&proxy),
+                std::slice::from_ref(&work),
+            )
+            .expect("replacement");
+
+        assert_eq!(cores.list().expect("cores"), vec![core]);
+        assert_eq!(proxies.list().expect("proxies"), vec![proxy]);
+        assert_eq!(profiles.list().expect("profiles"), vec![work]);
+    }
+
+    #[test]
+    fn the_database_replaces_the_whole_configuration() {
+        let storage = SqliteStorage::in_memory().expect("init in-memory sqlite");
+        let (cores, proxies, profiles) = (storage.cores(), storage.proxies(), storage.profiles());
+        replaces_the_whole_configuration(&storage, &cores, &proxies, &profiles);
+    }
+
+    #[test]
+    fn the_memory_backend_replaces_the_whole_configuration() {
+        let cores = Arc::new(MemCoreRepository::new());
+        let proxies = Arc::new(MemProxyRepository::new());
+        let profiles = Arc::new(MemProfileRepository::new());
+        let configuration = MemConfiguration::new(
+            Arc::clone(&cores),
+            Arc::clone(&proxies),
+            Arc::clone(&profiles),
+        );
+        replaces_the_whole_configuration(&configuration, &*cores, &*proxies, &*profiles);
     }
 }

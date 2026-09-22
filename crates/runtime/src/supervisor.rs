@@ -98,8 +98,19 @@ impl Held {
         }
     }
 
-    /// Stops it, and everything it started.
-    fn kill(&mut self, inspector: &dyn ProcessInspector, tree: &dyn ProcessTreeController) {
+    /// Stops it, and everything it started, or says why it could not.
+    ///
+    /// The answer matters for an adopted session and only for one: it is stopped
+    /// by pid against a record that may no longer describe what is running there,
+    /// so "the process is not this one" and "it did not exit" have to reach the
+    /// caller rather than a log line - the caller is what decides whether the
+    /// record may be thrown away. An owned child is a handle this process holds,
+    /// so its `wait` is the confirmation and the result is always `Ok`.
+    fn kill(
+        &mut self,
+        inspector: &dyn ProcessInspector,
+        tree: &dyn ProcessTreeController,
+    ) -> Result<(), String> {
         match self {
             Self::Owned(child) => {
                 #[cfg(windows)]
@@ -114,13 +125,12 @@ impl Held {
                     let _ = child.kill();
                 }
                 let _ = child.wait();
+                Ok(())
             }
             // No handle, so the recorded identity is rechecked at the moment of
             // termination and the tree is stopped by pid.
             Self::Adopted(record) => {
-                if let Err(error) = journal::stop(record, inspector, tree, journal::DEFAULT_GRACE) {
-                    tracing::warn!("failed to stop adopted pid {}: {error}", record.pid);
-                }
+                journal::stop(record, inspector, tree, journal::DEFAULT_GRACE).map(|_| ())
             }
         }
     }
@@ -157,6 +167,13 @@ struct ActiveSession {
     _socks_port: Option<u16>,
     _effective_args: Vec<String>,
     stopping: bool,
+    /// Why the last attempt to stop this session failed, if one did.
+    ///
+    /// A session that could not be stopped stays here, and this is what keeps the
+    /// poll from reporting the same failure on every tick: the process is still
+    /// there and there is nothing new to learn about it. An explicit stop is what
+    /// tries again.
+    stop_failed: Option<String>,
 }
 
 #[derive(Clone)]
@@ -381,6 +398,7 @@ impl RuntimeSupervisor {
                 // Chromium was told. Nothing reads this for an adopted session.
                 _effective_args: Vec::new(),
                 stopping: false,
+                stop_failed: None,
             },
         );
         self.update_full_snapshot(RuntimeSnapshot {
@@ -797,6 +815,7 @@ impl RuntimeSupervisor {
                     _socks_port: socks_port,
                     _effective_args: effective_args.clone(),
                     stopping: false,
+                    stop_failed: None,
                 };
 
                 self.active_sessions.insert(profile_id, session);
@@ -956,32 +975,75 @@ impl RuntimeSupervisor {
             // fields of `self`, which the session is being removed from.
             let inspector = self.process_inspector.as_ref();
             let tree = self.process_tree.as_ref();
-            session.browser.kill(inspector, tree);
-            if let Some(child) = session.xray.as_mut() {
-                child.kill(inspector, tree);
+            let mut failures = Vec::new();
+            if let Err(error) = session.browser.kill(inspector, tree) {
+                failures.push(format!("browser {error}"));
             }
-            Self::remove_config(session.xray_config.as_deref());
-            journal::remove(&self.runtime_dir, profile_id);
+            if let Some(child) = session.xray.as_mut()
+                && let Err(error) = child.kill(inspector, tree)
+            {
+                failures.push(format!("xray {error}"));
+            }
 
-            self.set_snapshot_state(profile_id, RuntimeState::Stopped);
-            self.emit(RuntimeEvent::Stopped { profile_id });
-            self.emit(RuntimeEvent::StateChanged {
-                profile_id,
-                state: RuntimeState::Stopped,
-            });
+            if failures.is_empty() {
+                Self::remove_config(session.xray_config.as_deref());
+                journal::remove(&self.runtime_dir, profile_id);
+                self.publish_stopped(profile_id);
+            } else {
+                // Nothing is cleaned up. Whatever is still running is still
+                // described by the record and by the temporary Xray config beside
+                // it, so the next run's recovery is one way to reach it; the
+                // session stays here, so the window's own stop is the other, and
+                // a start cannot put a second browser on a directory this one
+                // still holds.
+                //
+                // The state goes back to `Running` rather than to `Failed`,
+                // because that is what is true: this profile has a live session,
+                // it holds its ports and its data directory, and a window that
+                // offered to start it again would be offering exactly the second
+                // browser the paragraph above is about.
+                let message = failures.join("; ");
+                tracing::warn!("could not stop profile {profile_id}: {message}");
+                session.stopping = false;
+                session.stop_failed = Some(message.clone());
+                self.active_sessions.insert(profile_id, session);
+                self.set_snapshot_state(profile_id, RuntimeState::Running);
+                self.emit(RuntimeEvent::Warning {
+                    profile_id,
+                    message: format!(
+                        "profile {profile_id} could not be stopped and is still running: {message}"
+                    ),
+                });
+                self.emit(RuntimeEvent::StateChanged {
+                    profile_id,
+                    state: RuntimeState::Running,
+                });
+            }
         } else {
-            self.set_snapshot_state(profile_id, RuntimeState::Stopped);
-            self.emit(RuntimeEvent::Stopped { profile_id });
-            self.emit(RuntimeEvent::StateChanged {
-                profile_id,
-                state: RuntimeState::Stopped,
-            });
+            self.publish_stopped(profile_id);
         }
+    }
+
+    /// Says a profile is stopped, the one way it is ever said.
+    fn publish_stopped(&mut self, profile_id: ProfileId) {
+        self.set_snapshot_state(profile_id, RuntimeState::Stopped);
+        self.emit(RuntimeEvent::Stopped { profile_id });
+        self.emit(RuntimeEvent::StateChanged {
+            profile_id,
+            state: RuntimeState::Stopped,
+        });
     }
 
     fn poll_active_sessions(&mut self) {
         let mut exited = Vec::new();
         for (id, session) in &mut self.active_sessions {
+            // A session whose stop already failed is left alone: the failure was
+            // reported, the record still describes it, and a poll that retried it
+            // on every tick would report the same failure over and over. An
+            // explicit stop is what tries again.
+            if session.stop_failed.is_some() {
+                continue;
+            }
             for (component, child) in
                 std::iter::once((RuntimeComponent::Browser, &mut session.browser))
                     .chain(session.xray.as_mut().map(|c| (RuntimeComponent::Xray, c)))
@@ -1144,8 +1206,8 @@ impl RuntimeSupervisor {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::process::ProcessReading;
-    use crate::{CdpError, CdpInfo, LaunchPlanError};
+    use crate::process::{ProcessIdentity, ProcessReading};
+    use crate::{CdpError, CdpInfo, LaunchPlanError, ProcessError};
     use domain::*;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -1841,5 +1903,166 @@ mod tests {
         assert!(!f.config().exists());
         #[cfg(target_os = "linux")]
         assert!(!PathBuf::from(format!("/proc/{xray_pid}")).exists());
+    }
+
+    /// An inspector that reports every pid as a process with someone else's
+    /// command line: "this is not the process the record describes", which is one
+    /// of the answers a stop has to be able to give.
+    struct SomeoneElse;
+    impl ProcessInspector for SomeoneElse {
+        fn inspect(&self, _: u32) -> ProcessReading {
+            ProcessReading::Live(ProcessIdentity {
+                argv: vec!["/usr/bin/something-else".to_string()],
+                start_time: Some(1),
+            })
+        }
+    }
+
+    /// An inspector that reports every pid as gone.
+    struct Nobody;
+    impl ProcessInspector for Nobody {
+        fn inspect(&self, _: u32) -> ProcessReading {
+            ProcessReading::Absent
+        }
+    }
+
+    /// A tree controller that refuses to terminate anything, for the other half
+    /// of "the stop did not happen".
+    struct Refuses;
+    impl ProcessTreeController for Refuses {
+        fn terminate_tree(&self, pid: u32) -> Result<(), ProcessError> {
+            Err(ProcessError::TerminationFailed(format!(
+                "pid {pid} refused"
+            )))
+        }
+
+        fn terminate_instance(&self, pid: u32, _: Option<u64>) -> Result<(), ProcessError> {
+            Err(ProcessError::TerminationFailed(format!(
+                "pid {pid} refused"
+            )))
+        }
+    }
+
+    /// An adopted session as recovery installs one: the record on disk, the
+    /// temporary Xray config beside it, and no handle.
+    fn adopt(f: &mut Fixture, browser_pid: u32, with_xray: bool) -> journal::Adopted {
+        let profile_id = f.params.profile.id;
+        let browser = ProcessRecord {
+            pid: browser_pid,
+            executable: "/bin/sleep".into(),
+            args: vec!["60".into()],
+            start_time: Some(7),
+        };
+        let xray = with_xray.then(|| ProcessRecord {
+            pid: browser_pid + 1,
+            executable: "/bin/sleep".into(),
+            args: vec!["60".into()],
+            start_time: Some(8),
+        });
+        let record = SessionRecord {
+            profile_id,
+            cdp_port: 9222,
+            socks_port: Some(1080),
+            started_at: 1_700_000_000_000,
+            left_running: true,
+            browser: browser.clone(),
+            xray: xray.clone(),
+        };
+        journal::write(&f.dir, &record).expect("write the record");
+        let config = f
+            .dir
+            .join(profile_id.to_string())
+            .join(crate::xray::XRAY_CONFIG_FILE);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "{}").unwrap();
+
+        let adopted = journal::Adopted {
+            profile_id,
+            cdp_port: record.cdp_port,
+            socks_port: record.socks_port,
+            started_at: record.started_at,
+            browser,
+            xray,
+        };
+        f.supervisor.install_adopted(&adopted);
+        adopted
+    }
+
+    /// A session this run adopted has no handle, so it is stopped by pid against
+    /// a record that may no longer describe what is running there. That answer has
+    /// to reach the caller: the record is the only thing that can still reach
+    /// whatever is running, and publishing Stopped over it would leave a live
+    /// browser that nothing tracks, that no start refuses, and that the next run
+    /// has no reason to look for.
+    #[test]
+    fn a_stop_that_cannot_reach_an_adopted_process_keeps_the_session_and_its_record() {
+        let mut f = Fixture::new(false, false, XRAY);
+        let adopted = adopt(&mut f, 4242, true);
+        let profile_id = adopted.profile_id;
+        f.supervisor.process_inspector = Box::new(SomeoneElse);
+
+        f.supervisor.stop_profile(profile_id);
+
+        // Not Stopped, and nothing was thrown away.
+        assert_eq!(f.snapshot().state, RuntimeState::Running);
+        assert!(f.supervisor.active_sessions.contains_key(&profile_id));
+        assert!(
+            journal::read(&f.dir, profile_id).unwrap().is_some(),
+            "the record still describes the running process"
+        );
+        assert!(f.config().exists(), "the Xray config was not removed");
+        let warning = std::iter::from_fn(|| f.events.try_recv().ok())
+            .find_map(|event| match event {
+                RuntimeEvent::Warning { message, .. } => Some(message),
+                _ => None,
+            })
+            .expect("the window is told the stop did not happen");
+        assert!(warning.contains("could not be stopped"), "{warning}");
+        assert!(
+            !std::iter::from_fn(|| f.events.try_recv().ok())
+                .any(|event| matches!(event, RuntimeEvent::Stopped { .. })),
+            "a stop that did not happen must not report one"
+        );
+
+        // The process is gone now, so the retry the session stayed for works:
+        // everything a normal stop cleans up is cleaned up.
+        f.supervisor.process_inspector = Box::new(Nobody);
+        f.supervisor.stop_profile(profile_id);
+        assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+        assert!(!f.supervisor.active_sessions.contains_key(&profile_id));
+        assert!(journal::read(&f.dir, profile_id).unwrap().is_none());
+        assert!(!f.config().exists());
+    }
+
+    /// A tree that refuses to terminate a process it did recognise is the same
+    /// answer by the other route, and the same handling.
+    #[test]
+    fn a_stop_a_process_tree_refuses_keeps_the_session_and_its_record() {
+        let mut f = Fixture::new(false, false, XRAY);
+        let adopted = adopt(&mut f, 4343, false);
+        let profile_id = adopted.profile_id;
+        f.supervisor.process_tree = Box::new(Refuses);
+        // The inspector says the pid is still ours, so the stop gets as far as
+        // asking the tree to end it - and the grace period is what it spends
+        // waiting first.
+        f.supervisor.process_inspector = Box::new(Ours);
+
+        f.supervisor.stop_profile(profile_id);
+
+        assert_eq!(f.snapshot().state, RuntimeState::Running);
+        assert!(f.supervisor.active_sessions.contains_key(&profile_id));
+        assert!(journal::read(&f.dir, profile_id).unwrap().is_some());
+    }
+
+    /// An inspector that reports the recorded process, so a stop escalates to the
+    /// tree.
+    struct Ours;
+    impl ProcessInspector for Ours {
+        fn inspect(&self, _: u32) -> ProcessReading {
+            ProcessReading::Live(ProcessIdentity {
+                argv: vec!["/bin/sleep".to_string(), "60".to_string()],
+                start_time: Some(7),
+            })
+        }
     }
 }

@@ -63,10 +63,22 @@ about a child goes through it:
 - **Stop it.** The job object or the process group for an owned child; for an
   adopted one, the recorded identity is rechecked at the moment of termination and
   the tree is stopped by pid - which on Windows is `taskkill /F /T`, already the
-  path an orphaned browser took.
+  path an orphaned browser took. The answer is a **result**, and for an adopted
+  session it is an answer that can be "no": the process is not the one the record
+  describes, it could not be read, or it did not exit. That answer decides what
+  happens next, because a stop that did not happen must not be reported as one.
 - **Leave it.** Nothing on Unix: a child is not signalled when its handle is
   dropped. On Windows the job's `KILL_ON_JOB_CLOSE` limit is cleared first, because
   that limit is exactly what makes a manager that died take its browsers with it.
+
+A stop that fails keeps everything it would otherwise have thrown away: the
+session record and the temporary Xray config stay on disk, the session stays in
+`active_sessions`, and the profile stays *running* rather than being published as
+stopped. Publishing `Stopped` over a process that is still there would leave a live
+browser this window will not stop, will offer to start again, and that the next run
+has no record to find. The window is told instead, and the profile is one press
+away from trying again - with the record on disk as the other way to reach it,
+namely the next run's recovery.
 
 One thing is lost and is not pretended otherwise: an adopted process has no exit
 status to read, so a browser that disappears between starts is reported as a

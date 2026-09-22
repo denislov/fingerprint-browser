@@ -28,6 +28,17 @@ pub enum StorageError {
     #[error("storage IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// The database was written by a version of the program that knows more
+    /// migrations than this one does.
+    ///
+    /// Refused rather than opened: this build would not know what the extra
+    /// migrations mean, and writing to a schema it does not understand is how a
+    /// newer database becomes an older one with its newer records still in it.
+    #[error(
+        "this database uses schema version {found}, and this build knows {supported}: it was written by a newer version of the program"
+    )]
+    SchemaTooNew { found: i64, supported: i64 },
+
     #[error("storage error: {0}")]
     Other(String),
 }
