@@ -99,23 +99,23 @@ every time someone closes a browser window while the manager is not looking.
 
 ## The tray, and what this UI stack will not do
 
-Two facts about the framework decide the shape of "keep running", and both were
-read out of the vendored sources rather than assumed:
+One fact about the framework decides the shape of "keep running", and it was read
+out of the vendored sources rather than assumed: **GPUI has neither a tray nor a
+hide.** `App::hide()` is a no-op on every backend, and `PlatformWindow` has
+`minimize`, `activate` and the `map_window` window creation uses - and no `unmap`
+at all.
 
-- `App::hide()` is a no-op on **both** backends - `fn hide(&self) {}` on Windows,
-  and "hide is not implemented on Linux, ignoring the call" on Linux. The Windows
-  backend only ever calls `SW_MINIMIZE`, `SW_MAXIMIZE` and `SW_RESTORE`, and the
-  application is not given the native window handle, so there is no way to unmap
-  the window from here.
-- GPUI has no tray support at all.
+What it does have is the way around both. `Window` implements `raw-window-handle`,
+so `crates/app/src/window_visibility.rs` can take the native window and put it
+away itself: `ShowWindowAsync(SW_HIDE)` on Windows, and `UnmapWindow` on the
+window's own XCB connection on X11. An unmapped X11 window is *withdrawn* - the
+window manager stops managing it, so it leaves the taskbar, the window list and
+Alt+Tab - which is what closing the window was supposed to mean.
+`minimize_window()` is what is left on Wayland, where an `xdg_toplevel` has no
+withdrawn state and a surface cannot be unmapped without destroying it.
 
-So "in the background" means the window is **minimized**, not hidden, and the tray
-icon is what says the program is still there. `Window::minimize_window()` and
-`Window::activate_window()` are both implemented on X11 and Windows, so the tray's
-"show window" has something to call on both.
-
-The tray itself is two implementations, because the platforms have nothing in
-common here:
+The tray icon is what says the program is still there. It is two implementations,
+because the platforms have nothing in common here:
 
 | Platform | Crate | Why |
 | --- | --- | --- |
@@ -138,23 +138,31 @@ events already do.
 
 The tray is created on the first "keep running" and never removed, because the
 user who put the window away once may do it again. Its two items are **Show
-window** - which calls `activate_window`, the same call the taskbar makes - and
-**Quit…**, which is deliberately *the question* rather than the remembered answer:
-a tray whose only way out re-entered "keep running" would be a program nobody
-could leave. The icon itself is drawn by `scripts/make-icon.py`, which also writes
-the PNG, the ICO and the SVG, and `assets/tray.rgba` is that same drawing at
-64×64: `tray-icon` wants RGBA and `ksni` wants ARGB32, so the byte order is swapped
-in four lines rather than committed twice.
+window** - which maps the window again and calls `activate_window`, the same call
+the taskbar makes - and **Quit completely**, which stops everything and is
+deliberately neither a mode nor the remembered answer: a tray whose only way out
+re-entered "keep running" would be a program nobody could leave, and one that left
+the browsers behind would be a menu item that says "quit" and does not. The icon
+itself is drawn by `scripts/make-icon.py`, which also writes the PNG, the ICO and
+the SVG, and `assets/tray.rgba` is that same drawing at 64×64: `tray-icon` wants
+RGBA and `ksni` wants ARGB32, so the byte order is swapped in four lines rather
+than committed twice.
 
 ## What this does not do
 
-- It does not hide the window. See above: the framework cannot.
+- It does not destroy the window. "In the background" is the window hidden, not
+  the window gone: the view, the tick and the tray are the same objects before and
+  after, which is what makes showing it again immediate and what keeps the
+  snapshot cache warm.
+- It does not hide the window on **Wayland**. An `xdg_toplevel` cannot be withdrawn
+  without destroying its surface, so there the window is minimized and the
+  compositor keeps it in its own list; the tray still says the program is there,
+  and the compositor's window list is the way back.
 - It does not keep running with *no* window at all. The tick ends the program if
   the window list ever becomes empty, which is the safety net that has always been
   there: a program managing browsers with nothing on screen and nothing in the tray
-  would be a program with no way to reach it. "In the background" is therefore
-  minimize-plus-tray, and a desktop that refuses the tray icon is warned about in
-  the log rather than refused - the window still minimizes.
+  would be a program with no way to reach it. A desktop that refuses the tray icon
+  is warned about in the log rather than refused - the window still goes away.
 - It does not adopt what a crash left. That is still reclaimed, on purpose, and it
   is the behaviour every existing record gets.
 - It does not make two data directories one installation. An adopted session

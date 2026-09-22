@@ -34,9 +34,11 @@ const SIDE: u32 = 64;
 pub enum TrayEvent {
     /// Bring the window back. A left click on the icon, or the menu's first item.
     Show,
-    /// Leave. The same question the window's close button asks - not a mode, and
-    /// deliberately not the remembered one: a tray whose only way out re-entered
-    /// "keep running" would be a program nobody could quit.
+    /// Leave, and stop everything this program started. Deliberately not a mode
+    /// and deliberately not the remembered answer: a tray whose only way out
+    /// re-entered "keep running" would be a program nobody could quit, and one
+    /// that left the browsers behind would be a menu item that says "quit" and
+    /// does not.
     Quit,
 }
 
@@ -236,7 +238,9 @@ mod windows {
     use super::{PIXELS, SIDE, TrayEvent};
     use crate::text::Text;
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-    use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconAttributes, TrayIconEvent};
+    use tray_icon::{
+        Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconAttributes, TrayIconEvent,
+    };
 
     /// The ids the two items are recognized by. They are not shown to anyone.
     const SHOW: &str = "show-window";

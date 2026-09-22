@@ -207,6 +207,7 @@ dependencies = [
  "tray-icon",
  "windows-sys 0.61.2",
  "winresource",
+ "x11rb",
 ]
 
 [[package]]

@@ -21,6 +21,7 @@ use crate::text::{Lang, Text};
 use crate::theme::{Palette, ThemeChoice, palette};
 use crate::tray::{Tray, TrayEvent};
 use crate::verifier::{FingerprintVerifier, VerificationReport};
+use crate::window_visibility;
 use application::{BrowserDataReport, Direction, RestoreMode};
 use crossbeam_channel::{Receiver, Sender};
 use domain::{CoreId, ProfileId, ProxyId, RuntimeState};
@@ -263,7 +264,7 @@ impl AppView {
         // not on macOS; make it uniform so the supervisor shutdown always runs.
         //
         // "Keep running" is the exception, and it is answered by the close
-        // request above: that path minimizes the window instead of closing it, so
+        // request above: that path hides the window instead of closing it, so
         // this never sees an empty window list.
         self.window_closed = Some(cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -1494,51 +1495,6 @@ impl AppView {
         }
     }
 
-#[cfg(windows)]
-fn hide_window(window: &Window) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_HIDE};
-
-    if let Ok(handle) = HasWindowHandle::window_handle(window)
-        && let RawWindowHandle::Win32(win32) = handle.as_raw()
-    {
-        let hwnd = win32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-        if !hwnd.is_null() {
-            unsafe {
-                ShowWindowAsync(hwnd, SW_HIDE);
-            }
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn hide_window(window: &Window) {
-    window.minimize_window();
-}
-
-#[cfg(windows)]
-fn show_window(window: &Window) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindowAsync, SW_RESTORE};
-
-    if let Ok(handle) = HasWindowHandle::window_handle(window)
-        && let RawWindowHandle::Win32(win32) = handle.as_raw()
-    {
-        let hwnd = win32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-        if !hwnd.is_null() {
-            unsafe {
-                ShowWindowAsync(hwnd, SW_RESTORE);
-            }
-        }
-    }
-    window.activate_window();
-}
-
-#[cfg(not(windows))]
-fn show_window(window: &Window) {
-    window.activate_window();
-}
-
     /// Stays, with no window visible.
     ///
     /// The window is closed/hidden from view and the taskbar, and the program
@@ -1558,7 +1514,7 @@ fn show_window(window: &Window) {
                 Err(error) => tracing::warn!("no tray icon: {error}"),
             }
         }
-        Self::hide_window(window);
+        window_visibility::hide(window);
     }
 
     /// What the tray asked for, if anything.
@@ -1573,7 +1529,7 @@ fn show_window(window: &Window) {
     fn handle_tray(&mut self, event: TrayEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             TrayEvent::Show => {
-                Self::show_window(window);
+                window_visibility::show(window);
                 cx.notify();
             }
             TrayEvent::Quit => {
@@ -4398,9 +4354,15 @@ mod tests {
         });
         let allowed =
             cx.update(|window, cx| view.update(cx, |view, cx| view.on_close_requested(window, cx)));
-        assert!(!allowed, "background mode refuses the close so app keeps running");
+        assert!(
+            !allowed,
+            "background mode refuses the close so app keeps running"
+        );
         view.update(cx, |view, _| {
-            assert!(view.tray.is_some(), "entering background starts the tray icon");
+            assert!(
+                view.tray.is_some(),
+                "entering background starts the tray icon"
+            );
         });
 
         // TrayEvent::Show wakes/restores the window.

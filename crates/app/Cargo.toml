@@ -31,10 +31,20 @@ libc = "0.2"
 # reactor underneath it. Deliberately built without its default features, which
 # pull in an async runtime this program does not have; what is left is pure Rust
 # through zbus, so no GTK and no libdbus enter the build or the packages.
+#
+# `x11rb` is the other half of this program's X11 story: adopting the XCB
+# connection GPUI already owns, so the window can be unmapped and mapped - GPUI
+# exposes no hide of its own. The same crate and version GPUI links, so this is a
+# feature unification rather than a second copy of anything, and
+# `allow-unsafe-code` is what makes `xcb_ffi` - and the `-lxcb` that CI and the
+# packages already install - available.
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3", default-features = false, features = [
     "blocking",
     "async-io",
+] }
+x11rb = { version = "0.13", default-features = false, features = [
+    "allow-unsafe-code",
 ] }
 
 # The Windows half of the data-directory lock is `LockFileEx`, which is declared
@@ -53,6 +63,13 @@ windows-sys = { version = "0.61", features = [
 # the same crate's Linux half links GTK and libappindicator, neither of which this
 # program uses - the Linux tray is `ksni`, above.
 tray-icon = "0.25"
+
+# The window's own handles, which is how "keep running" takes the window off the
+# screen: the Win32 `HWND` that `ShowWindowAsync` wants, and the X11 window id
+# that `UnmapWindow` goes through. GPUI implements `raw-window-handle` for
+# `Window` on both platforms even though it exposes no hide of its own - see
+# `window_visibility.rs`.
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 raw-window-handle = "0.6"
 
 # Only for a Windows host, because it is only used by `build.rs` there: it puts

@@ -31,6 +31,7 @@ mod tray;
 mod ui;
 mod verifier;
 mod version;
+mod window_visibility;
 
 use application::{
     CoreService, DefaultCoreService, DefaultProfileService, DefaultProxyService, ProfileService,

@@ -12,6 +12,23 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
 
+### Changed
+
+- Closing the window to the background now really takes it off the screen, on
+  Linux as well as on Windows. "In the background" used to mean *minimized*, which
+  left the window's button on the Cinnamon panel and its entry in Alt+Tab - the
+  opposite of what closing a window looks like - while Windows had already moved
+  to hiding it. `crates/app/src/window_visibility.rs` hides it through the raw
+  window handle GPUI hands out: `ShowWindowAsync(SW_HIDE)` on Windows, and
+  `UnmapWindow` on the window's own XCB connection on X11, which withdraws it from
+  the window manager, the taskbar, the window list and Alt+Tab. The tray's **Show
+  window** maps it again and focuses it. Wayland keeps the compositor's minimize,
+  because an `xdg_toplevel` has no withdrawn state and a surface cannot be unmapped
+  without destroying it. See [exit modes](docs/exit-modes.md).
+- The tray's **Quit completely** stops everything the program started in one step,
+  instead of opening the exit question. The item says what it does, and the
+  question is still what closing the window asks.
+
 ## [0.1.0] - 2026-09-22
 
 ### Added

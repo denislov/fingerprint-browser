@@ -70,7 +70,7 @@ this repository does not bundle or fork them.
   that never contains proxy credentials or browser data. The same report is one
   button on the Settings page; see [diagnostics](docs/diagnostics.md).
 - Choose what closing the window does: **keep running** in the background (the
-  window is minimized and a tray icon brings it back or leaves),
+  window is hidden and a tray icon brings it back or leaves),
   **leave browsers running** while the program exits, or **stop everything** -
   asked once with a "remember this choice" box, and changeable on the Settings
   page. A start adopts the sessions a previous run deliberately left running, so

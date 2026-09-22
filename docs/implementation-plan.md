@@ -214,16 +214,19 @@ icon included, and described in [exit modes](exit-modes.md).
   `Window::on_window_should_close` - the hook is installed on the first frame,
   because the view is built before there is a window. A signal still means stop
   everything: there is nobody to ask.
-- **The background mode needs the tray.** GPUI has no tray API and cannot hide a
-  window (`App::hide` is a no-op on both backends), so "in the background" is
-  minimize plus a tray icon that says so and brings the window back. Two
-  implementations: `ksni` on Linux (StatusNotifierItem over D-Bus, pure Rust, so
-  no GTK and no libdbus enter the packages) and `tray-icon` on Windows (created on
-  the window's own thread, its messages dispatched by the loop the window already
-  runs). Both post into a queue the window's tick drains, so nothing calls into
-  the UI from another thread. Its **Quit…** item always asks rather than obeying
-  the remembered answer: a tray that could only re-enter "keep running" would be a
-  program nobody could leave.
+- **The background mode needs the tray.** GPUI has no tray API and no hide of its
+  own (`App::hide` is a no-op on both backends), so the window is hidden by
+  `crates/app/src/window_visibility.rs` through the raw window handle GPUI does
+  hand out: `ShowWindowAsync(SW_HIDE)` on Windows and `UnmapWindow` on the window's
+  XCB connection on X11, with the compositor's minimize as the Wayland fallback.
+  A tray icon that says so and brings the window back has two implementations:
+  `ksni` on Linux (StatusNotifierItem over D-Bus, pure Rust, so no GTK and no
+  libdbus enter the packages) and `tray-icon` on Windows (created on the window's
+  own thread, its messages dispatched by the loop the window already runs). Both
+  post into a queue the window's tick drains, so nothing calls into the UI from
+  another thread. Its **Quit completely** item stops everything rather than
+  obeying the remembered answer: a tray that could only re-enter "keep running"
+  would be a program nobody could leave.
 
 ## Language
 
