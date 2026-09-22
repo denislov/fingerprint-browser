@@ -5,6 +5,18 @@ pub enum ValidationError {
     #[error("profile name cannot be empty")]
     EmptyProfileName,
 
+    #[error("the start page cannot be empty")]
+    EmptyStartUrl,
+
+    #[error("start page {url:?} is not an address this program will open")]
+    UnusableStartUrl { url: String },
+
+    #[error("start page {url:?} is a browser switch, not a page")]
+    StartUrlIsSwitch { url: String },
+
+    #[error("start page scheme {scheme:?} is not supported; use http, https, file or about:blank")]
+    UnsupportedStartScheme { scheme: String },
+
     #[error("proxy name cannot be empty")]
     EmptyProxyName,
 

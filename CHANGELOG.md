@@ -14,6 +14,12 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Fixed
 
+- A profile's start page must be a page. It is appended to the browser's command
+  line as an argument of its own, so a value from an imported configuration that
+  spelled a switch - `--no-proxy-server`, say - was Chromium's switch to obey, and
+  the proxy the profile's fingerprint depends on was off. The domain validation,
+  the service that stores a profile, the configuration import and the launch
+  planner all refuse it now, and the error names what is wrong with it.
 - A browser-data copy can no longer destroy the data it is reading. Every path in
   a run is resolved and compared before the first write, so a backup directory
   inside the profile it copies, a restore whose destination contains its source, a

@@ -882,6 +882,40 @@ mod tests {
         assert_eq!(stored.profiles[0].proxy_id, None);
     }
 
+    /// A start page that is a browser switch. The profile's start target is the
+    /// last argument on the browser's command line, so a value that spells a switch
+    /// is that switch - `--no-proxy-server` would turn off the proxy the profile's
+    /// fingerprint is built on. A configuration file is the one way a value like
+    /// this arrives from outside the program, and the record is refused rather than
+    /// stored.
+    #[test]
+    fn a_start_page_that_is_a_switch_is_refused_at_import() {
+        let fixture = Fixture::new("switch-target");
+        let core = core("Fingerprint Chromium 148");
+        let mut profile = profile("Work laptop", core.id, None, "/nowhere/one");
+        profile.start_target = StartTarget::Url("--no-proxy-server".to_string());
+        let document = document(ConfigSnapshot {
+            cores: vec![core.clone()],
+            proxies: Vec::new(),
+            profiles: vec![profile],
+        });
+
+        let report = fixture.import(&document);
+
+        assert_eq!(report.added.cores, 1);
+        assert_eq!(report.added.profiles, 0, "the profile was refused");
+        assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
+        assert!(
+            report.failed[0].contains("Work laptop"),
+            "the refusal names the profile: {:?}",
+            report.failed
+        );
+        assert!(
+            fixture.present().profiles.is_empty(),
+            "nothing with a switch for a start page was stored"
+        );
+    }
+
     #[test]
     fn a_core_the_database_refuses_takes_its_profiles_with_it() {
         // The other half, and the reason the identifier sets are read back after

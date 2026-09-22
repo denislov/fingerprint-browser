@@ -29,6 +29,12 @@ pub enum LaunchPlanError {
     #[error("invalid launch arguments: {0}")]
     InvalidArguments(String),
 
+    /// The profile's start page is not one. Refused where it would become an
+    /// argument as well as where the profile is stored, because a value written
+    /// before that rule existed is still a switch on this command line.
+    #[error(transparent)]
+    StartTarget(#[from] domain::ValidationError),
+
     #[error("launch plan error: {0}")]
     Other(String),
 }

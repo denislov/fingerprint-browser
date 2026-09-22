@@ -234,6 +234,57 @@ mod tests {
         );
     }
 
+    /// The value a profile's start target becomes on the command line. A target
+    /// that spells a switch *is* that switch - Chromium does not care which
+    /// argument it is - so the planner refuses it rather than appending it.
+    #[test]
+    fn a_start_page_that_is_a_switch_never_becomes_an_argument() {
+        let mut profile = test_profile();
+        let core = test_core();
+        let capabilities = CoreCapabilities::for_major(128);
+        let planner = DefaultLaunchPlanner::new();
+        profile.start_target = StartTarget::Url("--no-proxy-server".to_string());
+
+        let ctx = LaunchContext {
+            profile: &profile,
+            core: &core,
+            proxy: None,
+            capabilities: &capabilities,
+            cdp_port: 9222,
+            socks_port: None,
+            xray_executable: None,
+            xray_config_dir: None,
+        };
+
+        let error = planner
+            .build(ctx)
+            .expect_err("a switch is not a start page");
+        assert!(
+            matches!(error, LaunchPlanError::StartTarget(_)),
+            "{error:?}"
+        );
+
+        // And a page is still the last argument, so the check did not change what
+        // a usable target produces.
+        let mut profile = test_profile();
+        profile.start_target = StartTarget::Url("https://example.com".to_string());
+        let ctx = LaunchContext {
+            profile: &profile,
+            core: &core,
+            proxy: None,
+            capabilities: &capabilities,
+            cdp_port: 9222,
+            socks_port: None,
+            xray_executable: None,
+            xray_config_dir: None,
+        };
+        let plan = planner.build(ctx).expect("a page is a plan");
+        assert_eq!(
+            plan.browser_args.last().expect("arguments"),
+            "https://example.com"
+        );
+    }
+
     #[test]
     fn test_planner_deterministic_output() {
         let profile = test_profile();

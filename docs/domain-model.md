@@ -147,6 +147,11 @@ pub enum StartTarget {
 
 v1 只支持单个启动目标。
 
+`Url` 会被作为独立参数追加到浏览器命令行，因此它不是任意字符串：必须是
+http、https、file，或者 `about:blank`。以 `-` 开头的值（`--no-proxy-server`
+这类浏览器开关）在写入、导入和生成启动计划三处都会被拒绝——浏览器不关心这个
+参数排在命令行第几位。
+
 ---
 
 ## 6. BrowserCore

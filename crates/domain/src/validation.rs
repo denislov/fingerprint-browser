@@ -9,6 +9,10 @@ pub fn validate_profile(profile: &BrowserProfile) -> Result<(), ValidationError>
     if profile.name.trim().is_empty() {
         return Err(ValidationError::EmptyProfileName);
     }
+    // The start target is the one field of a profile that becomes part of a
+    // command line, so it is checked wherever a profile is checked. See
+    // `StartTarget::validate`.
+    profile.start_target.validate()?;
     validate_window(&profile.window)?;
     validate_fingerprint(&profile.fingerprint)?;
     Ok(())

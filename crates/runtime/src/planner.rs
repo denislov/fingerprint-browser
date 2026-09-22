@@ -80,6 +80,12 @@ impl LaunchPlanner for DefaultLaunchPlanner {
         );
 
         // 7. start target
+        //
+        // Checked here as well as where the profile was stored, because this is
+        // the last place before the value becomes an argument: a profile written
+        // before that rule existed is still a browser switch waiting for a start,
+        // and a launch plan is not the place to find that out from Chromium.
+        ctx.profile.start_target.validate()?;
         match &ctx.profile.start_target {
             StartTarget::Blank => args.push("about:blank".into()),
             StartTarget::Url(url) => args.push(url.as_str().into()),
