@@ -118,7 +118,19 @@ pub fn restore_browser_data(
 pub fn recover_user_data_dirs(profiles: &[BrowserProfile]) -> Vec<String> {
     let mut put_back = Vec::new();
     for profile in profiles {
-        match recover(&profile.name, &resolve(&profile.user_data_dir)) {
+        let to = resolve(&profile.user_data_dir);
+        // Recovery may run before a copy plan exists. Protect every other
+        // profile's directory, including profiles with no source to copy.
+        if profiles.iter().any(|other| {
+            other.id != profile.id
+                && footprint(&to)
+                    .iter()
+                    .any(|path| overlaps(path, &resolve(&other.user_data_dir)))
+        }) {
+            tracing::warn!("refused overlapping recovery for {}", profile.name);
+            continue;
+        }
+        match recover(&profile.name, &to) {
             Ok(true) => put_back.push(profile.name.clone()),
             Ok(false) => {}
             Err(error) => tracing::warn!("{error}"),
@@ -162,6 +174,7 @@ fn transfer(
         // What a previous run left in the middle of a swap, before anything else
         // looks at the destination.
         recover(&copy.profile, &copy.to)?;
+        claim(&copy.profile, &copy.to)?;
 
         // Built beside the destination rather than in it, so the destination is
         // untouched until there is a complete copy to put there: a failure
@@ -173,7 +186,7 @@ fn transfer(
         let bytes = copy_tree(&copy.from, &staged(&copy.to)).map_err(|source| {
             // The unfinished copy is not the destination's replacement and never
             // becomes one; leaving it would only be confusing.
-            discard(&staged(&copy.to));
+            let _ = recover(&copy.profile, &copy.to);
             BrowserDataError::Copy {
                 profile: copy.profile.clone(),
                 from: copy.from.clone(),
@@ -183,6 +196,7 @@ fn transfer(
         })?;
 
         commit(copy)?;
+        recover(&copy.profile, &copy.to)?;
 
         report.bytes += bytes;
         report.copied.push(copy.profile.clone());
@@ -193,18 +207,14 @@ fn transfer(
 
 /// One copy that will be made: where the data is now, and where it goes.
 struct Copy {
+    id: ProfileId,
     profile: String,
     from: PathBuf,
     to: PathBuf,
 }
 
-/// The suffix of the directory a copy is built in, and of the one it displaces.
-///
-/// Boring, fixed names rather than unique ones, because they are the record a
-/// later run reads: a destination that is missing while `<name>.old` is beside it
-/// is a run that died between the two renames of a swap, and the old directory is
-/// then put back where it belongs. A name with a process id or a timestamp in it
-/// would be a leftover nobody can interpret.
+/// Reserved sibling names are used only while an ownership record exists.
+/// Unmarked leftovers from older versions are preserved for manual recovery.
 const STAGING: &str = "partial";
 const DISPLACED: &str = "old";
 
@@ -257,6 +267,7 @@ fn plan(
 
         let to = resolve(&to);
         copies.push(Copy {
+            id: profile.id,
             profile: profile.name.clone(),
             from: resolve(&from),
             to,
@@ -270,30 +281,40 @@ fn plan(
                 path: copy.from.clone(),
             });
         }
-        if contains(&copy.from, &copy.to) || contains(&copy.to, &copy.from) {
-            return Err(BrowserDataError::Overlap {
-                profile: copy.profile.clone(),
-                from: copy.from.clone(),
-                to: copy.to.clone(),
-            });
+        for path in footprint(&copy.to) {
+            if overlaps(&copy.from, &path) {
+                return Err(BrowserDataError::Overlap {
+                    profile: copy.profile.clone(),
+                    from: copy.from.clone(),
+                    to: path,
+                });
+            }
+            for other in ordered {
+                let source = resolve(&other.user_data_dir);
+                if other.id != copy.id && overlaps(&path, &source) {
+                    return Err(BrowserDataError::ProfilesOverlap {
+                        first_profile: copy.profile.clone(),
+                        second_profile: other.name.clone(),
+                        first: path.clone(),
+                        second: source,
+                    });
+                }
+            }
         }
     }
-
     for (index, first) in copies.iter().enumerate() {
-        for second in &copies[index + 1..] {
-            for (a, b) in [
-                (&first.from, &second.from),
-                (&first.from, &second.to),
-                (&first.to, &second.from),
-                (&first.to, &second.to),
-            ] {
-                if a == b || contains(a, b) || contains(b, a) {
-                    return Err(BrowserDataError::ProfilesOverlap {
-                        first_profile: first.profile.clone(),
-                        second_profile: second.profile.clone(),
-                        first: a.clone(),
-                        second: b.clone(),
-                    });
+        let first_paths = std::iter::once(first.from.clone()).chain(footprint(&first.to));
+        for a in first_paths {
+            for second in &copies[index + 1..] {
+                for b in std::iter::once(second.from.clone()).chain(footprint(&second.to)) {
+                    if overlaps(&a, &b) {
+                        return Err(BrowserDataError::ProfilesOverlap {
+                            first_profile: first.profile.clone(),
+                            second_profile: second.profile.clone(),
+                            first: a.clone(),
+                            second: b,
+                        });
+                    }
                 }
             }
         }
@@ -419,25 +440,33 @@ fn commit(copy: &Copy) -> Result<(), BrowserDataError> {
         });
     }
 
-    // The replacement is in place, so what it replaced is finished with. A
-    // failure here is untidy rather than wrong, and the next run clears it.
-    discard(&old);
+    // Ownership remains recorded until recovery has removed all leftovers.
     Ok(())
 }
 
-/// Undoes what a run that died in the middle of a swap left beside `to`.
-///
-/// The two sibling names are the durable record of the one moment a destination
-/// is missing: `old` exists only between "the old directory was renamed aside"
-/// and "the finished copy took its name". A destination that is missing while
-/// `old` is beside it is therefore a run that died in that window, and `old` is
-/// the only copy of that data - it is renamed back. A `partial` is a copy that
-/// never finished, and is only in the way.
-///
-/// Returns whether a directory was put back, which is the one outcome worth
-/// telling the user about.
+/// Recovers only a swap with a valid ownership record. A suffix alone is
+/// never evidence that a directory belongs to us.
 fn recover(profile: &str, to: &Path) -> Result<bool, BrowserDataError> {
     let (old, staging) = (displaced(to), staged(to));
+    let marker = ownership(to);
+    if !exists(&marker) {
+        if exists(&old) || exists(&staging) {
+            return Err(BrowserDataError::Unowned {
+                path: to.to_path_buf(),
+            });
+        }
+        return Ok(false);
+    }
+    let record: CopyOwner = std::fs::read(&marker)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .filter(|record: &CopyOwner| {
+            record.destination == to && record.format == "fp-browser-copy-v1"
+        })
+        .ok_or_else(|| BrowserDataError::Unowned {
+            path: marker.clone(),
+        })?;
+    let _operation = record.operation;
     let mut put_back = false;
 
     if !exists(to) && exists(&old) {
@@ -449,8 +478,13 @@ fn recover(profile: &str, to: &Path) -> Result<bool, BrowserDataError> {
         rename(&old, to, profile)?;
         put_back = true;
     }
-    discard(&old);
-    discard(&staging);
+    for path in [&old, &staging, &marker] {
+        remove_any(path).map_err(|source| BrowserDataError::Replace {
+            profile: profile.to_string(),
+            path: path.clone(),
+            source,
+        })?;
+    }
     Ok(put_back)
 }
 
@@ -463,16 +497,52 @@ fn rename(from: &Path, to: &Path, profile: &str) -> Result<(), BrowserDataError>
     })
 }
 
-/// Removes a path that may be a directory, a file, or nothing at all.
-///
-/// Best effort by design: every caller is clearing a leftover, and a leftover
-/// that cannot be cleared now is cleared by the next run. It is logged either
-/// way, because a directory that keeps coming back is worth knowing about.
-fn discard(path: &Path) {
-    match remove_any(path) {
-        Ok(()) => {}
-        Err(error) => tracing::warn!("could not clear {}: {error}", path.display()),
-    }
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CopyOwner {
+    format: String,
+    operation: uuid::Uuid,
+    destination: PathBuf,
+}
+
+fn ownership(to: &Path) -> PathBuf {
+    beside(to, "copy-owner.json")
+}
+
+fn footprint(to: &Path) -> Vec<PathBuf> {
+    [to.to_path_buf(), staged(to), displaced(to), ownership(to)]
+        .into_iter()
+        .map(|path| resolve(&path))
+        .collect()
+}
+
+fn overlaps(a: &Path, b: &Path) -> bool {
+    a == b || contains(a, b) || contains(b, a)
+}
+
+fn claim(profile: &str, to: &Path) -> Result<(), BrowserDataError> {
+    let path = ownership(to);
+    let write = || -> io::Result<()> {
+        use std::io::Write;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let record = CopyOwner {
+            format: "fp-browser-copy-v1".into(),
+            operation: uuid::Uuid::new_v4(),
+            destination: to.to_path_buf(),
+        };
+        file.write_all(&serde_json::to_vec(&record)?)?;
+        file.sync_all()
+    };
+    write().map_err(|source| BrowserDataError::Replace {
+        profile: profile.to_string(),
+        path,
+        source,
+    })
 }
 
 fn remove_any(path: &Path) -> io::Result<()> {
@@ -500,6 +570,10 @@ fn beside(path: &Path, suffix: &str) -> PathBuf {
 /// Why a browser-data copy could not be taken.
 #[derive(Debug, Error)]
 pub enum BrowserDataError {
+    #[error(
+        "copy leftovers at {path} have no valid ownership record; preserved for manual recovery"
+    )]
+    Unowned { path: PathBuf },
     /// Profiles that are running, by name. Nothing was copied.
     #[error("a browser-data copy needs its profiles stopped")]
     Running { names: Vec<String> },
@@ -558,440 +632,4 @@ pub enum BrowserDataError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use domain::{CoreId, FingerprintProfile, StartTarget, WindowProfile};
-
-    /// A directory of its own under the system temporary directory, removed when
-    /// the test ends.
-    struct Scratch {
-        dir: PathBuf,
-    }
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("fp-browser-data-{name}"));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("scratch dir");
-            Self { dir }
-        }
-
-        fn join(&self, name: &str) -> PathBuf {
-            self.dir.join(name)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    fn profile(dir: &Path, name: &str) -> BrowserProfile {
-        BrowserProfile {
-            id: ProfileId::new(),
-            name: name.to_string(),
-            core_id: CoreId::new(),
-            user_data_dir: dir.to_path_buf(),
-            fingerprint: FingerprintProfile::new_random(7),
-            proxy_id: None,
-            window: WindowProfile::new(1280, 800),
-            start_target: StartTarget::Blank,
-        }
-    }
-
-    /// A profile directory with a little data in it, including a nested file.
-    fn seed_profile(dir: &Path, cookie: &str) {
-        std::fs::create_dir_all(dir.join("Default")).expect("create profile dir");
-        std::fs::write(dir.join("Default").join("Cookies"), b"cookie").expect("write");
-        std::fs::write(dir.join("Local State"), cookie.as_bytes()).expect("write");
-    }
-
-    #[test]
-    fn a_backup_copies_the_whole_directory_and_reports_the_bytes() {
-        let scratch = Scratch::new("copy");
-        let data = scratch.join("data");
-        let profile = profile(&data.join("profiles/one"), "Work laptop");
-        seed_profile(&profile.user_data_dir, "state");
-
-        let report = copy_browser_data(
-            std::slice::from_ref(&profile),
-            &HashSet::new(),
-            &scratch.join("backup"),
-        )
-        .expect("copy");
-
-        assert_eq!(report.copied, vec!["Work laptop".to_string()]);
-        assert!(report.skipped.is_empty());
-        let held = scratch
-            .join("backup")
-            .join("profiles")
-            .join(profile.id.to_string());
-        assert_eq!(
-            std::fs::read(held.join("Default").join("Cookies")).expect("read"),
-            b"cookie",
-            "a nested file is copied"
-        );
-        assert_eq!(
-            std::fs::read(held.join("Local State")).expect("read"),
-            b"state"
-        );
-        assert_eq!(report.bytes, (b"cookie".len() + b"state".len()) as u64);
-    }
-
-    /// The rule the design states plainly: a running profile's data is not
-    /// copied, and the refusal names the profiles so the reader knows what to
-    /// stop.
-    #[test]
-    fn a_running_profile_is_refused_by_name_before_anything_is_copied() {
-        let scratch = Scratch::new("running");
-        let running = profile(&scratch.join("data/profiles/one"), "Busy");
-        let idle = profile(&scratch.join("data/profiles/two"), "Idle");
-        seed_profile(&running.user_data_dir, "a");
-        seed_profile(&idle.user_data_dir, "b");
-        let active: HashSet<ProfileId> = [running.id].into_iter().collect();
-
-        let error = copy_browser_data(&[running, idle], &active, &scratch.join("backup"))
-            .expect_err("a running profile blocks the copy");
-
-        match error {
-            BrowserDataError::Running { names } => assert_eq!(names, vec!["Busy".to_string()]),
-            other => panic!("expected Running, got {other:?}"),
-        }
-        assert!(
-            !scratch.join("backup").exists(),
-            "nothing is written when the copy is refused"
-        );
-    }
-
-    /// A profile that has never run has no browser data; that is a skip, not a
-    /// failure of the whole backup.
-    #[test]
-    fn a_profile_with_no_directory_yet_is_skipped_not_refused() {
-        let scratch = Scratch::new("absent");
-        let fresh = profile(&scratch.join("data/profiles/fresh"), "Fresh");
-
-        let report =
-            copy_browser_data(&[fresh], &HashSet::new(), &scratch.join("backup")).expect("copy");
-
-        assert!(report.copied.is_empty());
-        assert_eq!(report.skipped, vec!["Fresh".to_string()]);
-        assert!(report.is_empty());
-    }
-
-    #[test]
-    fn a_restore_copies_back_into_the_profiles_own_directory() {
-        let scratch = Scratch::new("restore");
-        let backup = scratch.join("backup");
-        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
-        let held = backup.join("profiles").join(profile.id.to_string());
-        seed_profile(&held, "from-backup");
-
-        let report = restore_browser_data(std::slice::from_ref(&profile), &HashSet::new(), &backup)
-            .expect("restore");
-
-        assert_eq!(report.copied, vec!["Work laptop".to_string()]);
-        assert_eq!(
-            std::fs::read(profile.user_data_dir.join("Local State")).expect("read"),
-            b"from-backup"
-        );
-    }
-
-    /// A backup is a copy, not a merge: a file that was in an older backup and is
-    /// not in the source must not survive into the new one.
-    #[test]
-    fn a_backup_replaces_a_stale_directory_rather_than_merging_into_it() {
-        let scratch = Scratch::new("stale");
-        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
-        seed_profile(&profile.user_data_dir, "current");
-        let backup = scratch.join("backup");
-        let held = backup.join("profiles").join(profile.id.to_string());
-        std::fs::create_dir_all(&held).expect("stale backup dir");
-        std::fs::write(held.join("Stale File"), b"old").expect("write stale");
-
-        copy_browser_data(&[profile], &HashSet::new(), &backup).expect("copy");
-
-        assert!(
-            !held.join("Stale File").exists(),
-            "the stale file was carried over"
-        );
-        assert_eq!(
-            std::fs::read(held.join("Local State")).expect("read"),
-            b"current"
-        );
-    }
-
-    /// Pointing the backup at the data directory itself would have the copy
-    /// clear the very directory it is reading; it is refused by name.
-    #[test]
-    fn a_backup_directory_that_is_the_profile_directory_is_refused() {
-        let scratch = Scratch::new("same");
-        let data = scratch.join("data");
-        // The dangerous shape: a profile on its default path and a backup aimed
-        // at the data directory itself, so the copy would clear its own source.
-        let mut profile = profile(&data.join("profiles/one"), "Work laptop");
-        profile.user_data_dir = data.join("profiles").join(profile.id.to_string());
-        seed_profile(&profile.user_data_dir, "state");
-
-        let error = copy_browser_data(std::slice::from_ref(&profile), &HashSet::new(), &data)
-            .expect_err("the backup would overwrite its own source");
-
-        match error {
-            BrowserDataError::SameDirectory { profile: named, .. } => {
-                assert_eq!(named, "Work laptop")
-            }
-            other => panic!("expected SameDirectory, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn profiles_are_copied_in_name_order() {
-        let scratch = Scratch::new("order");
-        let alice = profile(&scratch.join("data/profiles/a"), "alice");
-        let bob = profile(&scratch.join("data/profiles/b"), "Bob");
-        seed_profile(&alice.user_data_dir, "a");
-        seed_profile(&bob.user_data_dir, "b");
-
-        let report = copy_browser_data(&[bob, alice], &HashSet::new(), &scratch.join("backup"))
-            .expect("copy");
-
-        assert_eq!(report.copied, vec!["alice".to_string(), "Bob".to_string()]);
-    }
-
-    /// A backup directory *inside* the profile it copies. The copy creates the
-    /// destination under the source and then walks into it, so the tree it is
-    /// reading grows while it reads - the shape that runs until the path limit or
-    /// the disk does. Refused before anything is created.
-    #[test]
-    fn a_backup_directory_inside_the_profile_directory_is_refused() {
-        let scratch = Scratch::new("inside");
-        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
-        seed_profile(&profile.user_data_dir, "state");
-        let inside = profile.user_data_dir.join("backup");
-
-        let error = copy_browser_data(std::slice::from_ref(&profile), &HashSet::new(), &inside)
-            .expect_err("the copy would descend into its own source");
-
-        match error {
-            BrowserDataError::Overlap { profile: named, .. } => assert_eq!(named, "Work laptop"),
-            other => panic!("expected Overlap, got {other:?}"),
-        }
-        assert!(!inside.exists(), "the refused copy created nothing");
-        assert_eq!(
-            std::fs::read(profile.user_data_dir.join("Local State")).expect("read"),
-            b"state",
-            "the source is exactly as it was"
-        );
-    }
-
-    /// A restore whose destination is an ancestor of its source: the backup
-    /// lives inside the profile directory it would be restored to. Clearing the
-    /// destination first - which is what a restore does - would delete the backup
-    /// before reading it, and the restore would then fail with the data gone.
-    #[test]
-    fn a_restore_whose_destination_contains_its_source_is_refused() {
-        let scratch = Scratch::new("ancestor");
-        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
-        seed_profile(&profile.user_data_dir, "state");
-        let backup = profile.user_data_dir.join("backup");
-        let held = backup.join("profiles").join(profile.id.to_string());
-        seed_profile(&held, "from-backup");
-
-        let error = restore_browser_data(std::slice::from_ref(&profile), &HashSet::new(), &backup)
-            .expect_err("the destination contains the source");
-
-        match error {
-            BrowserDataError::Overlap { profile: named, .. } => assert_eq!(named, "Work laptop"),
-            other => panic!("expected Overlap, got {other:?}"),
-        }
-        assert_eq!(
-            std::fs::read(held.join("Local State")).expect("read"),
-            b"from-backup",
-            "the backup is still there to be restored by hand"
-        );
-        assert_eq!(
-            std::fs::read(profile.user_data_dir.join("Local State")).expect("read"),
-            b"state",
-            "and the profile's own data was not cleared either"
-        );
-    }
-
-    /// Two profiles pointed at directories that contain one another. The second
-    /// profile's data directory *is* where the first one's backup goes, so
-    /// copying the first would clear the second's source. The run is refused
-    /// before the first profile has written anything.
-    #[test]
-    fn two_profiles_whose_directories_overlap_are_refused() {
-        let scratch = Scratch::new("cross");
-        let backup = scratch.join("backup");
-        let alice = profile(&scratch.join("data/profiles/a"), "Alice");
-        seed_profile(&alice.user_data_dir, "alice");
-        let mut zoe = profile(&scratch.join("data/profiles/z"), "Zoe");
-        seed_profile(&zoe.user_data_dir, "zoe");
-        zoe.user_data_dir = backup.join("profiles").join(alice.id.to_string());
-        seed_profile(&zoe.user_data_dir, "zoe");
-        let zoe_dir = zoe.user_data_dir.clone();
-
-        let error = copy_browser_data(&[alice, zoe], &HashSet::new(), &backup)
-            .expect_err("one profile's destination is the other's source");
-
-        match error {
-            BrowserDataError::ProfilesOverlap {
-                first_profile,
-                second_profile,
-                ..
-            } => {
-                assert_eq!(first_profile, "Alice");
-                assert_eq!(second_profile, "Zoe");
-            }
-            other => panic!("expected ProfilesOverlap, got {other:?}"),
-        }
-        assert_eq!(
-            std::fs::read(zoe_dir.join("Local State")).expect("read"),
-            b"zoe",
-            "Alice was not copied over Zoe's data"
-        );
-    }
-
-    /// A destination that does not exist yet, reached through a symlinked
-    /// ancestor, inside the source. Only resolving the destination's deepest
-    /// existing ancestor catches this; comparing the paths as written does not,
-    /// and the copy would then descend into its own source.
-    #[cfg(unix)]
-    #[test]
-    fn a_destination_inside_a_symlinked_source_is_refused() {
-        let scratch = Scratch::new("symlink");
-        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
-        seed_profile(&profile.user_data_dir, "state");
-        let link = scratch.join("link");
-        std::os::unix::fs::symlink(&profile.user_data_dir, &link).expect("symlink");
-
-        // `link/profiles/<id>` does not exist, and `link` is the source.
-        let error = copy_browser_data(std::slice::from_ref(&profile), &HashSet::new(), &link)
-            .expect_err("the copy would descend into its own source");
-
-        match error {
-            BrowserDataError::Overlap { profile: named, .. } => assert_eq!(named, "Work laptop"),
-            other => panic!("expected Overlap, got {other:?}"),
-        }
-        assert!(!link.join("profiles").exists(), "nothing was created");
-        assert_eq!(
-            std::fs::read(profile.user_data_dir.join("Local State")).expect("read"),
-            b"state",
-            "the source is exactly as it was"
-        );
-    }
-
-    /// The copy is built whole beside its destination and only then renamed over
-    /// it. A source that cannot be read partway through - here a link to nothing -
-    /// must therefore leave the directory that was already there exactly as it
-    /// was, rather than a destination that was cleared and refilled by halves.
-    #[cfg(unix)]
-    #[test]
-    fn a_copy_that_fails_leaves_the_directory_that_was_there() {
-        let scratch = Scratch::new("failed");
-        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
-        seed_profile(&profile.user_data_dir, "current");
-        std::os::unix::fs::symlink("nowhere", profile.user_data_dir.join("broken"))
-            .expect("a link that resolves to nothing");
-        let backup = scratch.join("backup");
-        let held = backup.join("profiles").join(profile.id.to_string());
-        std::fs::create_dir_all(&held).expect("previous backup");
-        std::fs::write(held.join("Local State"), b"last week").expect("write");
-
-        let error = copy_browser_data(std::slice::from_ref(&profile), &HashSet::new(), &backup)
-            .expect_err("the link cannot be read");
-
-        assert!(matches!(error, BrowserDataError::Copy { .. }), "{error:?}");
-        assert_eq!(
-            std::fs::read(held.join("Local State")).expect("read"),
-            b"last week",
-            "the previous backup is exactly what it was"
-        );
-        assert!(
-            !staged(&held).exists(),
-            "the unfinished copy was not left behind"
-        );
-    }
-
-    /// The other half of that: a good copy leaves no staging directory and no
-    /// displaced one, so the next run has nothing to interpret.
-    #[test]
-    fn a_copy_that_succeeds_leaves_nothing_beside_the_destination() {
-        let scratch = Scratch::new("clean");
-        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
-        seed_profile(&profile.user_data_dir, "current");
-        let backup = scratch.join("backup");
-        let held = backup.join("profiles").join(profile.id.to_string());
-        std::fs::create_dir_all(&held).expect("previous backup");
-        std::fs::write(held.join("Stale File"), b"old").expect("write");
-
-        copy_browser_data(&[profile], &HashSet::new(), &backup).expect("copy");
-
-        assert!(!staged(&held).exists(), "no staging directory is left");
-        assert!(!displaced(&held).exists(), "no displaced directory is left");
-    }
-
-    /// A run killed between the two renames of a swap leaves the destination
-    /// missing and the only copy of its data under `.old`. The next run puts that
-    /// back before it does anything else - which is what makes a failed copy after
-    /// it harmless rather than fatal.
-    #[cfg(unix)]
-    #[test]
-    fn a_destination_an_interrupted_swap_left_aside_is_put_back() {
-        let scratch = Scratch::new("interrupted");
-        let profile = profile(&scratch.join("data/profiles/one"), "Work laptop");
-        seed_profile(&profile.user_data_dir, "current");
-        // The copy about to run cannot finish, so what the destination holds
-        // afterwards is exactly what the recovery put there.
-        std::os::unix::fs::symlink("nowhere", profile.user_data_dir.join("broken"))
-            .expect("a link that resolves to nothing");
-        let backup = scratch.join("backup");
-        let held = backup.join("profiles").join(profile.id.to_string());
-        std::fs::create_dir_all(&held).expect("previous backup");
-        std::fs::write(held.join("Local State"), b"last week").expect("write");
-        // The window a kill can land in: renamed aside, not yet renamed back.
-        std::fs::rename(&held, displaced(&held)).expect("rename aside");
-        std::fs::create_dir_all(staged(&held)).expect("unfinished copy");
-
-        let error = copy_browser_data(std::slice::from_ref(&profile), &HashSet::new(), &backup)
-            .expect_err("the copy cannot read the link");
-
-        assert!(matches!(error, BrowserDataError::Copy { .. }), "{error:?}");
-        assert_eq!(
-            std::fs::read(held.join("Local State")).expect("read"),
-            b"last week",
-            "the directory the interrupted swap left aside was put back"
-        );
-        assert!(!displaced(&held).exists(), "and it is not a leftover now");
-        assert!(!staged(&held).exists(), "nor is the unfinished copy");
-    }
-
-    /// The restart half: a profile whose own directory is missing while its `.old`
-    /// is beside it - a restore killed between the two renames - is put back and
-    /// named, before anything else can mistake the missing directory for data that
-    /// was never there.
-    #[test]
-    fn a_restore_left_aside_is_put_back_at_startup_and_named() {
-        let scratch = Scratch::new("startup");
-        let laptop = profile(&scratch.join("data/profiles/one"), "Work laptop");
-        let directory = laptop.user_data_dir.clone();
-        std::fs::create_dir_all(directory.parent().expect("profiles directory")).expect("create");
-        seed_profile(&directory, "restored");
-        std::fs::rename(&directory, displaced(&directory)).expect("rename aside");
-
-        let put_back = recover_user_data_dirs(std::slice::from_ref(&laptop));
-
-        assert_eq!(put_back, vec!["Work laptop".to_string()]);
-        assert_eq!(
-            std::fs::read(directory.join("Local State")).expect("read"),
-            b"restored",
-            "the profile's data is back where it belongs"
-        );
-        assert!(!displaced(&directory).exists());
-
-        // And a profile with nothing to put back is not named.
-        let quiet = profile(&scratch.join("data/profiles/two"), "Fresh");
-        assert!(recover_user_data_dirs(std::slice::from_ref(&quiet)).is_empty());
-    }
-}
+mod tests;
