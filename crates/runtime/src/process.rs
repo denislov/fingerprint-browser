@@ -260,12 +260,21 @@ mod tests {
         spawn_managed(command).unwrap()
     }
 
-    /// Waits for a process to reach `execve`, which is the only moment its
-    /// command line becomes readable.
+    /// Waits for the child to reach `execve`.
+    ///
+    /// Not the same as waiting for a command line to appear: between `fork` and
+    /// `execve` the child answers with a copy of *this* process's command line,
+    /// which is a live identity for the wrong program. `Command::spawn` returns
+    /// before that exec here because the test harness is multithreaded, and
+    /// `journal`'s tests measured the reading at 53 in 40000 spawns - so the wait
+    /// is for a reading that is not this process, not for any reading at all.
     fn live_identity(pid: u32) -> ProcessIdentity {
+        let own: Vec<String> = std::env::args().collect();
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if let ProcessReading::Live(identity) = DefaultProcessInspector.inspect(pid) {
+            if let ProcessReading::Live(identity) = DefaultProcessInspector.inspect(pid)
+                && identity.argv != own
+            {
                 return identity;
             }
             assert!(

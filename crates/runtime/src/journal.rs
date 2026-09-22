@@ -582,11 +582,29 @@ mod tests {
         }
     }
 
-    /// A process has no command line between `fork` and `execve`.
+    /// The identity of `pid`, once the child has replaced the forked copy with the
+    /// program it was asked to run.
+    ///
+    /// The comment here used to say that a process has no command line between
+    /// `fork` and `execve`, and that is only half true: the forked child answers
+    /// `/proc/<pid>/cmdline` with a copy of *this* process's command line, so a
+    /// read taken before the child execs is a live identity for the wrong
+    /// program. `Command::spawn` returns before that exec in a multithreaded
+    /// process - the test harness is one - and this machine produced that reading
+    /// 53 times in 40000 spawns. It is the race `ProcessRecord::captured` avoids
+    /// by reading only the start time; a test that wants the command line has to
+    /// wait for a reading that is not this process.
     fn live_identity(pid: u32) -> ProcessIdentity {
+        live_identity_from(&DefaultProcessInspector, pid)
+    }
+
+    fn live_identity_from(inspector: &dyn ProcessInspector, pid: u32) -> ProcessIdentity {
+        let own: Vec<String> = std::env::args().collect();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
-            if let ProcessReading::Live(identity) = DefaultProcessInspector.inspect(pid) {
+            if let ProcessReading::Live(identity) = inspector.inspect(pid)
+                && identity.argv != own
+            {
                 return identity;
             }
             assert!(
@@ -595,6 +613,43 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// The regression: the first reading after a spawn can be the forked copy,
+    /// whose command line is this process's own. A helper that returned that
+    /// would hand a test the parent's identity with the child's pid, which is
+    /// what failed on the runner while every run here passed.
+    #[test]
+    fn a_child_that_has_not_reached_execve_yet_is_not_read_as_itself() {
+        struct ForkedThenExeced(std::sync::atomic::AtomicUsize);
+
+        impl ProcessInspector for ForkedThenExeced {
+            fn inspect(&self, _pid: u32) -> ProcessReading {
+                let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let argv = if call == 0 {
+                    std::env::args().collect()
+                } else {
+                    vec!["/bin/sleep".to_string(), "60".to_string()]
+                };
+                ProcessReading::Live(ProcessIdentity {
+                    argv,
+                    start_time: Some(4242),
+                })
+            }
+        }
+
+        let inspector = ForkedThenExeced(std::sync::atomic::AtomicUsize::new(0));
+        let identity = live_identity_from(&inspector, 4242);
+        assert_eq!(
+            identity.argv,
+            ["/bin/sleep", "60"],
+            "the child's command line, not this process's"
+        );
+        assert_eq!(
+            inspector.0.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the first reading was waited out rather than returned"
+        );
     }
 
     /// A platform that cannot read another process's command line.
