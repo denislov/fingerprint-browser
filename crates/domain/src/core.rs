@@ -176,19 +176,6 @@ impl CoreCapabilities {
         }
     }
 
-    /// Whether the engine honours `--disable-spoofing` for this generation.
-    ///
-    /// This is the switch that separates the generations: measured honoured on
-    /// 148, ignored on 142. The noise switch is carried by both, so it is not
-    /// what the label describes.
-    pub fn exclusion_label(&self) -> &'static str {
-        if self.supports_disable_spoofing {
-            "spoofing exclusions honoured"
-        } else {
-            "spoofing exclusions not honoured"
-        }
-    }
-
     pub fn supports_brand(&self, brand: BrowserBrand) -> bool {
         self.supported_brands.contains(&brand)
     }
@@ -268,11 +255,11 @@ mod tests {
     fn the_generation_is_written_the_same_way_everywhere() {
         let modern = CoreCapabilities::for_major(148);
         assert_eq!(modern.generation_label(), "Chrome 144+");
-        assert_eq!(modern.exclusion_label(), "spoofing exclusions honoured");
+        assert!(modern.supports_disable_spoofing);
 
         let legacy = CoreCapabilities::for_major(142);
         assert_eq!(legacy.generation_label(), "Chrome 143 and older");
-        assert_eq!(legacy.exclusion_label(), "spoofing exclusions not honoured");
+        assert!(!legacy.supports_disable_spoofing);
     }
 
     #[test]

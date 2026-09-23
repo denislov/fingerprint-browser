@@ -482,3 +482,204 @@ fn starting_a_profile_without_a_proxy_asks_nothing(cx: &mut TestAppContext) {
         RuntimeState::Running
     );
 }
+
+/// The four states a proxy's last test can be in, as the row reads them.
+///
+/// Three of them are results and one is the absence of one, and a blank cell
+/// would make "nobody asked" look like "the answer was nothing". Driven through
+/// the state rather than by pressing Test, because the point here is what the
+/// row draws in each state; the press itself is covered above.
+#[gpui_kit::test]
+fn a_proxy_row_reads_differently_in_each_test_state(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    let proxy_id = seed_proxy(cx, &view, "Office");
+
+    cx.update(|window, cx| window.click("nav-Proxies", cx));
+    settle(cx);
+    let cell = |cx: &mut gpui_kit::VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .find(format!("proxy-test-{proxy_id}"))
+                .label()
+                .map(|label| label.to_string())
+        })
+        .expect("the row carries a test column")
+    };
+
+    // Never asked: a state of its own, and not an empty cell.
+    assert!(
+        cell(cx).contains("not tested"),
+        "an untested proxy says so: {}",
+        cell(cx)
+    );
+
+    // In flight: the reading is named as pending, and the button that would ask
+    // again is disabled while it is.
+    view.update(cx, |view, cx| {
+        view.state_mut()
+            .begin_proxy_test(proxy_id)
+            .expect("no test is in flight");
+        cx.notify();
+    });
+    settle(cx);
+    assert!(
+        cell(cx).contains("testing"),
+        "a test in flight says so: {}",
+        cell(cx)
+    );
+    // The button that would ask again is put into its loading state for the same
+    // block; what stops a second request is the state's own lease, which
+    // `a_proxy_already_being_tested_is_not_tested_twice` asserts.
+
+    // It answered: the address the traffic left from is the whole point, and the
+    // time the engine took is named as the test's own, not as a latency.
+    view.update(cx, |view, cx| {
+        view.state_mut().finish_proxy_test(
+            proxy_id,
+            false,
+            Ok(runtime::Diagnosis {
+                exit_ip: "203.0.113.7".to_string(),
+                elapsed: std::time::Duration::from_millis(250),
+            }),
+        );
+        cx.notify();
+    });
+    settle(cx);
+    let passed = cell(cx);
+    assert!(passed.contains("203.0.113.7"), "the exit address: {passed}");
+    assert!(passed.contains("250 ms"), "how long it took: {passed}");
+    assert!(
+        passed.contains("through a temporary engine"),
+        "and which engine was probed, because a rehearsal and a live path are \
+         different claims: {passed}"
+    );
+
+    // It did not answer. The class is on the row and the engine's own words are
+    // one press away, because a row is one line and a fault is a paragraph.
+    view.update(cx, |view, cx| {
+        view.state_mut().finish_proxy_test(
+            proxy_id,
+            false,
+            Err(Fault::new(FaultClass::Timeout, "no answer in 30s")),
+        );
+        cx.notify();
+    });
+    settle(cx);
+    let failed = cell(cx);
+    assert!(failed.contains("no traffic (timeout)"), "{failed}");
+    // The class is what the row draws; the whole reading - the engine's own
+    // words included - is the cell's accessible name, so a reader who cannot see
+    // the row is not left with a class and no reason.
+    assert!(
+        failed.contains("no answer in 30s"),
+        "the accessible name carries the fault in full: {failed}"
+    );
+    // And none of it is wrapped into the row: a fault is a paragraph, and a
+    // paragraph inside a list row pushes every row below it down.
+    let height = cx.update(|window, _| window.find("proxy-0").bounds().size.height.as_f32());
+    assert!(
+        height <= 64.5,
+        "the fault stayed out of the row: {height}px"
+    );
+    assert!(
+        cx.update(|window, _| window
+            .try_find(format!("proxy-diagnostics-{proxy_id}"))
+            .is_some()),
+        "a failed row offers the way to the evidence"
+    );
+}
+
+/// The evidence behind a failed reading is the line the engine wrote, and the
+/// row's own control is what takes the reader to it.
+#[gpui_kit::test]
+fn a_failed_test_takes_its_reader_to_the_line_the_engine_wrote(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime, _opener, _tester, _copier) = view_with_tester(
+        cx,
+        Arc::new(FakeVerifier::passing()),
+        Arc::new(FakeProxyTester::with_outcome(Err(Fault::new(
+            FaultClass::Timeout,
+            "no answer in 30s",
+        )))),
+        Arc::new(FakeBrowserDataCopier::passing()),
+        None,
+        Arc::new(FakeOpener::working()),
+        None,
+    );
+    let cx = window(cx, &view);
+    let proxy_id = seed_proxy(cx, &view, "Office");
+
+    cx.update(|window, cx| window.click("nav-Proxies", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("test-proxy-0", cx));
+    settle(cx);
+    wait_for_state(cx, &view, |state| {
+        state
+            .proxy_test(proxy_id)
+            .is_some_and(|test| !test.is_running())
+    });
+
+    cx.update(|window, cx| window.click(format!("proxy-diagnostics-{proxy_id}"), cx));
+    settle(cx);
+
+    assert_eq!(
+        view.read_with(cx, |view, _| view.state().page()),
+        crate::state::Page::Log,
+        "the control opens the page the fault was written to"
+    );
+    assert_eq!(
+        view.read_with(cx, |view, _| view.state().log_filter()),
+        crate::state::LogFilter::Errors,
+        "and narrows it to the lines that are problems"
+    );
+    let line = cx
+        .update(|window, _| window.find("log-0").label().map(|label| label.to_string()))
+        .expect("the failure is the newest line");
+    assert!(line.contains("no answer in 30s"), "{line}");
+}
+
+/// The proxy row's cells line up under the headings that name them.
+#[gpui_kit::test]
+fn the_proxy_rows_line_up_under_the_column_headings(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    let proxy_id = seed_proxy(cx, &view, "Office");
+
+    cx.update(|window, cx| window.click("nav-Proxies", cx));
+    settle(cx);
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_aligned(
+            window.find("column-endpoint").bounds().left(),
+            window
+                .find(format!("proxy-endpoint-{proxy_id}"))
+                .bounds()
+                .left(),
+            "the endpoint column",
+        );
+        assert_aligned(
+            window.find("column-usage").bounds().left(),
+            window
+                .find(format!("proxy-usage-{proxy_id}"))
+                .bounds()
+                .left(),
+            "the usage column",
+        );
+        assert_aligned(
+            window.find("column-test").bounds().left(),
+            window
+                .find(format!("proxy-test-{proxy_id}"))
+                .bounds()
+                .left(),
+            "the last-test column",
+        );
+        assert_aligned(
+            window.find("column-actions").bounds().right(),
+            window.find("more-proxy-0").bounds().right(),
+            "the actions column",
+        );
+    });
+}

@@ -379,27 +379,22 @@ impl CoreRow {
         }
     }
 
-    /// Which switch generation this core belongs to, as the page shows it.
+    /// The switch generation and the exclusion reading, as two values.
     ///
-    /// `None` for a core whose version was never read: there is no generation,
-    /// which is exactly what the launch path refuses on.
-    pub fn generation_label(&self) -> Option<String> {
-        generation_line(&self.core)
+    /// The parts rather than the one composed line the state used to carry: a
+    /// page needs the generation as a name and the exclusion as a capability, and
+    /// the state's own sentence is English. A page that rendered it, or that
+    /// matched the word "honoured" inside it, would break the moment the window
+    /// was read in another language. `None` for a core whose version was never
+    /// read: there is no generation, which is what the launch path refuses on.
+    pub fn capability_parts(&self) -> Option<(String, bool)> {
+        self.core.capabilities().map(|capabilities| {
+            (
+                capabilities.generation_label(),
+                capabilities.supports_disable_spoofing,
+            )
+        })
     }
-}
-
-/// The generation line a core is shown with, in one place.
-///
-/// `None` when the version was never read: "unknown" is not a generation, and
-/// a core that has none cannot be launched with.
-pub(super) fn generation_line(core: &BrowserCore) -> Option<String> {
-    core.capabilities().map(|capabilities| {
-        format!(
-            "{} · {}",
-            capabilities.generation_label(),
-            capabilities.exclusion_label()
-        )
-    })
 }
 
 /// One browser core the profile form can put a profile on.

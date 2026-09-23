@@ -13,7 +13,7 @@ use crate::open_dir::DirectoryOpener;
 use crate::proxy_editor::ProxyEditor;
 use crate::proxy_import::ProxyImport;
 use crate::proxy_tester::ProxyTester;
-use crate::settings::SettingKey;
+use crate::settings::{SettingGroup, SettingKey};
 use crate::state::{
     AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Opening, Page, ProfileRow,
     ProxyRow, ProxyTest, StartGate, Toast, ToastKind, Verification,
@@ -395,7 +395,9 @@ use self::details::details_panel;
 use self::logs::{format_age, logs_body, logs_header};
 use self::profiles::{empty_hint, list_header, profile_list, profiles_header};
 use self::proxies::{proxies_body, proxies_header};
-use self::settings::{SettingsCards, SettingsExport, exit_choice, settings_body, settings_header};
+use self::settings::{
+    SettingsCards, SettingsExport, exit_choice, settings_body, settings_groups, settings_header,
+};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 
@@ -488,6 +490,7 @@ impl Render for AppView {
                         let log_rows = self.state.log_rows();
                         let log_count = self.state.log_len();
                         let log_filter = self.state.log_filter();
+                        let settings_group = self.state.settings_group();
                         let log_status = match self.state.log_file_status() {
                             Ok(path) => Ok(path.display().to_string()),
                             Err(error) => Err(error.to_string()),
@@ -504,7 +507,12 @@ impl Render for AppView {
                                 Page::Proxies => proxies_header(cx, t),
                                 Page::Cores => cores_header(cx, t),
                                 Page::Log => logs_header(log_filter, &log_status, cx, p, t),
-                                Page::Settings => settings_header(p, t),
+                                Page::Settings => div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_3()
+                                    .child(settings_header(p, t))
+                                    .child(settings_groups(settings_group, cx, p, t)),
                                 Page::Profiles => profiles_header(
                                     &ProfilesHeader {
                                         search: filter_input.clone(),
@@ -525,7 +533,15 @@ impl Render for AppView {
                                 this.child(cores_body(&core_rows, cx, t))
                             })
                             .when(page == Page::Log, |this| {
-                                this.child(logs_body(&log_rows, log_count, log_filter, cx, p, t))
+                                this.child(logs_body(
+                                    &log_rows,
+                                    log_count,
+                                    log_filter,
+                                    self.state.expanded_logs(),
+                                    cx,
+                                    p,
+                                    t,
+                                ))
                             })
                             .when(page == Page::Settings, |this| {
                                 this.child(settings_body(
@@ -543,6 +559,7 @@ impl Render for AppView {
                                         theme: self.state.theme(),
                                         language: self.state.language(),
                                         exit_mode: self.state.exit_mode(),
+                                        group: settings_group,
                                     },
                                     cx,
                                     p,

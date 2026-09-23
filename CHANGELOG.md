@@ -224,6 +224,61 @@ says nothing about, and the notes are that section rather than the whole file.
   searchable selectors; a profile whose core or proxy is gone still shows it and
   says so rather than silently reading as something else.
 
+- A proxy row now reads its last test as a state rather than as a sentence. The
+  page had four things to say - nobody has asked, a request is in flight, traffic
+  left, nothing arrived - and three of them were drawn by the same code path, so a
+  proxy nobody had ever tested showed an empty row while the panel above it listed
+  it as an ordinary one. The list is now five columns - proxy, endpoint, used by,
+  last test, actions - with the reading under its own heading: **not tested** is a
+  state of its own, a test in flight carries a spinner and a loading button, a pass
+  shows the address the traffic left from with the time it took under it, and a
+  failure names the class and offers the log line the engine wrote. The engine's
+  own words are the row's accessible name and its hover, so they reach the reader
+  without being wrapped into a list row; credentials are not in the endpoint, the
+  column or the tooltip, because a password in a hover is a password on a shared
+  screen.
+- The Browser Cores page says what a core can be asked to spoof, instead of
+  reading back an English phrase and matching on it. The compatibility line used
+  to be the state model's own `"spoofing exclusions honoured"`, and the page
+  decided its colour by looking for the word "honoured" inside that string - so a
+  translated window would have drawn every core in the same colour. The page now
+  asks the capability table which generation the binary reported and whether it
+  honours the exclusion switch, and writes the sentence in the reader's language;
+  the same reading replaces the raw English line in the profile form and in the
+  core editor, and the composed label the window could not translate is gone from
+  the state model entirely. The row is five columns - core, version, compatibility,
+  used by, actions - and the path under the name says **executable missing** and
+  **version unknown** as labels of their own rather than as a quieter shade, since
+  both are reasons a launch is refused. The path has a copy button and the row's
+  menu gained **Open location**, which opens the directory the binary lives in.
+- A log line longer than a row is clamped and can be opened, and the list's
+  columns are named. A message long enough to wrap pushed every line below it down,
+  so one paragraph from an engine turned the page into a wall; a line is now
+  clamped at 150 characters with a **Show all** control that says how much is
+  hidden, keyed by when the line was written rather than by its place in the list -
+  a new line arrives at the top and would otherwise move every index under it. The
+  message itself is selectable text, so the exact wording can be quoted, and the
+  four columns - time, level, profile, message - have headings the rows line up
+  under. **Clear** is a quiet button named for what it clears, and the page says
+  in the same row that the file keeps every line including the ones cleared here.
+- The Settings page is four groups with a navigation of its own. Eight cards in
+  one column put the appearance switch and the diagnostics report at the same
+  level, and the page had grown long enough that a setting could only be found by
+  scrolling past everything that was not it. The page is now **General**,
+  **Runtime**, **Data &amp; backup** and **Diagnostics &amp; about**, chosen from a chip row
+  under the heading with one line saying what the group in force holds - a chip row
+  rather than a second sidebar, because the four parts are a taxonomy and not four
+  destinations. Each setting's origin is now a chip of its own rather than a bare
+  word beside the label, so "environment" and "default" are told apart at a glance.
+- The close question says what each answer costs. The three answers were rows of
+  a title and a standing sentence, which read the same whether nothing or six
+  browsers were up - and "leave them running" and "stop everything" are one word
+  apart and opposite in effect. Each row now carries a mark of its own, the one
+  that stops something is drawn in the failure colour, and each sentence counts
+  the profiles the answer is about: what keeps managing them, what keeps going
+  with no window over it, and what is stopped. With nothing running the standing
+  sentence is still the whole truth.
+
 ## [0.1.0] - 2026-09-22
 
 ### Added

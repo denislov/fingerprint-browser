@@ -452,6 +452,42 @@ impl ProfileMenu {
     }
 }
 
+/// One item of a core row's overflow menu.
+///
+/// The same reason [`ProfileMenu`] is named rather than numbered: opening a
+/// core's location is now the item before deletion, and a test that counted
+/// rows would have gone on passing while deleting the wrong thing.
+#[derive(Clone, Copy)]
+enum CoreMenu {
+    /// The first item, which no test presses yet: editing a core is reached
+    /// through the form's own tests, and this is here so the items after it can
+    /// be named by what they are.
+    #[expect(dead_code)]
+    Edit,
+    OpenLocation,
+    Delete,
+}
+
+impl CoreMenu {
+    fn index(self) -> usize {
+        match self {
+            Self::Edit => 0,
+            Self::OpenLocation => 1,
+            // The separator between opening a location and removing the core
+            // takes a place of its own in the popup's rows.
+            Self::Delete => 3,
+        }
+    }
+}
+
+/// Opens a core row's menu and clicks one item of it.
+fn core_menu(cx: &mut gpui_kit::VisualTestContext, index: usize, item: CoreMenu) {
+    cx.update(|window, cx| window.click(format!("more-core-{index}"), cx));
+    settle(cx);
+    cx.update(|window, cx| window.within("popup-menu").click(item.index(), cx));
+    settle(cx);
+}
+
 /// Commits a choice in the profile form's proxy selector.
 ///
 /// The form's two selectors are searchable lists, and the component library
@@ -485,6 +521,16 @@ fn profile_menu(cx: &mut gpui_kit::VisualTestContext, id: ProfileId, item: Profi
     settle(cx);
     cx.update(|window, cx| window.within("popup-menu").click(item.index(), cx));
     settle(cx);
+}
+
+/// Two edges are the same edge, within the rounding of a layout pass.
+///
+/// Shared by the pages that have columns: a heading and the cell under it are
+/// laid out by two different chains of boxes, and the failure this catches is a
+/// table that reads as ragged at a glance without any one element being wrong.
+pub(super) fn assert_aligned(left: gpui_kit::Pixels, right: gpui_kit::Pixels, what: &str) {
+    let gap = (left - right).abs().as_f32();
+    assert!(gap < 0.5, "{what} is out by {gap}px: {left:?} vs {right:?}");
 }
 
 /// The band along the bottom edge of the window where a click does not reach
@@ -546,6 +592,10 @@ fn is_clickable(cx: &mut gpui_kit::VisualTestContext, id: &str) -> bool {
 /// bottom; so each step aims at whichever row or card is on screen now, which
 /// is also where the wheel would really land.
 fn scroll_settings_to(cx: &mut gpui_kit::VisualTestContext, target: &str) {
+    // The page shows one group at a time, so the control has to be in the group
+    // on screen before a wheel event could ever reach it.
+    cx.update(|window, cx| window.click(settings_group_of(target), cx));
+    settle(cx);
     let mut previous = None;
     for _ in 0..40 {
         if is_clickable(cx, target) {
@@ -579,16 +629,67 @@ fn scroll_settings_to(cx: &mut gpui_kit::VisualTestContext, target: &str) {
     panic!("{target} never came into view");
 }
 
-/// The Settings cards, in the order they appear, for the scroll helper to aim
-/// at once the setting rows above them have scrolled away.
-const SETTINGS_CARDS: [&str; 6] = [
+/// Every card the Settings page can show, in the order they appear, for the
+/// scroll helper to aim at.
+///
+/// All four groups at once: the helper asks whether each is on screen, and the
+/// ones in the groups that are not open simply are not there. A card added to a
+/// group without being added here costs the helper an aim, not a wrong answer.
+const SETTINGS_CARDS: [&str; 8] = [
     "appearance",
+    "exit-mode",
     "export-configuration",
     "import-configuration",
     "restore-configuration",
     "browser-data",
     "diagnostics",
+    "about",
 ];
+
+/// Which of the page's four groups a control the tests ask for lives in.
+///
+/// Spelled once here so a test can ask for the control it needs without also
+/// having to know the page's taxonomy, and so a control that moves between
+/// groups breaks one line rather than every test that presses it.
+///
+/// The fallback is the Runtime group, which is where the four `setting-*` rows
+/// of a process's paths and endpoints are; every other id the suite asks for is
+/// named above.
+fn settings_group_of(target: &str) -> &'static str {
+    match target {
+        "appearance" | "exit-mode" | "theme-dark" | "theme-light" | "language-en"
+        | "language-zh" | "exit-ask" | "exit-background" | "exit-keep-running"
+        | "exit-exit-all" => "settings-group-general",
+        "export-configuration"
+        | "import-configuration"
+        | "restore-configuration"
+        | "browser-data"
+        | "export-path"
+        | "import-path"
+        | "restore-path"
+        | "browser-data-path"
+        | "export-run"
+        | "import-run"
+        | "restore-run"
+        | "browser-data-out"
+        | "browser-data-in"
+        | "setting-data-dir"
+        | "setting-config-file"
+        | "setting-runtime-dir" => "settings-group-data",
+        "diagnostics" | "about" | "diagnostics-run" => "settings-group-diagnostics",
+        _ => "settings-group-runtime",
+    }
+}
+
+/// Shows one of the Settings page's four groups.
+///
+/// The group chips are the page's own navigation, so a test selects a group the
+/// way a reader does - and a chip that stopped switching the page would fail
+/// every test that needs a control inside it.
+fn open_settings_group(cx: &mut gpui_kit::VisualTestContext, group: crate::settings::SettingGroup) {
+    cx.update(|window, cx| window.click(group.id(), cx));
+    settle(cx);
+}
 
 /// Types into the Settings page's restore path field.
 fn type_restore_path(

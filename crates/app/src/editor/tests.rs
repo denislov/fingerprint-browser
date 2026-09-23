@@ -30,7 +30,11 @@ fn choice(id: CoreId, name: &str, major: u32) -> super::CoreChoice {
         id,
         name: name.to_string(),
         major,
-        generation: Some("Chrome 144+ · spoofing exclusions honoured".to_string()),
+        // The generation's own name, derived the way the service derives it, so
+        // a test core cannot claim a generation its major does not have - and a
+        // core with no major has none at all, which is the versionless case.
+        generation: (major > 0)
+            .then(|| domain::CoreCapabilities::for_major(major).generation_label()),
         exclusions_honoured: true,
     }
 }
@@ -558,8 +562,11 @@ fn the_form_says_when_a_core_ignores_the_exclusions(cx: &mut TestAppContext) {
     let modern = choice(CoreId::new(), "chrome 148", 148);
     let (editor, cx) = new_editor(cx, std::slice::from_ref(&modern));
     let note = editor.read_with(cx, |editor, cx| editor.core_note(cx));
-    assert!(note.contains("spoofing exclusions honoured"), "{note}");
-    assert!(!note.contains("ignored"), "{note}");
+    assert!(note.contains("Chrome 144+"), "{note}");
+    assert!(
+        note.contains("exclusions below are applied"),
+        "the form says the exclusions will be applied: {note}"
+    );
 
     let legacy = super::CoreChoice {
         exclusions_honoured: false,
@@ -567,10 +574,14 @@ fn the_form_says_when_a_core_ignores_the_exclusions(cx: &mut TestAppContext) {
     };
     let (editor, cx) = new_editor(cx, &[legacy]);
     let note = editor.read_with(cx, |editor, cx| editor.core_note(cx));
+    assert!(note.contains("Chrome 143 and older"), "{note}");
     assert!(
-        note.contains("ignored by this engine"),
+        note.contains("have no effect"),
         "the form says the exclusions will not be applied: {note}"
     );
+    // The state's own English wording is not what the form shows: the sentence
+    // is the table's, and the generation is the only name in it.
+    assert!(!note.contains("honoured"), "{note}");
 }
 
 /// The chip says which core it stands for.

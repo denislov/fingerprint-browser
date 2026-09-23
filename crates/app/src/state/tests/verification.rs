@@ -42,7 +42,7 @@ fn verifying_through_a_core_without_a_version_is_refused_not_asserted() {
     let error = fixture.state.begin_verification(id).unwrap_err();
     assert!(error.to_string().contains("no detected version"), "{error}");
     assert_eq!(
-        fixture.state.core_rows().expect("rows")[0].generation_label(),
+        fixture.state.core_rows().expect("rows")[0].capability_parts(),
         None,
         "there is no generation to show"
     );

@@ -74,6 +74,7 @@ fn a_problem_keeps_the_banner_and_still_gets_a_toast(cx: &mut TestAppContext) {
     // stays in the banner and is toasted while it happens.
     cx.update(|window, cx| window.click("nav-Settings", cx));
     settle(cx);
+    open_settings_group(cx, crate::settings::SettingGroup::Runtime);
     cx.update(|window, cx| window.click("edit-setting-echo-url", cx));
     settle(cx);
     let field = view
@@ -261,4 +262,177 @@ fn a_refused_edit_keeps_the_dialog_open_and_shows_why(cx: &mut TestAppContext) {
         name_before,
         "nothing was written"
     );
+}
+
+/// A line longer than a row is clamped, and the rest of it is one press away.
+///
+/// The identity of an open line is when it was written, not where it currently
+/// sits: the list is newest-first, so a new line moves every index below it, and
+/// a line opened by index would open somebody else's line the moment one arrived.
+#[gpui_kit::test]
+fn a_long_log_line_is_clamped_until_it_is_asked_for(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    let id = seed_profile(cx, &view);
+
+    let tail = "and this is the end of it, which is the part nobody can see";
+    let long = format!("{}{tail}", "an engine that says too much ".repeat(12));
+    let at = view.update(cx, |view, _| {
+        view.state_mut().record_event(&RuntimeEvent::Warning {
+            profile_id: id,
+            message: long.clone(),
+        });
+        view.state().log_rows()[0].at
+    });
+
+    cx.update(|window, cx| window.click("nav-Log", cx));
+    settle(cx);
+
+    let toggle = |cx: &mut gpui_kit::VisualTestContext, index: usize| {
+        cx.update(|window, _| {
+            window
+                .find(format!("log-toggle-{index}"))
+                .label()
+                .map(|label| label.to_string())
+        })
+        .unwrap_or_else(|| panic!("log line {index} has a control of its own"))
+    };
+    let height = |cx: &mut gpui_kit::VisualTestContext, index: usize| {
+        cx.update(|window, _| {
+            window
+                .find(format!("log-{index}"))
+                .bounds()
+                .size
+                .height
+                .as_f32()
+        })
+    };
+
+    // Clamped: the row offers the rest and says how much of it there is. The
+    // visible text itself is what the real window shows; what a test can hold is
+    // that a line this long is not laid out whole.
+    let clamped = toggle(cx, 0);
+    assert!(
+        clamped.contains(&(long.chars().count() - 150).to_string()),
+        "the control says how much is hidden: {clamped}"
+    );
+    let collapsed_height = height(cx, 0);
+
+    cx.update(|window, cx| window.click("log-toggle-0", cx));
+    settle(cx);
+    assert!(
+        toggle(cx, 0).contains("Collapse"),
+        "the control now closes it again"
+    );
+    assert!(
+        height(cx, 0) > collapsed_height,
+        "the whole line takes more room than the clamped one: {} vs {collapsed_height}",
+        height(cx, 0)
+    );
+    assert!(
+        view.read_with(cx, |view, _| view.state().log_expanded(at)),
+        "the line is remembered as open"
+    );
+
+    // A newer line arrives above it. The open one stays open, because it is
+    // keyed by when it was written rather than by where it now sits - and the
+    // new line, which is short, offers no control at all.
+    view.update(cx, |view, _| {
+        view.state_mut().record_event(&RuntimeEvent::Warning {
+            profile_id: id,
+            message: "a newer warning".to_string(),
+        });
+    });
+    settle(cx);
+    assert!(
+        cx.update(|window, _| window.try_find("log-toggle-1").is_some()),
+        "the open line kept its control at its new place in the list"
+    );
+    assert!(toggle(cx, 1).contains("Collapse"), "and is still open");
+    assert!(
+        cx.update(|window, _| window.try_find("log-toggle-0").is_none()),
+        "while the short new line has nothing to open"
+    );
+}
+
+/// Clearing is named for what it clears, and the file keeps what it clears.
+#[gpui_kit::test]
+fn clearing_the_list_says_what_it_does_not_touch(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = std::env::temp_dir().join(format!("fp-ui-log-clear-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let log = crate::log_file::LogFile::open(&dir).expect("open the log file");
+    let path = log.path().to_path_buf();
+    let (view, _runtime, _opener) = view_with_log(
+        cx,
+        Arc::new(FakeVerifier::passing()),
+        None,
+        Arc::new(FakeOpener::working()),
+        Some(log),
+    );
+    let cx = window(cx, &view);
+
+    seed_profile(cx, &view);
+    cx.update(|window, cx| window.click("nav-Log", cx));
+    settle(cx);
+
+    let scope = cx
+        .update(|window, _| {
+            window
+                .find("log-clear-scope")
+                .label()
+                .map(|label| label.to_string())
+        })
+        .expect("the scope of a clear is on the page");
+    assert!(scope.contains("log file"), "{scope}");
+
+    cx.update(|window, cx| window.click("clear-log", cx));
+    settle(cx);
+    assert!(
+        view.read_with(cx, |view, _| view.state().log_len()) == 0,
+        "the list is empty"
+    );
+    let text = std::fs::read_to_string(&path).expect("the file is still there");
+    assert!(
+        text.contains("Created Profile 1"),
+        "and the file still holds what was cleared from the list: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The log's four columns line up under the headings that name them.
+#[gpui_kit::test]
+fn the_log_rows_line_up_under_the_column_headings(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+
+    seed_profile(cx, &view);
+    cx.update(|window, cx| window.click("nav-Log", cx));
+    settle(cx);
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_aligned(
+            window.find("column-time").bounds().left(),
+            window.find("log-time-0").bounds().left(),
+            "the time column",
+        );
+        assert_aligned(
+            window.find("column-level").bounds().left(),
+            window.find("log-level-0").bounds().left(),
+            "the level column",
+        );
+        assert_aligned(
+            window.find("column-log-who").bounds().left(),
+            window.find("log-who-0").bounds().left(),
+            "the profile column",
+        );
+        assert_aligned(
+            window.find("column-message").bounds().left(),
+            window.find("log-body-0").bounds().left(),
+            "the message column",
+        );
+    });
 }

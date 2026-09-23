@@ -18,8 +18,9 @@ fn an_added_core_carries_the_version_its_binary_reported() {
     assert!(rows[0].present, "the binary is on disk");
     assert_eq!(rows[0].usage_label(en()), "not used");
     assert_eq!(
-        rows[0].generation_label().as_deref(),
-        Some("Chrome 144+ · spoofing exclusions honoured")
+        rows[0].capability_parts(),
+        Some(("Chrome 144+".to_string(), true)),
+        "the generation and the exclusion switch, as two values"
     );
 }
 
@@ -38,8 +39,8 @@ fn a_legacy_core_says_the_noise_switches_are_not_offered() {
     assert_eq!(rows[0].core.name, "Old");
     assert_eq!(rows[0].core.major, 128);
     assert_eq!(
-        rows[0].generation_label().as_deref(),
-        Some("Chrome 143 and older · spoofing exclusions not honoured")
+        rows[0].capability_parts(),
+        Some(("Chrome 143 and older".to_string(), false))
     );
 }
 
@@ -71,8 +72,8 @@ fn re_detecting_a_replaced_binary_updates_the_major_and_the_label() {
     let rows = fixture.state.core_rows().expect("rows");
     assert_eq!(rows[0].core.major, 128);
     assert_eq!(
-        rows[0].generation_label().as_deref(),
-        Some("Chrome 143 and older · spoofing exclusions not honoured")
+        rows[0].capability_parts(),
+        Some(("Chrome 143 and older".to_string(), false))
     );
     assert!(
         fixture

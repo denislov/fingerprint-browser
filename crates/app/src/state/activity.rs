@@ -104,6 +104,36 @@ impl AppState {
         self.log_filter = filter;
     }
 
+    /// Whether a line has been opened in full.
+    ///
+    /// A line that is open stays open as newer ones arrive, because the key is
+    /// when it was written rather than where it currently sits.
+    #[cfg(test)]
+    pub fn log_expanded(&self, at: SystemTime) -> bool {
+        self.expanded_logs.contains(&at)
+    }
+
+    /// Every line the reader has opened, for the page that draws them.
+    pub(crate) fn expanded_logs(&self) -> &HashSet<SystemTime> {
+        &self.expanded_logs
+    }
+
+    /// Opens a line in full, or closes it again.
+    pub fn toggle_log_expanded(&mut self, at: SystemTime) {
+        if !self.expanded_logs.remove(&at) {
+            self.expanded_logs.insert(at);
+        }
+    }
+
+    /// Which of the Settings page's four groups is on screen.
+    pub fn settings_group(&self) -> SettingGroup {
+        self.settings_group
+    }
+
+    pub fn set_settings_group(&mut self, group: SettingGroup) {
+        self.settings_group = group;
+    }
+
     pub fn details_tab(&self) -> DetailsTab {
         self.details_tab
     }
@@ -161,6 +191,7 @@ impl AppState {
 
     pub fn clear_log(&mut self) {
         self.log.clear();
+        self.expanded_logs.clear();
     }
 
     /// Record one runtime notification.
@@ -240,6 +271,11 @@ impl AppState {
         if self.log.len() > LOG_CAPACITY {
             let excess = self.log.len() - LOG_CAPACITY;
             self.log.drain(..excess);
+            // A line that has been dropped cannot be shown open again, so its key
+            // goes with it: otherwise the set would grow for the life of the
+            // window while the list it describes stays bounded.
+            let kept: HashSet<SystemTime> = self.log.iter().map(|entry| entry.at).collect();
+            self.expanded_logs.retain(|at| kept.contains(at));
         }
 
         // The file gets the same line, including the profile's name rather than

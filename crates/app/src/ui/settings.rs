@@ -9,6 +9,14 @@
 use super::components::PageHeader;
 use super::*;
 
+/// How tall one answer in the close dialog is.
+///
+/// Pinned rather than left to the content: the dialog's own box gives the last
+/// child a line less than the others, and a row whose border is painted over by
+/// its own text is worse than a row with room to spare. Two lines of note and a
+/// title with an icon fit inside it.
+const CHOICE_HEIGHT: f32 = 96.0;
+
 /// What a setting does, in one line, under its field.
 ///
 /// The rows that cannot be edited have no field, so this covers the editable
@@ -25,6 +33,52 @@ pub(super) fn settings_header(p: Palette, t: &Text) -> Div {
     PageHeader::new(t.nav_settings)
         .summary("settings-summary", t.settings_intro, t.settings_intro)
         .render(p)
+}
+
+/// The page's four groups, as a row of chips under the heading.
+///
+/// A chip row rather than a second sidebar: the page is long and its four parts
+/// are a taxonomy, not four destinations. The note under the chips describes the
+/// group in force, so the reader knows what they are looking at before scrolling
+/// through it - and each chip is named after what it holds rather than after
+/// where it sits.
+pub(super) fn settings_groups(
+    group: SettingGroup,
+    cx: &mut Context<AppView>,
+    p: Palette,
+    t: &Text,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .id("settings-groups")
+                .test_support()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .children(SettingGroup::ALL.map(|option| {
+                    let active = option == group;
+                    components::chip(option.id().to_string(), option.label(t), active, p)
+                        .test_support()
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.on_set_settings_group(option, cx)
+                            }),
+                        )
+                })),
+        )
+        .child(
+            div()
+                .id("settings-group-note")
+                .test_support()
+                .text_xs()
+                .text_color(rgb(p.muted))
+                .child(group.note(t).to_string()),
+        )
 }
 
 /// Everything the export card needs that is not already in [`AppState`].
@@ -58,6 +112,8 @@ pub(super) struct SettingsCards {
     pub(super) theme: ThemeChoice,
     pub(super) language: Lang,
     pub(super) exit_mode: ExitMode,
+    /// Which of the four groups the page is showing.
+    pub(super) group: SettingGroup,
 }
 
 pub(super) fn settings_body(
@@ -67,21 +123,36 @@ pub(super) fn settings_body(
     p: Palette,
     t: &Text,
 ) -> impl IntoElement {
+    let group = cards.group;
+    // Only the rows of the group in force: every setting still exists once, and
+    // the group decides which ones the reader is looking at. The filter is a
+    // partition rather than a search, so a row cannot be missing from all four.
+    let shown: Vec<&crate::settings::SettingRow> = rows
+        .iter()
+        .filter(|row| SettingGroup::of(row.key) == group)
+        .collect();
     // Built first, with their lifetimes erased: each card borrows the context
     // and the chain below borrows it again for its own listeners, and an
     // opaque return type would keep the first borrow alive to the end of the
     // chain.
-    let appearance: AnyElement =
-        appearance_card(cards.theme, cards.language, cx, t).into_any_element();
-    let exit_card: AnyElement = exit_mode_card(cards.exit_mode, cx, t).into_any_element();
-    let export_card: AnyElement = export_card(&cards.export, cx, t).into_any_element();
-    let import_card: AnyElement = import_card(&cards.import, cx, t).into_any_element();
-    let restore_card: AnyElement = restore_card(&cards.restore, cx, t).into_any_element();
-    let browser_data_card: AnyElement =
-        browser_data_card(&cards.browser_data, cx, t).into_any_element();
-    let diagnostics_card: AnyElement =
-        diagnostics_card(&cards.diagnostics, cx, t).into_any_element();
-    let about_card: AnyElement = about_card(p, t).into_any_element();
+    let mut surfaces: Vec<AnyElement> = Vec::new();
+    match group {
+        SettingGroup::General => {
+            surfaces.push(appearance_card(cards.theme, cards.language, cx, t).into_any_element());
+            surfaces.push(exit_mode_card(cards.exit_mode, cx, t).into_any_element());
+        }
+        SettingGroup::Runtime => {}
+        SettingGroup::Data => {
+            surfaces.push(export_card(&cards.export, cx, t).into_any_element());
+            surfaces.push(import_card(&cards.import, cx, t).into_any_element());
+            surfaces.push(restore_card(&cards.restore, cx, t).into_any_element());
+            surfaces.push(browser_data_card(&cards.browser_data, cx, t).into_any_element());
+        }
+        SettingGroup::Diagnostics => {
+            surfaces.push(diagnostics_card(&cards.diagnostics, cx, t).into_any_element());
+            surfaces.push(about_card(p, t).into_any_element());
+        }
+    }
     div()
         .id("settings-scroll")
         .flex()
@@ -90,70 +161,46 @@ pub(super) fn settings_body(
         .min_h_0()
         .gap_2()
         .overflow_y_scroll()
-        // Built inline: a helper returning a borrowed type cannot escape the
-        // closure that owns the context.
-        .children(rows.iter().map(|row| {
-            let key = row.key;
-            let editable = key.editable();
+        .children(
+            shown
+                .iter()
+                .map(|row| setting_row(row, cx, p, t).into_any_element()),
+        )
+        .children(surfaces)
+}
+
+/// One setting's row: its value in force, where that came from, and the one
+/// action it offers when it can be changed.
+///
+/// Built as its own function because the page now groups them: the row is the
+/// same row in whichever group it lands, and a second copy of this layout for a
+/// second group is where the two would drift apart.
+fn setting_row(
+    row: &crate::settings::SettingRow,
+    cx: &mut Context<AppView>,
+    p: Palette,
+    t: &Text,
+) -> impl IntoElement {
+    let key = row.key;
+    let editable = key.editable();
+    div()
+        .id(format!("setting-{}", key.id()))
+        .test_support()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .px_4()
+        .py_3()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(p.border))
+        .child(
             div()
-                .id(format!("setting-{}", key.id()))
-                .test_support()
                 .flex()
-                .items_center()
-                .justify_between()
-                .gap_4()
-                .px_4()
-                .py_3()
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(p.border))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(key.label(t)),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(
-                                            if row.source == crate::settings::Source::Environment {
-                                                p.warning
-                                            } else {
-                                                p.muted
-                                            },
-                                        ))
-                                        .child(row.source_label(t)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(p.text_soft))
-                                .child(row.value.clone()),
-                        )
-                        .children(
-                            row.shadowed_label(t).map(|label| {
-                                div().text_xs().text_color(rgb(p.warning)).child(label)
-                            }),
-                        )
-                        .children(
-                            row.note
-                                .clone()
-                                .map(|note| div().text_xs().text_color(rgb(p.muted)).child(note)),
-                        ),
-                )
+                .flex_col()
+                .gap_1()
+                .min_w_0()
                 .child(
                     div()
                         .flex()
@@ -161,30 +208,63 @@ pub(super) fn settings_body(
                         .gap_2()
                         .child(
                             div()
-                                .text_xs()
-                                .text_color(rgb(p.muted))
-                                .child(row.key.effect().label(t)),
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(key.label(t)),
                         )
-                        .when(editable, |this| {
-                            this.child(
-                                Button::new(format!("edit-setting-{}", key.id()))
-                                    .label(t.change)
-                                    .outline()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.on_edit_setting(key, window, cx)
-                                    })),
-                            )
-                        }),
+                        // Where the value came from, as a light chip rather than
+                        // a bare word: "environment" and "default" are different
+                        // answers, and the one that wins is the one to see.
+                        .child(components::status_badge(
+                            format!("setting-source-{}", key.id()),
+                            if row.source == crate::settings::Source::Environment {
+                                components::Tone::Warning
+                            } else {
+                                components::Tone::Neutral
+                            },
+                            row.source_label(t),
+                            row.source_label(t),
+                            p,
+                        )),
                 )
-        }))
-        .child(appearance)
-        .child(exit_card)
-        .child(export_card)
-        .child(import_card)
-        .child(restore_card)
-        .child(browser_data_card)
-        .child(diagnostics_card)
-        .child(about_card)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.text_soft))
+                        .child(row.value.clone()),
+                )
+                .children(
+                    row.shadowed_label(t)
+                        .map(|label| div().text_xs().text_color(rgb(p.warning)).child(label)),
+                )
+                .children(
+                    row.note
+                        .clone()
+                        .map(|note| div().text_xs().text_color(rgb(p.muted)).child(note)),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(p.muted))
+                        .child(row.key.effect().label(t)),
+                )
+                .when(editable, |this| {
+                    this.child(
+                        Button::new(format!("edit-setting-{}", key.id()))
+                            .label(t.change)
+                            .outline()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.on_edit_setting(key, window, cx)
+                            })),
+                    )
+                }),
+        )
 }
 
 /// The appearance card, first on the page.
@@ -302,37 +382,62 @@ pub(super) fn exit_mode_card(
         )
 }
 
-/// One of the dialog's three answers: what it is, and what it does.
+/// One of the dialog's three answers: what it is, what it does, and what it costs
+/// with the profiles that are running right now.
 ///
 /// A row rather than a footer button, because the three answers need their
 /// sentences: "leave browsers running" and "stop everything" are one word apart
 /// and opposite in effect, and a button that only carried the word would be a
-/// decision made on a guess.
-pub(super) fn exit_choice(exit: &Exit, p: Palette, t: &Text) -> Stateful<Div> {
+/// decision made on a guess. Each row carries a mark of its own as well, so the
+/// three are told apart before the words are read - and the one that stops
+/// something is the only one drawn in the failure colour.
+pub(super) fn exit_choice(exit: Exit, running: usize, p: Palette, t: &Text) -> Stateful<Div> {
     // A given height, because the three answers have to look like three of the
     // same thing. Left to itself the dialog's content box gave the last row a
     // text line less than the two above it, and that row's own note then painted
     // over where its bottom border was - the text, the order and the line height
     // were each ruled out by measurement, so the box is what is pinned. The
-    // height leaves room for a note that wraps to two lines.
+    // height leaves room for a note that names the running profiles and wraps to
+    // two lines.
+    let stops = exit == Exit::ExitAll && running > 0;
+    let (icon, colour) = match exit {
+        Exit::Background => (icons::glyph::EXIT_BACKGROUND, p.secondary),
+        Exit::KeepRunning => (icons::glyph::EXIT_KEEP_RUNNING, p.secondary),
+        Exit::ExitAll => (icons::glyph::EXIT_STOP_ALL, p.danger_strong),
+    };
+    let note = t.exit_choice_note(exit, running);
     div()
         .id(format!("exit-choice-{}", exit.code()))
+        // The row is a control, and its whole content is what it does: a reader
+        // who cannot see it must not be left with the title alone.
+        .aria_label(format!("{}. {note}", exit.label(t)))
         .flex()
         .flex_col()
         .justify_center()
         .gap_1()
-        .h(px(84.0))
+        .h(px(CHOICE_HEIGHT))
         .px_3()
         .rounded_md()
         .border_1()
-        .border_color(rgb(p.dim))
+        .border_color(rgb(if stops { p.danger } else { p.dim }))
+        .when(stops, |this| this.bg(rgb(p.danger_bg_soft)))
+        .cursor_pointer()
+        .hover(|this| this.bg(rgb(p.hover)))
         .child(
             div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .child(exit.label(t)),
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(icons::action(icon).text_color(rgb(colour)))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(if stops { p.danger_strong } else { p.text }))
+                        .child(exit.label(t)),
+                ),
         )
-        .child(div().text_xs().text_color(rgb(p.muted)).child(exit.note(t)))
+        .child(div().text_xs().text_color(rgb(p.muted)).child(note))
 }
 
 /// The export card at the foot of the Settings page.

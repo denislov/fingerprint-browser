@@ -144,7 +144,13 @@ impl AppState {
             .map(|core| {
                 let capabilities = core.capabilities();
                 CoreChoice {
-                    generation: generation_line(&core),
+                    // The generation's own name, not the composed line the state
+                    // used to build: the form writes the sentence around it, and a
+                    // composed English line is what a translated window must not
+                    // show.
+                    generation: capabilities
+                        .as_ref()
+                        .map(|capabilities| capabilities.generation_label()),
                     exclusions_honoured: capabilities
                         .as_ref()
                         .is_some_and(|capabilities| capabilities.supports_disable_spoofing),

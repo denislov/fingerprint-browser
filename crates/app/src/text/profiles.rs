@@ -121,6 +121,33 @@ impl Text {
         }
     }
 
+    /// The accessible name of a log row's expand control: how much is hidden,
+    /// because "Show all" alone does not say whether it is worth opening.
+    pub fn log_expand_aria(&self, hidden: usize) -> String {
+        match self.lang {
+            Lang::En => format!("Show the rest of this line ({hidden} more characters)"),
+            Lang::Zh => format!("展开这一行的其余部分（还有 {hidden} 个字符）"),
+        }
+    }
+
+    pub fn log_collapse_aria(&self) -> String {
+        match self.lang {
+            Lang::En => "Collapse this line".to_string(),
+            Lang::Zh => "收起这一行".to_string(),
+        }
+    }
+
+    /// One log line, whole, for the row's accessible name and for copying.
+    ///
+    /// The same shape the Copy button writes, so what is read aloud and what
+    /// lands on the clipboard cannot drift apart.
+    pub fn log_line(&self, who: &str, level: &str, message: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{who} [{level}] {message}"),
+            Lang::Zh => format!("{who} [{level}] {message}"),
+        }
+    }
+
     /// The panel's log view, newest first, with how many lines it holds.
     pub fn panel_log_title(&self, count: usize) -> String {
         match self.lang {
@@ -182,14 +209,6 @@ impl Text {
         match self.lang {
             Lang::En => format!("profile {id} is no longer there"),
             Lang::Zh => format!("档案 {id} 已不存在"),
-        }
-    }
-
-    /// The engine generation, and the fact that it ignores the exclusions below.
-    pub fn generation_ignores_exclusions(&self, generation: &str) -> String {
-        match self.lang {
-            Lang::En => format!("{generation}; the exclusions below are ignored by this engine"),
-            Lang::Zh => format!("{generation}；下面的排除项会被该引擎忽略"),
         }
     }
 

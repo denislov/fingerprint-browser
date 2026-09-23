@@ -225,6 +225,23 @@ catalog! {
     theme_light => "Light" => "浅色";
     language_title => "Language" => "语言";
 
+    // The page's four groups. A chip row rather than a second sidebar: the page
+    // is long, and the four answers are a taxonomy, not four destinations. Each
+    // one carries the sentence that says what is in it, so the choice is made by
+    // reading rather than by guessing.
+    settings_group_general => "General" => "常规";
+    settings_group_general_note => "Appearance, language, and what closing the window does."
+        => "外观、语言，以及关闭窗口时做什么。";
+    settings_group_runtime => "Runtime" => "运行环境";
+    settings_group_runtime_note => "Core and Xray paths, the proxy test endpoint, and the other values read at launch."
+        => "内核与 Xray 路径、代理测试端点，以及启动时读取的其他值。";
+    settings_group_data => "Data & backup" => "数据与备份";
+    settings_group_data_note => "Where this installation keeps its files, and the four backup cards."
+        => "本安装各文件所在的位置，以及四张备份卡片。";
+    settings_group_diagnostics => "Diagnostics & about" => "诊断与关于";
+    settings_group_diagnostics_note => "The report to write when something is wrong, and what this build is."
+        => "出问题时写出的报告，以及这个构建是什么。";
+
     // ---- closing the window ----
     //
     // Three answers, asked once and remembered, and the question itself. The
@@ -286,6 +303,18 @@ catalog! {
     log_filter_noun_warnings => "warning or error" => "警告或错误";
     log_filter_noun_errors => "error" => "错误";
 
+    // The log's own columns, and the two controls a long line needs. Clearing is
+    // named for what it clears - the list in front of the reader - because the
+    // file it also writes to is not touched by it.
+    column_time => "Time" => "时间";
+    column_level => "Level" => "级别";
+    column_message => "Message" => "消息";
+    log_clear_view => "Clear list" => "清空列表";
+    log_clear_scope => "Clearing empties this list only. The log file keeps every line, including the ones cleared here."
+        => "清空只影响本页列表。日志文件仍保留全部内容，包括在这里被清掉的行。";
+    log_expand => "Show all" => "展开全文";
+    log_collapse => "Show less" => "收起";
+
     details_tab_details => "Details" => "详情";
     details_tab_args => "Args" => "参数";
     details_tab_log => "Log" => "日志";
@@ -342,6 +371,15 @@ catalog! {
     engine_temporary => "through a temporary engine" => "经由临时引擎";
     delete_proxy_title => "Delete proxy" => "删除代理";
 
+    // The proxy row's columns, and the states a test leaves behind. "Not
+    // tested" is a state of its own rather than a blank line: a proxy nobody has
+    // asked about is not the same thing as one that answered.
+    column_endpoint => "Endpoint" => "端点";
+    column_usage => "Used by" => "使用情况";
+    column_last_test => "Last test" => "最近测试";
+    proxy_untested => "not tested" => "未测试";
+    proxy_diagnostics => "Diagnostics" => "查看诊断";
+
     // ---- the cores page ----
     cores_intro => "Each core is a fingerprint-chromium binary; its detected version decides which switches a profile may claim."
         => "每个内核都是一个 fingerprint-chromium 可执行文件；检测到的版本决定档案可以声明哪些开关。";
@@ -353,6 +391,15 @@ catalog! {
         => "未检测到版本：无法声明任何开关";
     redetect => "Re-detect" => "重新检测";
     delete_core_title => "Delete browser core" => "删除浏览器内核";
+
+    // The core row's columns. A version nobody read and a binary that is gone
+    // are both shown as their own labels rather than as a quieter row: they are
+    // reasons a launch is refused, not shades of an ordinary state.
+    column_version => "Version" => "版本";
+    column_compatibility => "Compatibility" => "兼容性";
+    core_version_unknown => "version unknown" => "版本未知";
+    core_path_copy => "Copy path" => "复制路径";
+    core_open_location => "Open location" => "打开所在位置";
 
     // ---- the backup cards on the Settings page ----
     export_title => "Export configuration" => "导出配置";
@@ -540,7 +587,6 @@ catalog! {
     log_intro => "What this window has done and seen: starts, stops, warnings, errors and reads, newest first."
         => "这个窗口做过和看到的事：启动、停止、警告、错误与读数，最新的在最前。";
     copy => "Copy" => "复制";
-    clear => "Clear" => "清空";
     log_empty => "Nothing has happened yet in this window." => "这个窗口里还没有发生任何事。";
 
     // ---- the Runtime Details panel ----
@@ -714,6 +760,32 @@ mod tests {
             text(Lang::En).instance_busy(None),
             text(Lang::Zh).instance_busy(None)
         );
+    }
+
+    /// The three answers say what they cost when there is something to cost.
+    ///
+    /// With nothing running the standing sentence is the whole truth, and the
+    /// count is not bolted onto it: a window that said "the 0 running profiles"
+    /// would be worse than one that said nothing.
+    #[test]
+    fn the_close_question_counts_only_when_there_is_something_to_count() {
+        use crate::exit::Exit;
+        for lang in Lang::ALL {
+            let t = text(lang);
+            for exit in [Exit::Background, Exit::KeepRunning, Exit::ExitAll] {
+                assert_eq!(t.exit_choice_note(exit, 0), exit.note(t), "{exit:?}");
+                let counted = t.exit_choice_note(exit, 3);
+                assert_ne!(counted, exit.note(t), "{exit:?}");
+                assert!(counted.contains('3'), "{counted}");
+                // And the three counted sentences are three different things.
+                let others: Vec<String> = [Exit::Background, Exit::KeepRunning, Exit::ExitAll]
+                    .into_iter()
+                    .filter(|other| *other != exit)
+                    .map(|other| t.exit_choice_note(other, 3))
+                    .collect();
+                assert!(!others.contains(&counted), "{counted}");
+            }
+        }
     }
 
     /// The sentences are methods rather than fields, so they need their own

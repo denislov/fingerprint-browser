@@ -20,7 +20,7 @@ mod cores;
 mod profiles;
 mod proxies;
 use crate::proxy_tester::ProxyTestJob;
-use crate::settings::{SettingKey, SettingRow, Settings};
+use crate::settings::{SettingGroup, SettingKey, SettingRow, Settings};
 use crate::text::{Lang, Text, text};
 use crate::theme::ThemeChoice;
 use crate::verifier::{EgressJob, VerificationJob, VerificationReport};
@@ -34,7 +34,7 @@ use domain::{
     RuntimeState,
 };
 use runtime::{Diagnosis, Discrepancy, Fault, RuntimeComponent, RuntimeEvent, RuntimeSnapshot};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -254,6 +254,15 @@ pub struct AppState {
     log: Vec<LogEntry>,
     /// Which of those lines the page is showing.
     log_filter: LogFilter,
+    /// The log lines the reader has opened in full, by the instant they were
+    /// written.
+    ///
+    /// The time is the line's identity: it is the one field that is theirs alone,
+    /// and it does not move when newer lines are prepended above them - which is
+    /// exactly what a row index would do.
+    expanded_logs: HashSet<SystemTime>,
+    /// Which of the Settings page's four groups is on screen.
+    settings_group: SettingGroup,
     /// Which view the Runtime Details panel is showing.
     details_tab: DetailsTab,
     /// Where the lines are also written down, when a file could be opened.
@@ -440,6 +449,8 @@ impl AppState {
             toasts: Vec::new(),
             log: Vec::new(),
             log_filter: LogFilter::default(),
+            expanded_logs: HashSet::new(),
+            settings_group: SettingGroup::default(),
             details_tab: DetailsTab::default(),
             details_open: false,
             log_file,
@@ -720,8 +731,15 @@ impl AppState {
     /// say whether there is anything to decide about - the choices are the same
     /// either way, but a sentence claiming browsers are running when none are
     /// would be the window guessing.
-    pub fn any_profile_active(&self) -> bool {
-        self.rows().iter().any(|row| row.state().is_active())
+    /// How many profiles are running, starting or stopping right now.
+    ///
+    /// The number the close dialog's three answers are about: "leave them
+    /// running" and "stop everything" read very differently with six beside them.
+    pub fn active_profile_count(&self) -> usize {
+        self.rows()
+            .iter()
+            .filter(|row| row.state().is_active())
+            .count()
     }
 
     /// What closing the window does: a stored answer, or the question.

@@ -1,4 +1,4 @@
-use crate::text::en;
+use crate::text::{Lang, en, text};
 
 use super::*;
 use crate::paths::FALLBACK_DATA_DIR;
@@ -739,4 +739,41 @@ fn the_settings_page_names_every_source() {
         by_key(SettingKey::ConfigFile).value,
         config.path.to_string_lossy()
     );
+}
+
+/// Every setting belongs to a group, and the four groups read as four things.
+///
+/// The page shows one group at a time, so a key that belonged to none would
+/// simply never appear - a setting the window cannot reach. Which group holds it
+/// is the page's business; that it is reachable at all is checked here, because
+/// a missing row would otherwise only be found by a reader who needed it.
+#[test]
+fn every_setting_belongs_to_a_group_and_the_groups_read_differently() {
+    let rows: Vec<(SettingKey, SettingGroup)> = SettingKey::ALL
+        .into_iter()
+        .map(|key| (key, SettingGroup::of(key)))
+        .collect();
+    // One chip per row, and the chips the rows land on are all four of them
+    // except the two the page fills with cards.
+    assert_eq!(rows.len(), SettingKey::ALL.len());
+    for group in [SettingGroup::Runtime, SettingGroup::Data] {
+        assert!(
+            rows.iter().any(|(_, placed)| *placed == group),
+            "{} leads to an empty page, so its rows went somewhere else",
+            group.id()
+        );
+    }
+    // The four names and the four sentences are four different strings in both
+    // languages: two chips with one sentence would be a switch nobody can use.
+    for lang in [Lang::En, Lang::Zh] {
+        let t = text(lang);
+        let mut labels: Vec<&str> = SettingGroup::ALL.iter().map(|g| g.label(t)).collect();
+        let mut notes: Vec<&str> = SettingGroup::ALL.iter().map(|g| g.note(t)).collect();
+        labels.sort_unstable();
+        labels.dedup();
+        notes.sort_unstable();
+        notes.dedup();
+        assert_eq!(labels.len(), SettingGroup::ALL.len(), "{labels:?}");
+        assert_eq!(notes.len(), SettingGroup::ALL.len(), "{notes:?}");
+    }
 }

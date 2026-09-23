@@ -20,28 +20,43 @@ impl Text {
         }
     }
 
-    /// A proxy reading: what was measured, and through which engine.
-    pub fn proxy_test_reading(&self, reading: &str, scope: &str) -> String {
-        match self.lang {
-            Lang::En => format!("{reading} {scope}"),
-            Lang::Zh => format!("{reading}，{scope}"),
-        }
-    }
-
-    /// A failed test: the class is named, and the engine's own words are in the
-    /// log rather than in a row that has one line.
-    pub fn proxy_test_failed(&self, reading: &str) -> String {
-        match self.lang {
-            Lang::En => format!("{reading}; see the log"),
-            Lang::Zh => format!("{reading}；详见日志"),
-        }
-    }
-
     /// A proxy test that is still running.
     pub fn proxy_testing(&self) -> String {
         match self.lang {
             Lang::En => "testing...".to_string(),
             Lang::Zh => "测试中……".to_string(),
+        }
+    }
+
+    /// How long the engine took to answer, in the engine's own terms.
+    ///
+    /// Named as the *test's* elapsed time rather than as a latency: it is one
+    /// request through a whole path, TLS setup included, and calling it a ping
+    /// would be a claim the number does not support.
+    pub fn proxy_test_elapsed(&self, millis: u128) -> String {
+        match self.lang {
+            Lang::En => format!("the test took {millis} ms"),
+            Lang::Zh => format!("测试耗时 {millis} 毫秒"),
+        }
+    }
+
+    /// The accessible name of the control that takes a failed row to the log
+    /// line the engine wrote, which is where the fault's own words are.
+    pub fn proxy_fault_help(&self, fault: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{fault}. Open the log for the engine's own account."),
+            Lang::Zh => format!("{fault}。打开日志查看引擎自己的说法。"),
+        }
+    }
+
+    /// The whole of what a proxy dials, for the tooltip on a truncated column.
+    ///
+    /// Credentials are never part of this sentence because they are never part of
+    /// the endpoint: a password in a hover is a password on a shared screen.
+    pub fn proxy_endpoint_help(&self, endpoint: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{endpoint} - credentials are never shown here"),
+            Lang::Zh => format!("{endpoint}——凭据不会显示在这里"),
         }
     }
 

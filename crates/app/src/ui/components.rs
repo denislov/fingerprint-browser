@@ -46,6 +46,13 @@ pub const RADIUS_CONTROL: f32 = 6.0;
 /// The radius of a list, a card or a panel.
 pub const RADIUS_SURFACE: f32 = 8.0;
 
+/// The height of a list row on the pages that show a table.
+///
+/// Tall enough for a name and the state under it, and the same on every page: a
+/// reader who has learned where a row's controls are on one list finds them in
+/// the same place on the next.
+pub const ROW_HEIGHT: f32 = 64.0;
+
 /// A page's heading: what the page is, what it is showing, and the one thing to
 /// do next.
 ///

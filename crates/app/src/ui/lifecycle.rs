@@ -127,7 +127,12 @@ impl AppView {
     pub(super) fn open_exit_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let t = self.state.text();
         let p = palette(cx);
-        let body = if self.state.any_profile_active() {
+        // How many profiles this decision is about. It travels with each answer
+        // because the three of them differ in what they do to those profiles, and
+        // the count is the difference between a choice that matters and one that
+        // does not.
+        let running = self.state.active_profile_count();
+        let body = if running > 0 {
             t.exit_dialog_body
         } else {
             t.exit_dialog_body_idle
@@ -145,7 +150,7 @@ impl AppView {
                 .map(|exit| {
                     let view = view.clone();
                     let remember = std::rc::Rc::clone(&remember);
-                    exit_choice(&exit, p, t)
+                    exit_choice(exit, running, p, t)
                         .test_support()
                         .on_click(move |_, window, cx| {
                             let ticked = remember.get();

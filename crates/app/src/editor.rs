@@ -523,8 +523,7 @@ impl ProfileEditor {
         let t = self.text;
         match self.cores.iter().find(|choice| choice.id == self.core(cx)) {
             Some(choice) => match &choice.generation {
-                Some(generation) if choice.exclusions_honoured => generation.clone(),
-                Some(generation) => t.generation_ignores_exclusions(generation),
+                Some(generation) => t.core_generation_note(generation, choice.exclusions_honoured),
                 None => t.core_answered_no_version.to_string(),
             },
             None => t.core_no_longer_registered.to_string(),

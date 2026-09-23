@@ -445,9 +445,3 @@ fn the_rows_line_up_under_the_column_headings(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
-
-/// Two edges are the same edge, within the rounding of a layout pass.
-fn assert_aligned(left: gpui_kit::Pixels, right: gpui_kit::Pixels, what: &str) {
-    let gap = (left - right).abs().as_f32();
-    assert!(gap < 0.5, "{what} is out by {gap}px: {left:?} vs {right:?}");
-}

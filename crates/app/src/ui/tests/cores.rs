@@ -195,12 +195,9 @@ fn deleting_a_core_in_use_is_refused_in_the_window(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.click("nav-Cores", cx));
     settle(cx);
     // Deleting lives in the row's overflow menu now, so the test opens it the
-    // way a user does and picks the item by its place in the menu: edit, a
-    // separator, then delete.
-    cx.update(|window, cx| window.click("more-core-0", cx));
-    settle(cx);
-    cx.update(|window, cx| window.within("popup-menu").click(2usize, cx));
-    settle(cx);
+    // way a user does and picks the item by what it says: edit, the location,
+    // a separator, then delete.
+    core_menu(cx, 0, CoreMenu::Delete);
     cx.update(|window, cx| window.click("ok", cx));
     settle(cx);
 
@@ -314,4 +311,222 @@ fn starting_without_a_core_says_so_and_offers_the_way_there(cx: &mut TestAppCont
         view.read_with(cx, |view, _| view.state().page()),
         crate::state::Page::Cores
     );
+}
+
+/// What a core can be asked to spoof is a reading, not a phrase.
+///
+/// The compatibility line is derived from the capability table. The regression
+/// this guards is the one the page used to have: it matched the English word
+/// "honoured" inside a display string, so the colour survived exactly as long as
+/// nobody translated it.
+#[gpui_kit::test]
+fn a_core_row_reads_its_capability_rather_than_an_english_phrase(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+
+    // The fixture's own core, of the generation that honours the switch.
+    let modern_id = view.update(cx, |view, _| {
+        let id = view
+            .state()
+            .core_rows()
+            .expect("rows")
+            .into_iter()
+            .find(|row| row.core.version == "144.0.0.0")
+            .expect("the fixture's core")
+            .core
+            .id;
+        // A core whose version was never read. The service refuses to register
+        // one - that is the refusal the editor shows - so the record is edited
+        // into that shape, which is the only way the page can meet it.
+        let mut blank = view.state().core(id).expect("the core");
+        blank.version = String::new();
+        blank.major = 0;
+        view.state_mut()
+            .update_core(blank)
+            .expect("the row is saved");
+        id
+    });
+    let silent_id = modern_id;
+    let binary =
+        |name: &str, banner: &str| crate::state::testing::CoreBinary::new(name, Some(banner));
+    // Two more binaries, one either side of the pivot.
+    let legacy = binary("ui-legacy-compat", "Chromium 128.0.0.0");
+    let modern = binary("ui-modern-compat", "Chromium 148.0.7778.215");
+    view.update(cx, |view, _| {
+        view.state_mut()
+            .add_core(None, legacy.path_buf())
+            .expect("the older core is added");
+        view.state_mut()
+            .add_core(None, modern.path_buf())
+            .expect("the newer core is added");
+    });
+
+    cx.update(|window, cx| window.click("nav-Cores", cx));
+    settle(cx);
+
+    let id_of = |cx: &mut gpui_kit::VisualTestContext, path: &std::path::Path| {
+        view.read_with(cx, |view, _| {
+            view.state()
+                .core_rows()
+                .expect("rows")
+                .into_iter()
+                .find(|row| row.core.executable == path)
+                .expect("the core is listed")
+                .core
+                .id
+        })
+    };
+    let reading = |cx: &mut gpui_kit::VisualTestContext, id: CoreId| {
+        cx.update(|window, _| {
+            window
+                .find(format!("core-compatibility-{id}"))
+                .label()
+                .map(|label| label.to_string())
+        })
+        .expect("the row carries a compatibility column")
+    };
+
+    // Major 128 ignores it, and the row says so in words rather than in colours.
+    let legacy_id = id_of(cx, &legacy.path_buf());
+    let legacy_reading = reading(cx, legacy_id);
+    assert!(
+        legacy_reading.contains("Chrome 143 and older")
+            && legacy_reading.contains("ignores exclusion switches"),
+        "{legacy_reading}"
+    );
+
+    // A core that answered nothing has no switch set to describe, and that is a
+    // state of its own rather than a quieter version of a working core.
+    let silent_reading = reading(cx, silent_id);
+    assert!(
+        silent_reading.contains("no detected version"),
+        "{silent_reading}"
+    );
+    assert_eq!(
+        cx.update(|window, _| window
+            .find(format!("core-version-{silent_id}"))
+            .label()
+            .map(|label| label.to_string()))
+            .as_deref(),
+        Some("version unknown"),
+        "the version column says it has none rather than showing a blank"
+    );
+
+    // Major 148 is the generation that honours the exclusion switch.
+    let modern_id = id_of(cx, &modern.path_buf());
+    let modern_reading = reading(cx, modern_id);
+    assert!(
+        modern_reading.contains("Chrome 144+")
+            && modern_reading.contains("excludes spoofing switches"),
+        "{modern_reading}"
+    );
+
+    // The English the state model spells internally never reaches the window.
+    for reading in [&modern_reading, &legacy_reading, &silent_reading] {
+        assert!(
+            !reading.contains("honoured") && !reading.contains("not honoured"),
+            "the page still shows the state's own wording: {reading}"
+        );
+    }
+}
+
+/// A core's path is a value somebody has to paste somewhere, so the row copies
+/// it and the menu opens the directory it came from.
+#[gpui_kit::test]
+fn a_cores_path_can_be_copied_and_its_location_opened(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let opener = Arc::new(FakeOpener::working());
+    let (view, _runtime, opener) =
+        view_with_opener(cx, Arc::new(FakeVerifier::passing()), None, opener);
+    let cx = window(cx, &view);
+
+    let binary =
+        crate::state::testing::CoreBinary::new("ui-open-location", Some("Chromium 148.0.7778.215"));
+    view.update(cx, |view, _| {
+        view.state_mut()
+            .add_core(None, binary.path_buf())
+            .expect("the core is added");
+    });
+    cx.update(|window, cx| window.click("nav-Cores", cx));
+    settle(cx);
+    let (index, path) = view.read_with(cx, |view, _| {
+        view.state()
+            .core_rows()
+            .expect("rows")
+            .into_iter()
+            .enumerate()
+            .find(|(_, row)| row.core.executable == binary.path_buf())
+            .map(|(index, row)| (index, row.core.executable))
+            .expect("the added core is listed")
+    });
+
+    cx.update(|window, cx| window.click(format!("copy-core-path-{index}"), cx));
+    settle(cx);
+    let copied = cx
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .expect("the path is on the clipboard");
+    assert_eq!(copied, path.to_string_lossy());
+    let toast = view
+        .read_with(cx, |view, _| view.state().toasts().last().cloned())
+        .expect("the copy is acknowledged");
+    assert!(
+        toast.message.contains(&path.display().to_string()),
+        "the acknowledgement names what was copied: {}",
+        toast.message
+    );
+
+    // Opening the location goes to the directory the binary lives in: there is
+    // no portable "select this file" verb, and the folder is what a reader wants
+    // when the path is wrong.
+    core_menu(cx, index, CoreMenu::OpenLocation);
+    wait_for_state(cx, &view, |state| {
+        state
+            .log_rows()
+            .iter()
+            .any(|row| row.message.contains("Opened"))
+    });
+    let directory = path.parent().expect("a parent directory").to_path_buf();
+    assert_eq!(opener.opened(), vec![directory]);
+}
+
+/// The core row's cells line up under the headings that name them.
+#[gpui_kit::test]
+fn the_core_rows_line_up_under_the_column_headings(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+
+    cx.update(|window, cx| window.click("nav-Cores", cx));
+    settle(cx);
+    let id = view.read_with(cx, |view, _| {
+        view.state().core_rows().expect("rows")[0].core.id
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_aligned(
+            window.find("column-version").bounds().left(),
+            window.find(format!("core-version-{id}")).bounds().left(),
+            "the version column",
+        );
+        assert_aligned(
+            window.find("column-compatibility").bounds().left(),
+            window
+                .find(format!("core-compatibility-{id}"))
+                .bounds()
+                .left(),
+            "the compatibility column",
+        );
+        assert_aligned(
+            window.find("column-core-usage").bounds().left(),
+            window.find(format!("core-usage-{id}")).bounds().left(),
+            "the usage column",
+        );
+        assert_aligned(
+            window.find("column-core-actions").bounds().right(),
+            window.find("more-core-0").bounds().right(),
+            "the actions column",
+        );
+    });
 }

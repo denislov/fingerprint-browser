@@ -140,10 +140,12 @@ impl Render for CoreEditor {
         let p = palette(cx);
         let _ = cx;
         let known = self.base.as_ref().map(|core| {
+            // The same reading the Browser Cores page gives: the version the
+            // binary answered, and what that generation can be asked to spoof.
             let generation = core.capabilities().map(|capabilities| {
-                t.core_picker_label(
+                t.core_compatibility(
                     &capabilities.generation_label(),
-                    capabilities.exclusion_label(),
+                    capabilities.supports_disable_spoofing,
                 )
             });
             (core.version.clone(), generation)

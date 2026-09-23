@@ -141,10 +141,12 @@ const COLUMN_ACTIONS: f32 = 140.0;
 
 /// The height a row keeps when nothing has gone wrong.
 ///
-/// Two lines of text and room around them. A row with a warning is taller: the
-/// summary is worth the space, and the alternative is a list that hides the one
-/// thing the reader needs to see.
-const ROW_HEIGHT: f32 = 64.0;
+/// Two lines of text and room around them, and the shared [`components::ROW_HEIGHT`]
+/// rather than a number of this page's own: the Proxies page and this one are
+/// read as the same kind of table. A row with a warning is taller: the summary is
+/// worth the space, and the alternative is a list that hides the one thing the
+/// reader needs to see.
+const ROW_HEIGHT: f32 = components::ROW_HEIGHT;
 
 /// What each column holds, above the rows.
 ///

@@ -125,6 +125,72 @@ impl SettingKey {
     }
 }
 
+/// The four groups the Settings page is read in.
+///
+/// A taxonomy rather than four pages: every row and every card still exists
+/// exactly once, and the group decides which ones the reader is looking at. The
+/// order is the order the chips appear in, which is also the order a reader meets
+/// the settings: what the window looks like, what it runs, what it keeps, and
+/// what to send when something is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingGroup {
+    #[default]
+    General,
+    Runtime,
+    Data,
+    Diagnostics,
+}
+
+impl SettingGroup {
+    /// Every group, in the order the page shows them.
+    pub const ALL: [Self; 4] = [Self::General, Self::Runtime, Self::Data, Self::Diagnostics];
+
+    /// The stable id the chips and the tests are addressed by.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::General => "settings-group-general",
+            Self::Runtime => "settings-group-runtime",
+            Self::Data => "settings-group-data",
+            Self::Diagnostics => "settings-group-diagnostics",
+        }
+    }
+
+    pub fn label(self, t: &Text) -> &'static str {
+        match self {
+            Self::General => t.settings_group_general,
+            Self::Runtime => t.settings_group_runtime,
+            Self::Data => t.settings_group_data,
+            Self::Diagnostics => t.settings_group_diagnostics,
+        }
+    }
+
+    /// One line saying what the group holds, so the chip row can be read rather
+    /// than guessed at.
+    pub fn note(self, t: &Text) -> &'static str {
+        match self {
+            Self::General => t.settings_group_general_note,
+            Self::Runtime => t.settings_group_runtime_note,
+            Self::Data => t.settings_group_data_note,
+            Self::Diagnostics => t.settings_group_diagnostics_note,
+        }
+    }
+
+    /// Which group a setting's row belongs to.
+    ///
+    /// An exhaustive match rather than a `matches!` list, so adding a setting is
+    /// a compile error until it is placed - a row that belongs to no group would
+    /// simply never be shown.
+    pub fn of(key: SettingKey) -> Self {
+        match key {
+            SettingKey::XrayExecutable
+            | SettingKey::EchoUrl
+            | SettingKey::ChromiumBin
+            | SettingKey::ChromiumMajor => Self::Runtime,
+            SettingKey::DataDir | SettingKey::ConfigFile | SettingKey::RuntimeDir => Self::Data,
+        }
+    }
+}
+
 /// When a setting's change takes effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {

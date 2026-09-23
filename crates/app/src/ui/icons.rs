@@ -163,6 +163,15 @@ pub mod glyph {
     /// A state, not an action: the mark beside a failure summary.
     pub const FAILED: IconName = IconName::TriangleAlert;
 
+    // ---- the close dialog's three answers ----
+    //
+    // The window goes away, the browsers keep going, or everything stops. Each
+    // answer is drawn by a mark that already means that thing elsewhere in the
+    // window, so the dialog needs no vocabulary of its own.
+    pub const EXIT_BACKGROUND: IconName = IconName::Close;
+    pub const EXIT_KEEP_RUNNING: IconName = IconName::Play;
+    pub const EXIT_STOP_ALL: IconName = IconName::Power;
+
     // ---- the settings cards ----
     pub const APPEARANCE: IconName = IconName::Palette;
     pub const EXIT_BEHAVIOUR: IconName = IconName::Close;
@@ -238,6 +247,9 @@ mod tests {
             glyph::START,
             glyph::STOP,
             glyph::FAILED,
+            glyph::EXIT_BACKGROUND,
+            glyph::EXIT_KEEP_RUNNING,
+            glyph::EXIT_STOP_ALL,
             glyph::APPEARANCE,
             glyph::EXIT_BEHAVIOUR,
             glyph::DATA,

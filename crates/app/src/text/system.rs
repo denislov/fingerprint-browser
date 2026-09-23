@@ -1,7 +1,41 @@
 //! system messages.
 use super::*;
+use crate::exit::Exit;
 
 impl Text {
+    /// One answer's consequence, with what it costs counted.
+    ///
+    /// The count is the difference between the three answers and the reason the
+    /// dialog exists at all: "leave them running" and "stop everything" are two
+    /// words apart and opposite in effect, and only one of them is worth doing
+    /// when six browsers are up. With nothing running the standing sentence is
+    /// the whole truth, so it is used unchanged.
+    pub fn exit_choice_note(&self, exit: Exit, running: usize) -> String {
+        if running == 0 {
+            return exit.note(self).to_string();
+        }
+        match (self.lang, exit) {
+            (Lang::En, Exit::Background) => format!(
+                "The window goes away and the program keeps managing the {running} running profile(s). The tray icon brings the window back."
+            ),
+            (Lang::En, Exit::KeepRunning) => format!(
+                "The program ends; the {running} running profile(s) keep going with no window over them, and the next start takes them over."
+            ),
+            (Lang::En, Exit::ExitAll) => format!(
+                "The program ends and stops the browsers and tunnels of the {running} running profile(s)."
+            ),
+            (Lang::Zh, Exit::Background) => {
+                format!("窗口关闭，程序继续管理当前运行的 {running} 个档案。托盘图标可恢复窗口。")
+            }
+            (Lang::Zh, Exit::KeepRunning) => format!(
+                "程序结束；当前运行的 {running} 个档案继续运行且没有窗口管理，下次启动会接管它们。"
+            ),
+            (Lang::Zh, Exit::ExitAll) => {
+                format!("程序结束，并停止当前运行的 {running} 个档案的浏览器与代理隧道。")
+            }
+        }
+    }
+
     /// An argument the command line does not have.
     pub fn cli_unknown_argument(&self, argument: &str) -> String {
         match self.lang {

@@ -392,4 +392,14 @@ impl AppView {
         }
         cx.notify();
     }
+
+    /// Shows one of the Settings page's four groups.
+    ///
+    /// The choice is kept in the state rather than in the view, for the reason
+    /// the details tab is: leaving the page and coming back should not silently
+    /// move the reader to a different part of it.
+    pub(super) fn on_set_settings_group(&mut self, group: SettingGroup, cx: &mut Context<Self>) {
+        self.state.set_settings_group(group);
+        cx.notify();
+    }
 }

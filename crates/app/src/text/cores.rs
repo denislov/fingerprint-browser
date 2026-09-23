@@ -2,15 +2,6 @@
 use super::*;
 
 impl Text {
-    /// A core as the list and the picker name it: the binary's name and the
-    /// major a profile's switches are chosen against.
-    pub fn core_label(&self, name: &str, major: u32) -> String {
-        match self.lang {
-            Lang::En => format!("{name} · major {major}"),
-            Lang::Zh => format!("{name} · 主版本 {major}"),
-        }
-    }
-
     /// Confirming the removal of a core, which names what will be gone.
     pub fn delete_core_confirm(&self, name: &str, version: &str) -> String {
         match self.lang {
@@ -36,11 +27,75 @@ impl Text {
         }
     }
 
-    /// A core as the picker names it, where the major may be unknown.
-    pub fn core_picker_label(&self, name: &str, detail: &str) -> String {
+    /// A core's compatibility line: which generation it belongs to, and whether
+    /// the engine honours the switch that separates them.
+    ///
+    /// The two halves are not a translated fragment of the state model: the
+    /// generation is a name (`Chrome 144+`) and the second half is a consequence
+    /// in the reader's own language. The state never spells the English
+    /// "honoured" and this page never reads one.
+    pub fn core_compatibility(&self, generation: &str, exclusions_honoured: bool) -> String {
+        match (self.lang, exclusions_honoured) {
+            (Lang::En, true) => format!("{generation} · excludes spoofing switches"),
+            (Lang::En, false) => format!("{generation} · ignores exclusion switches"),
+            (Lang::Zh, true) => format!("{generation} · 可排除指纹开关"),
+            (Lang::Zh, false) => format!("{generation} · 会忽略排除开关"),
+        }
+    }
+
+    /// What the profile form says about the core in force: which generation it
+    /// is, and whether the exclusions the form offers will be applied.
+    pub fn core_generation_note(&self, generation: &str, exclusions_honoured: bool) -> String {
+        match (self.lang, exclusions_honoured) {
+            (Lang::En, true) => format!(
+                "{generation}; this engine honours the exclusion switch, so the exclusions below are applied"
+            ),
+            (Lang::En, false) => format!(
+                "{generation}; this engine ignores the exclusion switch, so the exclusions below have no effect"
+            ),
+            (Lang::Zh, true) => {
+                format!("{generation}；该引擎支持排除开关，下面的排除项会生效")
+            }
+            (Lang::Zh, false) => {
+                format!("{generation}；该引擎会忽略排除开关，下面的排除项不会生效")
+            }
+        }
+    }
+
+    /// Confirming a copy, naming what went to the clipboard.
+    pub fn core_path_copied(&self, path: &str) -> String {
         match self.lang {
-            Lang::En => format!("{name} · {detail}"),
-            Lang::Zh => format!("{name} · {detail}"),
+            Lang::En => format!("Copied {path}."),
+            Lang::Zh => format!("已复制 {path}。"),
+        }
+    }
+
+    /// The whole of that reading, for the tooltip on the compatibility cell.
+    ///
+    /// What the difference does to a profile, not what the switch is called: the
+    /// reader is choosing a core, and the consequence is the part that decides.
+    pub fn core_exclusions_help(&self, major: u32, exclusions_honoured: bool) -> String {
+        match (self.lang, exclusions_honoured) {
+            (Lang::En, true) => format!(
+                "Major {major} honours the exclusion switch, so a profile on this core can turn individual surfaces off."
+            ),
+            (Lang::En, false) => format!(
+                "Major {major} ignores the exclusion switch: a profile on this core keeps the whole spoofed set, and the form does not offer exclusions."
+            ),
+            (Lang::Zh, true) => {
+                format!("主版本 {major} 支持排除开关：用它启动的档案可以单独关掉某些指纹项。")
+            }
+            (Lang::Zh, false) => format!(
+                "主版本 {major} 会忽略排除开关：用它启动的档案保留全部指纹伪装，表单也不会提供排除选项。"
+            ),
+        }
+    }
+
+    /// The tooltip on a core's path: the whole path, which the column truncates.
+    pub fn core_path_help(&self, path: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{path} - use the menu beside it to copy the path"),
+            Lang::Zh => format!("{path}——可用旁边的按钮复制路径"),
         }
     }
 

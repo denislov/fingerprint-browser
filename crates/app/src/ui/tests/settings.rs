@@ -305,8 +305,9 @@ fn re_detecting_from_the_window_reports_what_it_found(cx: &mut TestAppContext) {
         .expect("the core is listed");
     assert_eq!(redetected.core.major, 128);
     assert_eq!(
-        redetected.generation_label().as_deref(),
-        Some("Chrome 143 and older · spoofing exclusions not honoured")
+        redetected.capability_parts(),
+        Some(("Chrome 143 and older".to_string(), false)),
+        "the re-detected core moved to the generation that ignores exclusions"
     );
 }
 
@@ -325,20 +326,44 @@ fn the_sidebar_switches_to_the_settings_page(cx: &mut TestAppContext) {
     settle(cx);
 
     assert!(
-        cx.update(|window, _| window.try_find("setting-data-dir").is_some()),
-        "the settings page is shown"
+        cx.update(|window, _| window.try_find("appearance").is_some()),
+        "the settings page opens on its first group"
     );
     assert!(
         cx.update(|window, _| window.try_find("profiles-scroll").is_none()),
         "the profiles body is not rendered on the settings page"
     );
     assert!(
-        cx.update(|window, _| window.try_find("setting-chromium-bin").is_some()),
-        "the read-only rows are listed too"
+        cx.update(|window, _| window.try_find("setting-data-dir").is_none()),
+        "and only that group: a row of another one is not on screen"
     );
     assert_eq!(
         view.read_with(cx, |view, _| view.state().page()),
         crate::state::Page::Settings
+    );
+
+    // Every group is a chip, and choosing one shows the rows that belong to it.
+    for group in crate::settings::SettingGroup::ALL {
+        open_settings_group(cx, group);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.state().settings_group()),
+            group,
+            "the chip selects its own group"
+        );
+        assert!(
+            cx.update(|window, _| window.try_find("settings-group-note").is_some()),
+            "the group says what it holds"
+        );
+    }
+    open_settings_group(cx, crate::settings::SettingGroup::Data);
+    assert!(
+        cx.update(|window, _| window.try_find("setting-data-dir").is_some()),
+        "the data group holds the installation's own paths"
+    );
+    open_settings_group(cx, crate::settings::SettingGroup::Runtime);
+    assert!(
+        cx.update(|window, _| window.try_find("setting-chromium-bin").is_some()),
+        "the runtime group holds the read-only rows too"
     );
 }
 
@@ -350,22 +375,26 @@ fn only_the_editable_settings_offer_a_button(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.click("nav-Settings", cx));
     settle(cx);
 
-    for key in ["xray-executable", "echo-url"] {
-        assert!(
-            cx.update(|window, _| window.try_find(format!("edit-setting-{key}")).is_some()),
-            "{key} can be changed"
-        );
-    }
-    for key in [
-        "data-dir",
-        "chromium-bin",
-        "chromium-major",
-        "config-file",
-        "runtime-dir",
-    ] {
-        assert!(
-            cx.update(|window, _| window.try_find(format!("edit-setting-{key}")).is_none()),
-            "{key} is read-only"
+    // Every row, in whichever group it lives: the group has to be shown before
+    // the row can be asked about, and the page's own partition is what says
+    // which - a row that belonged to no group would never be reached here.
+    for key in crate::settings::SettingKey::ALL {
+        open_settings_group(cx, crate::settings::SettingGroup::of(key));
+        let found = cx.update(|window, _| {
+            window
+                .try_find(format!("edit-setting-{}", key.id()))
+                .is_some()
+        });
+        assert_eq!(
+            found,
+            key.editable(),
+            "{} is {}",
+            key.id(),
+            if key.editable() {
+                "editable and offers a button"
+            } else {
+                "read-only and offers none"
+            }
         );
     }
     let _ = view;
@@ -381,6 +410,7 @@ fn a_setting_can_be_changed_from_the_window(cx: &mut TestAppContext) {
 
     cx.update(|window, cx| window.click("nav-Settings", cx));
     settle(cx);
+    open_settings_group(cx, crate::settings::SettingGroup::Runtime);
     cx.update(|window, cx| window.click("edit-setting-xray-executable", cx));
     settle(cx);
     assert!(
@@ -499,6 +529,7 @@ fn choosing_a_language_repaints_and_leaves_the_identifiers_alone(cx: &mut TestAp
         cx.update(|window, _| window.try_find("nav-Settings").is_some()),
         "the page identifier did not move"
     );
+    open_settings_group(cx, crate::settings::SettingGroup::Data);
     assert!(
         cx.update(|window, _| window.try_find("setting-data-dir").is_some()),
         "a setting's row identifier did not move either"
@@ -721,4 +752,60 @@ fn a_desktop_without_a_tray_keeps_the_window(cx: &mut TestAppContext) {
             notice.message
         );
     });
+}
+
+/// The close question says what each answer costs with the profiles that are
+/// running right now.
+///
+/// The three answers are one word apart and opposite in effect, and a reader
+/// looking at a browser already up has to be able to tell which one stops it.
+/// The count is not a decoration: "leave them running" is the same sentence
+/// whether nothing or six are up, and only one of those is worth reading twice.
+#[gpui_kit::test]
+fn the_close_question_counts_what_is_running(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = std::env::temp_dir().join(format!("fp-ui-exit-count-{}", std::process::id()));
+    let (view, _runtime) = view_with_config(cx, &dir.join("config.json"));
+    let cx = window(cx, &view);
+
+    let id = seed_profile(cx, &view);
+    cx.update(|window, cx| window.click(format!("start-{id}"), cx));
+    wait_for_state(cx, &view, |state| {
+        state
+            .row(id)
+            .is_some_and(|row| row.state() == RuntimeState::Running)
+    });
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| view.on_close_requested(window, cx));
+    });
+    settle(cx);
+    let asked = cx.update(|window, _| {
+        ["background", "keep-running", "exit-all"]
+            .into_iter()
+            .map(|code| {
+                window
+                    .find(format!("exit-choice-{code}"))
+                    .label()
+                    .map(|label| label.to_string())
+                    .unwrap_or_else(|| panic!("{code} is one of the answers"))
+            })
+            .collect::<Vec<_>>()
+    });
+    for answer in &asked {
+        assert!(
+            answer.contains('1') && answer.contains("running profile"),
+            "each answer says what it does to the profile that is up: {answer}"
+        );
+    }
+    assert!(
+        asked[2].contains("stops the browsers"),
+        "and the one that stops them says so: {}",
+        asked[2]
+    );
+    assert!(
+        !asked[0].contains("stops"),
+        "while the one that leaves them alone does not: {}",
+        asked[0]
+    );
 }
