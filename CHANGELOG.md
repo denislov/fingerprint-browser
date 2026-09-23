@@ -11,6 +11,26 @@ section before its tag is cut - the release workflow refuses a tag the changelog
 says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
+### Added
+
+- The window answers the keyboard. A profile row is a target now: Tab reaches it,
+  Enter opens the panel that describes it, and Escape puts that panel away and
+  gives the keyboard back to the row it came from - as does closing it with the
+  pointer. Which row the keyboard is on is drawn as the ring the rest of the
+  window's controls use, which is deliberately not the same thing as the row being
+  chosen: a reader can see both at once, and tell them apart. Two keys belong to
+  the window rather than to any control, and are bound without a key context so
+  that a dialog, a menu or a dropdown - all of which bind the same key themselves -
+  win over them: **Ctrl+F** puts the keyboard in the profile filter, switching to
+  the page that has the field first, and **Escape** closes the top layer, which
+  means the dialog when one is open and the details panel otherwise, and never the
+  window. A window that opens with nothing focused answers Tab with nothing at all
+  - keys are matched along the path from the focused element, and there is no path
+  - so the first frame puts the keyboard on the view itself, which is not a tab
+  stop, and Tab from there reaches the first control in the sidebar. A row's focus
+  handle is kept per profile rather than made per frame: a handle made fresh each
+  frame would drop the keyboard at every runtime poll, and the test for that is
+  `the_keyboard_stays_on_its_row_when_the_runtime_reports`.
 
 ### Fixed
 
@@ -79,6 +99,18 @@ says nothing about, and the notes are that section rather than the whole file.
   started through an injected starter (`tray::TrayStarter`), a refusal keeps the
   window on screen, and the banner names the desktop's own reason. The behaviour
   is pinned by a test that hands the window a starter which always fails.
+
+
+- A long banner no longer pushes its own dismiss button off the window. The
+  message for three missing cores is a page of text, and with nothing in the row
+  allowed to shrink it took the whole width and carried the button past the edge,
+  which left a failure the reader could not put away. The sentence truncates with
+  the whole of it on its tooltip, and the log keeps it in full.
+- The New Profile dialog is titled and confirmed in the interface's own language.
+  It said **New profile** and **Create** in English whatever the language was set
+  to, because the two strings were passed to the dialog as literals instead of
+  coming from the message catalogue; the profile editor's platform fields were
+  hardcoded the same way.
 
 ### Changed
 

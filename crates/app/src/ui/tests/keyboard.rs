@@ -257,3 +257,81 @@ fn the_keyboard_stays_on_its_row_when_the_runtime_reports(cx: &mut TestAppContex
         "and the row still says which profile it is"
     );
 }
+
+/// Every control that is only an icon says what it is, for the keyboard.
+///
+/// The plan asks that an unlabelled control carry a localized tooltip *and* an
+/// accessible name. The tooltip is the component library's and shows on hover;
+/// the name is what a reader who is not using a pointer gets, and it is what
+/// this holds: an icon a keyboard user can reach but cannot identify is a
+/// control they cannot use.
+#[gpui_kit::test]
+fn every_icon_only_control_has_a_name(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let profile = seed_profile(cx, &view);
+    let cx = window(cx, &view);
+
+    // The pages carry their own icon-only controls; the sidebar's overflow menu
+    // is the one that is always there.
+    for id in [
+        "brand-more".to_string(),
+        format!("more-{profile}"),
+        "nav-Settings".to_string(),
+    ] {
+        let name = cx.update(|window, _| window.find(id.clone()).label().map(str::to_string));
+        assert!(
+            matches!(name.as_deref(), Some(name) if !name.is_empty()),
+            "{id} is named: {name:?}"
+        );
+    }
+
+    // A row's menu names the row it belongs to, rather than saying "More" and
+    // leaving the reader to guess which of a hundred rows it opens.
+    let menu = cx.update(|window, _| {
+        window
+            .find(format!("more-{profile}"))
+            .label()
+            .map(str::to_string)
+    });
+    assert!(
+        menu.as_deref()
+            .is_some_and(|name| name.contains("Profile 1")),
+        "the row's menu says which row it is: {menu:?}"
+    );
+}
+
+/// A long notice cannot push its own dismiss button off the window.
+///
+/// The message is not bounded by anything the banner knows: the one that names
+/// every core the window could not find is a page of text. Without a shrinking
+/// child it takes the row and the button that puts it away goes past the edge of
+/// the window, which is a banner a reader cannot close.
+#[gpui_kit::test]
+fn a_long_notice_still_leaves_its_dismiss_button_on_screen(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    let message =
+        "浏览器内核的可执行文件已缺失：".to_string() + &"a-very-long-path/".repeat(30) + "chrome";
+    view.update(cx, |view, _| {
+        view.state_mut().push_notice(message, true);
+    });
+    settle(cx);
+
+    let (button, message, window_width) = cx.update(|window, _| {
+        (
+            window.find("dismiss-notice").bounds(),
+            window.find("notice-message").bounds(),
+            window.viewport_size().width,
+        )
+    });
+    assert!(
+        button.origin.x + button.size.width <= window_width,
+        "the dismiss button is inside the window: {button:?} against {window_width:?}"
+    );
+    assert!(
+        message.origin.x + message.size.width <= button.origin.x,
+        "and the sentence is the part that gives, not the button: {message:?} against {button:?}"
+    );
+}

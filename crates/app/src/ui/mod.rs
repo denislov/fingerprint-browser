@@ -1045,7 +1045,11 @@ fn push_toasts(toasts: &[Toast], window: &mut Window, cx: &mut App) {
     }
 }
 
-fn notice_banner(notice: crate::state::Notice, cx: &mut Context<AppView>, t: &Text) -> Div {
+fn notice_banner(
+    notice: crate::state::Notice,
+    cx: &mut Context<AppView>,
+    t: &Text,
+) -> impl IntoElement {
     let p = palette(cx);
     let (background, foreground) = if notice.error {
         (p.danger_bg, p.danger)
@@ -1053,7 +1057,13 @@ fn notice_banner(notice: crate::state::Notice, cx: &mut Context<AppView>, t: &Te
         (p.panel, p.secondary)
     };
 
+    // A banner is one line high and the sentence in it has no bound: the message
+    // for three missing cores is a page of text, and without a shrinking child
+    // it pushes the button that dismisses it off the edge of the window. The
+    // whole sentence stays reachable - on the tooltip, and in the activity log,
+    // which is where a failure this long is worth reading anyway.
     div()
+        .id("notice")
         .flex()
         .items_center()
         .justify_between()
@@ -1064,8 +1074,14 @@ fn notice_banner(notice: crate::state::Notice, cx: &mut Context<AppView>, t: &Te
         .bg(rgb(background))
         .child(
             div()
+                .id("notice-message")
+                .test_support()
+                .flex_1()
+                .min_w_0()
+                .truncate()
                 .text_xs()
                 .text_color(rgb(foreground))
+                .tooltip(components::tooltip(notice.message.clone()))
                 .child(notice.message),
         )
         .child(

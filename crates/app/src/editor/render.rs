@@ -334,7 +334,7 @@ impl Render for ProfileEditor {
                 |editor, value| editor.brand = value,
                 p,
             )))
-            .child(Field::new().label("Platform").child(choice_row(
+            .child(Field::new().label(t.platform_field).child(choice_row(
                 editor.clone(),
                 "editor-platform",
                 &PLATFORMS,
@@ -402,10 +402,10 @@ impl Render for ProfileEditor {
                     ),
             )
             .child(
-                Field::new().label("Platform version").child(
+                Field::new().label(t.platform_version_field).child(
                     Input::new(&self.platform_version)
                         .id("editor-platform-version")
-                        .aria_label("Platform version"),
+                        .aria_label(t.platform_version_field),
                 ),
             )
             .child(

@@ -601,7 +601,7 @@ impl AppView {
         let name = self.state.next_profile_name();
         let editor =
             cx.new(|cx| ProfileEditor::new_profile(&name, core, &cores, &proxies, t, window, cx));
-        self.open_profile_form(editor, "New profile", "Create", window, cx);
+        self.open_profile_form(editor, t.new_profile, t.create, window, cx);
     }
 
     pub(super) fn on_verify(&mut self, id: ProfileId, cx: &mut Context<Self>) {

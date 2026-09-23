@@ -213,6 +213,7 @@ catalog! {
         => "当前生效的值及其来源。环境变量优先于配置文件，行上会注明。";
     change => "Change" => "修改";
     save => "Save" => "保存";
+    create => "Create" => "创建";
     cancel => "Cancel" => "取消";
     dismiss => "Dismiss" => "知道了";
 
@@ -495,6 +496,8 @@ catalog! {
         => "驱动该档案声明的所有易变指纹项。";
     brand_field => "Brand" => "品牌";
     brand_version => "Brand version" => "品牌版本";
+    platform_field => "Platform" => "平台";
+    platform_version_field => "Platform version" => "平台版本";
     brand_version_help => "Reported to pages only when a brand is set. Blank means the engine's own."
         => "仅在设置了品牌时报告给页面。留空表示沿用引擎自身的值。";
     accept_language => "Accept language" => "接受语言";
