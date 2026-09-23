@@ -20,14 +20,6 @@ impl Text {
         }
     }
 
-    /// A profile's row: its state, and the path its traffic takes.
-    pub fn profile_meta_proxy(&self, state: &str, proxy: &str) -> String {
-        match self.lang {
-            Lang::En => format!("{state} · proxy: {proxy}"),
-            Lang::Zh => format!("{state} · 代理：{proxy}"),
-        }
-    }
-
     /// A proxy reading: what was measured, and through which engine.
     pub fn proxy_test_reading(&self, reading: &str, scope: &str) -> String {
         match self.lang {

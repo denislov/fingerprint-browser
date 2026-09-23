@@ -45,6 +45,42 @@ fn a_confirmed_fingerprint_is_reported_in_the_window(cx: &mut TestAppContext) {
 /// Verifying a proxied profile also asks where its traffic leaves from. The
 /// expectation is the address the proxy was measured at, because that is the
 /// only place in the product that knows where the traffic should have gone.
+/// The same reading is asked for from the row's menu.
+///
+/// The panel is where the reading is read, but it is not the only way to ask
+/// for one: everything a row does and does not show lives in its own menu, and
+/// the two routes have to end in the same place.
+#[gpui_kit::test]
+fn a_profile_can_be_verified_from_its_row_menu(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let verifier = Arc::new(FakeVerifier::passing());
+    let (view, runtime) = view_with_verifier(cx, verifier.clone());
+    let cx = window(cx, &view);
+
+    let id = seed_profile(cx, &view);
+    cx.update(|window, cx| window.click(format!("start-{id}"), cx));
+    wait_for_state(cx, &view, |state| {
+        state
+            .row(id)
+            .is_some_and(|row| row.state() == RuntimeState::Running)
+    });
+    runtime.set_cdp_port(id, 9333);
+    view.update(cx, |view, cx| {
+        view.state_mut().refresh_runtime();
+        cx.notify();
+    });
+    settle(cx);
+
+    profile_menu(cx, id, ProfileMenu::Verify);
+    wait_for_verification(cx, &view);
+
+    assert_eq!(verifier.calls(), 1, "the menu asks for the same reading");
+    assert!(
+        view.read_with(cx, |view, _| view.state().verification(id).is_some()),
+        "and the answer lands where the panel reads it"
+    );
+}
+
 #[gpui_kit::test]
 fn verifying_a_proxied_profile_asks_the_endpoint_its_proxy_was_tested_at(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
@@ -172,8 +208,16 @@ fn every_disagreement_is_reachable_from_a_short_panel(cx: &mut TestAppContext) {
         window.render_frame(cx);
 
         // A panel that only ever showed the first few claims would hide
-        // the rest of the answer. The list is longer than the panel, so the
-        // later claims become visible by scrolling, not by being dropped.
+        // the rest of the answer. The findings sit below the profile's own
+        // readings - the answer to "did it check out" is longer than the
+        // window - so they are reached by scrolling rather than by being cut
+        // down to what happens to fit.
+        window.scroll(
+            "details-scroll",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(-600.0))),
+            cx,
+        );
+        window.render_frame(cx);
         assert!(
             window.find(("disagreement", 0usize)).visible(),
             "the first claim is rendered"

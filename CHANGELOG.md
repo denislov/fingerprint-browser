@@ -185,6 +185,44 @@ says nothing about, and the notes are that section rather than the whole file.
   the runtime would refuse them. The proxy and core rows do the same, keeping
   their one repeated action (Test, Re-detect) and moving the once-per-object ones
   into a menu.
+- The Runtime Details panel is opened by choosing a profile and closed by the
+  reader, and where it appears depends on the window. It used to be drawn under
+  the list at a fixed height of up to 320 pixels whether or not anybody was
+  reading it, so the list paid for it on every frame and the panel spent most of
+  its life showing a profile nobody had asked about. A window with room for both
+  now gives it a 380-pixel column beside the list and keeps the two in view
+  together; a narrower one lets it take the list's place and carries a **Back to
+  the list** button, because a panel narrow enough to leave a readable list
+  beside it would not be worth reading itself. The panel's own header names the
+  profile rather than the words "Runtime Details", repeats its state for the
+  covering case where the row is hidden, and holds the two controls that belong
+  to the panel: asking for a fingerprint reading, and putting it away. The rest -
+  edit, duplicate, open the data directory, delete - stayed where the row's menu
+  already had them, the data directory's own value carries the button that opens
+  it, the launch line carries **Copy args**, and the panel is now three groups -
+  configuration, runtime, verification - instead of one seventeen-row list.
+- A profile row is a row of columns. It was a card per profile with two lines of
+  text on the left and a pile of badges, warnings and buttons on the right, which
+  is to say no columns at all: nothing could be compared down the page. The list
+  now has headings - profile, proxy, state, actions - and every row puts its name
+  and engine, its route, its state and its one action under them, on the same
+  lines at the same widths. The seed, the platform and the launch details that
+  the row used to carry moved into the panel, which is where a reader who wants
+  them is going; the error summary stayed, shortened to the column and complete on
+  its tooltip, because a row that cannot say something is wrong is worse than a
+  row that is not perfectly even.
+- The profile form is three groups with the overrides folded away, and its two
+  resources are chosen rather than read. Seventeen fields in one column put the
+  accept-language and the CPU count at the same level as the name and the engine,
+  and offered every installed core and every saved proxy as a row of chips - a
+  list that grows with each engine and each provider, which is a list nobody
+  scans. The form is now **Profile** (name, core, proxy), **Fingerprint** (seed,
+  brand, platform, language, timezone, window, WebRTC) and **Advanced overrides**
+  (brand and platform versions, accept-language, CPU cores, excluded spoofing),
+  folded until they are wanted and marked **modified** when one of them has been
+  changed away from what the profile arrived with. The core and the proxy are
+  searchable selectors; a profile whose core or proxy is gone still shows it and
+  says so rather than silently reading as something else.
 
 ## [0.1.0] - 2026-09-22
 

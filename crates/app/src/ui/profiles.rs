@@ -128,6 +128,75 @@ pub(super) fn empty_hint(
     Some(state.render(p))
 }
 
+/// The widths the list's columns keep, so a row and the heading above it line
+/// up and every value starts in the same place down the page.
+///
+/// The name column is the one that gives: it takes what is left, so a wider
+/// window widens the names rather than stretching the columns of state and
+/// action. The fixed three are sized for the longest thing they hold in either
+/// language - a proxy name, "Stopping" with its badge, a button beside its menu.
+const COLUMN_ROUTE: f32 = 150.0;
+const COLUMN_STATE: f32 = 190.0;
+const COLUMN_ACTIONS: f32 = 140.0;
+
+/// The height a row keeps when nothing has gone wrong.
+///
+/// Two lines of text and room around them. A row with a warning is taller: the
+/// summary is worth the space, and the alternative is a list that hides the one
+/// thing the reader needs to see.
+const ROW_HEIGHT: f32 = 64.0;
+
+/// What each column holds, above the rows.
+///
+/// The widths here are the rows' widths, and the transparent border is the
+/// row's own border: without it the heading would sit one pixel to the left of
+/// every value under it.
+pub(super) fn list_header(p: Palette, t: &Text) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_4()
+        .px_4()
+        .py_2()
+        .border_1()
+        .border_color(hsla(0.0, 0.0, 0.0, 0.0))
+        .text_xs()
+        .text_color(rgb(p.dim))
+        .child(
+            div()
+                .id("column-profile")
+                .test_support()
+                .flex_1()
+                .min_w_0()
+                .child(t.column_profile),
+        )
+        .child(
+            div()
+                .id("column-proxy")
+                .test_support()
+                .w(px(COLUMN_ROUTE))
+                .flex_shrink_0()
+                .child(t.field_proxy),
+        )
+        .child(
+            div()
+                .id("column-state")
+                .test_support()
+                .w(px(COLUMN_STATE))
+                .flex_shrink_0()
+                .child(t.field_state),
+        )
+        .child(
+            div()
+                .id("column-actions")
+                .test_support()
+                .w(px(COLUMN_ACTIONS))
+                .flex_shrink_0()
+                .text_right()
+                .child(t.column_actions),
+        )
+}
+
 pub(super) fn profile_list(
     rows: &[ProfileRow],
     selected_id: Option<ProfileId>,
@@ -149,10 +218,10 @@ pub(super) fn profile_list(
                 .test_support()
                 .flex()
                 .items_center()
-                .justify_between()
-                .gap_3()
+                .gap_4()
                 .px_4()
-                .py_3()
+                .py_2()
+                .min_h(px(ROW_HEIGHT))
                 .rounded(px(components::RADIUS_SURFACE))
                 .border_1()
                 .border_color(rgb(if is_selected { p.accent } else { p.border }))
@@ -162,11 +231,14 @@ pub(super) fn profile_list(
                 })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.on_select(id, cx)))
+                // What the profile is: the name, and the engine under it. The
+                // seed and the platform it claims are details, not a byline.
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
+                        .flex_1()
                         .min_w_0()
                         .child(
                             div()
@@ -175,68 +247,85 @@ pub(super) fn profile_list(
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(row.profile.name.clone()),
                         )
-                        // What the row is *for* comes before how it was made: the
-                        // core and the route are the answer to "which one is
-                        // this", and the seed is the detail behind it.
                         .child(
                             div()
                                 .truncate()
                                 .text_xs()
                                 .text_color(rgb(p.muted))
-                                .child(route_label(row, t)),
-                        )
-                        .child(div().truncate().text_xs().text_color(rgb(p.dim)).child(
-                            t.profile_seed_line(
-                                row.profile.fingerprint.seed,
-                                row.profile.fingerprint.brand,
-                                row.profile.fingerprint.platform,
-                            ),
-                        )),
+                                .child(row.core_name.clone()),
+                        ),
+                )
+                // Where its traffic goes. "Direct" is said rather than left
+                // blank: an empty cell reads as missing information.
+                .child(
+                    div()
+                        .id(format!("route-{id}"))
+                        .test_support()
+                        .w(px(COLUMN_ROUTE))
+                        .flex_shrink_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(rgb(if row.proxy_name.is_some() {
+                            p.text_soft
+                        } else {
+                            p.muted
+                        }))
+                        .child(
+                            row.proxy_name
+                                .clone()
+                                .unwrap_or_else(|| t.direct.to_string()),
+                        ),
                 )
                 .child(
                     div()
+                        .w(px(COLUMN_STATE))
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap_1()
+                        .child(state_badge(row, p, t))
+                        .children(verification_badge(verifications.get(&id), p, t))
+                        .children(signal_line(row, p, t)),
+                )
+                .child(
+                    div()
+                        .w(px(COLUMN_ACTIONS))
+                        .flex_shrink_0()
                         .flex()
                         .items_center()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_end()
-                                .gap_1()
-                                .child(state_badge(row, p, t))
-                                .children(verification_badge(verifications.get(&id), p, t))
-                                .children(row.last_warning().map(|warning| {
-                                    // The full text lives in Runtime Details; the row
-                                    // only needs to say that something is off.
-                                    div()
-                                        .id(format!("warning-{id}"))
-                                        .test_support()
-                                        .max_w(px(WARNING_WIDTH))
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(rgb(p.warning))
-                                        .child(t.warning_line(warning))
-                                }))
-                                .children(row.last_error().map(|error| {
-                                    // A mark as well as a colour: the summary
-                                    // is the one line in the row that says
-                                    // something is wrong, and it should read
-                                    // that way without relying on red.
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .max_w(px(WARNING_WIDTH))
-                                        .text_xs()
-                                        .text_color(rgb(p.danger_strong))
-                                        .child(icons::action(icons::glyph::FAILED))
-                                        .child(div().truncate().child(error.to_string()))
-                                })),
-                        )
+                        .justify_end()
                         .child(row_actions(row, verifications, cx, t)),
                 )
         }))
+}
+
+/// The one summary line a row gets when something is wrong.
+///
+/// The full text is in the details panel; what the row owes the reader is
+/// enough to tell a warning from a failure without being pushed out of shape by
+/// the longest error the runtime can produce. The whole sentence is on the
+/// tooltip, so it is still reachable without opening anything.
+fn signal_line(row: &ProfileRow, p: Palette, t: &Text) -> Option<impl IntoElement> {
+    let (colour, label) = match (row.last_error(), row.last_warning()) {
+        (Some(error), _) => (p.danger_strong, t.error_line(error)),
+        (None, Some(warning)) => (p.warning, t.warning_line(warning)),
+        (None, None) => return None,
+    };
+    Some(
+        div()
+            .id(format!("warning-{}", row.profile.id))
+            .test_support()
+            .flex()
+            .items_center()
+            .gap_1()
+            .max_w(px(COLUMN_STATE))
+            .text_xs()
+            .text_color(rgb(colour))
+            .tooltip(components::tooltip(label.clone()))
+            .child(icons::action(icons::glyph::FAILED))
+            .child(div().truncate().child(label)),
+    )
 }
 
 /// The one action a row offers, and everything else behind its menu.
@@ -367,13 +456,6 @@ fn row_menu(
                 move |view, window, cx| view.on_delete(id, window, cx),
             ))
         })
-}
-
-pub(super) fn route_label(row: &ProfileRow, t: &Text) -> String {
-    match &row.proxy_name {
-        Some(proxy) => t.profile_meta_proxy(&row.core_name, proxy),
-        None => t.profile_meta_direct(&row.core_name),
-    }
 }
 
 /// The profile's state, as the row shows it.

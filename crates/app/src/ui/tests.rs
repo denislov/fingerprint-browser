@@ -421,6 +421,72 @@ fn type_import_path(
     settle(cx);
 }
 
+/// One item of a profile row's overflow menu.
+///
+/// Named rather than numbered at the call site: the menu is a list of meanings,
+/// and a test that said "click 6" the day the menu gained an entry would be
+/// asserting the wrong row's deletion. The numbering is the menu's own order,
+/// separator included, and it lives here where the menu is what it describes.
+#[derive(Clone, Copy)]
+enum ProfileMenu {
+    Edit,
+    Duplicate,
+    OpenDir,
+    Verify,
+    Delete,
+}
+
+impl ProfileMenu {
+    /// Where the item sits in the open menu.
+    #[allow(dead_code)]
+    fn index(self) -> usize {
+        match self {
+            Self::Edit => 0,
+            Self::Duplicate => 1,
+            Self::OpenDir => 2,
+            Self::Verify => 3,
+            // The separator between restarting and removing takes a place of
+            // its own in the popup's rows.
+            Self::Delete => 6,
+        }
+    }
+}
+
+/// Commits a choice in the profile form's proxy selector.
+///
+/// The form's two selectors are searchable lists, and the component library
+/// builds a row only once its popup has been laid out - which a test window does
+/// not do for the layer above a dialog. The tests therefore commit the choice
+/// through the selector's own state, which is where the form reads it from, and
+/// the popup itself is checked in a real window.
+///
+/// `None` is the direct connection.
+fn pick_proxy(
+    cx: &mut gpui_kit::VisualTestContext,
+    view: &gpui_kit::Entity<AppView>,
+    id: Option<ProxyId>,
+) {
+    let editor = view.read_with(cx, |view, _| view.editor()).expect("a form");
+    let select = editor.read_with(cx, |editor, _| editor.proxy_select());
+    cx.update(|window, cx| {
+        select.update(cx, |select, cx| {
+            select.set_selected_values(&[id], window, cx);
+        });
+    });
+}
+
+/// Opens a profile row's menu and clicks one item of it.
+///
+/// This is the path a user takes for everything a row does not show: the menu
+/// is opened by its own button and its items are popup rows, so a test has to
+/// open it and click inside it rather than reaching for an id.
+fn profile_menu(cx: &mut gpui_kit::VisualTestContext, id: ProfileId, item: ProfileMenu) {
+    cx.update(|window, cx| window.click(format!("more-{id}"), cx));
+    settle(cx);
+    cx.update(|window, cx| window.within("popup-menu").click(item.index(), cx));
+    settle(cx);
+}
+
 /// The band along the bottom edge of the window where a click does not reach
 /// what is under it.
 ///

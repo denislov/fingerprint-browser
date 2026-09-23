@@ -283,10 +283,9 @@ fn assigning_a_proxy_from_the_profile_editor_reaches_storage(cx: &mut TestAppCon
     cx.update(|window, cx| window.click("nav-Profiles", cx));
     settle(cx);
     let id = seed_profile(cx, &view);
-    cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
-    settle(cx);
+    profile_menu(cx, id, ProfileMenu::Edit);
 
-    cx.update(|window, cx| window.click("editor-proxy-0", cx));
+    pick_proxy(cx, &view, Some(proxy_id));
     settle(cx);
     cx.update(|window, cx| window.click("ok", cx));
     settle(cx);
@@ -327,9 +326,11 @@ fn deleting_a_proxy_in_use_is_refused_in_the_window(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.click("nav-Profiles", cx));
     settle(cx);
     let id = seed_profile(cx, &view);
-    cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
-    settle(cx);
-    cx.update(|window, cx| window.click("editor-proxy-0", cx));
+    let proxy_id = view.read_with(cx, |view, _| {
+        view.state().proxy_rows().expect("rows")[0].proxy.id
+    });
+    profile_menu(cx, id, ProfileMenu::Edit);
+    pick_proxy(cx, &view, Some(proxy_id));
     settle(cx);
     cx.update(|window, cx| window.click("ok", cx));
     settle(cx);

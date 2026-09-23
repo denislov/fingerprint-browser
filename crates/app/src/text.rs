@@ -422,6 +422,23 @@ catalog! {
     diag_write => "Write report" => "写出报告";
 
     // ---- the profile editor ----
+    //
+    // The form is three groups now, and the two that pick a stored resource are
+    // searched rather than read: an installed engine and a saved proxy are both
+    // lists that grow, and a list that grows is a list nobody scans.
+    form_group_basics => "Profile" => "档案信息";
+    form_group_fingerprint => "Fingerprint" => "指纹";
+    form_group_advanced => "Advanced overrides" => "高级覆盖值";
+    form_modified => "modified" => "已修改";
+    editor_core_placeholder => "Choose a browser core" => "选择浏览器内核";
+    editor_core_search => "Search cores…" => "搜索内核……";
+    editor_proxy_placeholder => "Direct connection" => "直连";
+    editor_proxy_search => "Search proxies…" => "搜索代理……";
+    editor_no_match => "Nothing here matches that name." => "没有匹配该名称的选项。";
+    core_answered_no_version => "This core answered no version, so a profile on it cannot be started until one is recorded."
+        => "这个内核没有回报版本号；在记录版本之前，用它启动不了档案。";
+    core_no_longer_registered => "The core this profile was on is no longer registered; pick another one before saving."
+        => "该档案原来使用的内核已不在列表中；请在保存前另选一个。";
     name_field => "Name" => "名称";
     profile_name => "Profile name" => "档案名称";
     browser_core => "Browser core" => "浏览器内核";
@@ -529,6 +546,17 @@ catalog! {
     // ---- the Runtime Details panel ----
     details_empty => "Select a profile to inspect its runtime." => "选择一个档案以查看它的运行状态。";
     runtime_details => "Runtime Details" => "运行详情";
+    details_close => "Close details" => "关闭详情";
+    details_back => "Back to the list" => "返回列表";
+    details_group_configuration => "Configuration" => "基本配置";
+    details_group_runtime => "Runtime" => "运行信息";
+    details_group_verification => "Verification" => "校验结果";
+    panel_log_empty => "Nothing has been logged for this profile yet. The Log page has the whole session, including the window's own lines."
+        => "还没有该档案的日志。整段会话（含窗口自身的记录）在「活动日志」页。";
+    fingerprint_unverified => "Fingerprint not verified in this session. Verification reads the running browser in its own tab and compares it with the profile."
+        => "本次会话还没有校验指纹。校验会打开运行中浏览器的一个标签页读取实际值，并与档案声明的内容比对。";
+    column_profile => "Profile" => "档案";
+    column_actions => "Actions" => "操作";
     copy_args => "Copy args" => "复制参数";
     open_data_dir => "Open data dir" => "打开数据目录";
     verify_fingerprint => "Verify fingerprint" => "校验指纹";

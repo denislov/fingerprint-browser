@@ -134,6 +134,11 @@ pub mod glyph {
     pub const ABOUT: IconName = IconName::Info;
     pub const CLOSE_WINDOW: IconName = IconName::Close;
     pub const QUIT_ALL: IconName = IconName::Power;
+    /// Leaving a panel that has taken the place of the thing it describes.
+    pub const BACK: IconName = IconName::ArrowLeft;
+    /// A group that is closed, and one that is open.
+    pub const EXPAND: IconName = IconName::ChevronRight;
+    pub const COLLAPSE: IconName = IconName::ChevronDown;
 
     // ---- the pages' primary actions ----
     pub const NEW: IconName = IconName::Plus;
@@ -212,6 +217,9 @@ mod tests {
             glyph::ABOUT,
             glyph::CLOSE_WINDOW,
             glyph::QUIT_ALL,
+            glyph::BACK,
+            glyph::EXPAND,
+            glyph::COLLAPSE,
             glyph::NEW,
             glyph::TEST,
             glyph::REDETECT,

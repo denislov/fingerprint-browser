@@ -370,6 +370,18 @@ pub fn icon_button(
         .accessibility_label(label)
 }
 
+/// A tooltip for any element, holding the words that element is named by.
+///
+/// The component library's own tooltip renderer rather than the window's: a
+/// tooltip that looked like nothing else in the window would be a second visual
+/// language for one hover.
+pub fn tooltip(
+    label: impl Into<SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let label: SharedString = label.into();
+    move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+}
+
 /// One item of a row's menu, bound to the object the row stands for.
 ///
 /// The closure receives the window rather than capturing it: every action a row

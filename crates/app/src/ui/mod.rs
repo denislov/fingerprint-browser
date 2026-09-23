@@ -46,10 +46,16 @@ use std::time::{Duration, SystemTime};
 const TICK: Duration = Duration::from_millis(200);
 /// Full reconciliation every N ticks, for any notification that was dropped.
 const RECONCILE_EVERY: u64 = 5;
-/// Cap on the per-row warning line; the full text is in Runtime Details.
-const WARNING_WIDTH: f32 = 420.0;
 /// Wide enough for a profile name or a proxy name without crowding the title.
 const PROFILE_FILTER_WIDTH: f32 = 320.0;
+
+/// The window width at which the details panel can sit beside the list.
+///
+/// The sum is the sidebar, the page's padding on both sides, the panel, the gap
+/// between the two columns and the list: 200 + 48 + 380 + 16 + 720. Below it the
+/// panel covers the list instead, because a list narrower than that cannot show
+/// four columns of anything.
+const DETAILS_DOCK_MIN: f32 = 1364.0;
 
 pub struct AppView {
     /// The editor behind the open dialog, if any.
@@ -387,7 +393,7 @@ mod workers;
 use self::cores::{cores_body, cores_header};
 use self::details::details_panel;
 use self::logs::{format_age, logs_body, logs_header};
-use self::profiles::{empty_hint, profile_list, profiles_header};
+use self::profiles::{empty_hint, list_header, profile_list, profiles_header};
 use self::proxies::{proxies_body, proxies_header};
 use self::settings::{SettingsCards, SettingsExport, exit_choice, settings_body, settings_header};
 use gpui_kit::assets::IconName;
@@ -411,6 +417,11 @@ impl Render for AppView {
 
         let t = self.state.text();
         let p = palette(cx);
+        // Where the details panel goes: beside the list when the window has
+        // room for both, over it when a readable list and a readable panel
+        // cannot both fit. Measured on every frame, so resizing the window moves
+        // the panel rather than requiring a restart.
+        let docked = window.viewport_size().width.as_f32() >= DETAILS_DOCK_MIN;
         // The overlay layers live above the view and are rendered by the view
         // itself: without these, a dialog can be opened and never appear.
         let dialogs = Root::render_dialog_layer(window, cx);
@@ -539,48 +550,91 @@ impl Render for AppView {
                                 ))
                             })
                             .when(page == Page::Profiles, |this| {
-                                this.child(
-                                    div()
-                                        .id("profiles-scroll")
-                                        .flex()
-                                        .flex_col()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .gap_2()
-                                        .overflow_y_scroll()
-                                        .children(empty_hint(
-                                            total,
-                                            visible.len(),
-                                            has_core,
-                                            &filter,
-                                            cx,
-                                            p,
-                                            t,
-                                        ))
-                                        .child(profile_list(
-                                            &visible,
-                                            selected_id,
-                                            &verifications,
-                                            cx,
-                                            p,
-                                            t,
-                                        )),
-                                )
-                                .child(details_panel(
-                                    selected.as_ref(),
-                                    verification,
-                                    details_tab,
-                                    &log_tail,
-                                    cx,
-                                    p,
-                                    t,
-                                ))
+                                let list = div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .gap_2()
+                                    .when(!visible.is_empty(), |this| this.child(list_header(p, t)))
+                                    .child(
+                                        div()
+                                            .id("profiles-scroll")
+                                            .test_support()
+                                            .flex()
+                                            .flex_col()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .gap_2()
+                                            .overflow_y_scroll()
+                                            .children(empty_hint(
+                                                total,
+                                                visible.len(),
+                                                has_core,
+                                                &filter,
+                                                cx,
+                                                p,
+                                                t,
+                                            ))
+                                            .child(profile_list(
+                                                &visible,
+                                                selected_id,
+                                                &verifications,
+                                                cx,
+                                                p,
+                                                t,
+                                            )),
+                                    );
+                                // The panel answers for the profile the window
+                                // has chosen, and is on screen only while it is
+                                // being read: a panel fixed under the list cost
+                                // the list a third of the window on every frame.
+                                let panel = self.state.details_open().then(|| {
+                                    details_panel(
+                                        selected.as_ref(),
+                                        verification,
+                                        details_tab,
+                                        &log_tail,
+                                        docked,
+                                        cx,
+                                        p,
+                                        t,
+                                    )
+                                });
+                                this.child(profiles_workspace(list, panel, docked))
                             })
                     }),
             )
             .children(dialogs)
             .children(sheets)
             .children(notifications)
+    }
+}
+
+/// The list, and the details panel if it is open.
+///
+/// Two shapes, one panel. Docked, the panel is a column beside the list and both
+/// stay readable; covering, it takes the list's place and carries the button
+/// that gives it back. Which one a window gets is [`DETAILS_DOCK_MIN`], decided
+/// from the window's own width rather than from anything the user has to set.
+fn profiles_workspace(
+    list: impl IntoElement,
+    panel: Option<impl IntoElement>,
+    docked: bool,
+) -> Div {
+    if docked {
+        let mut row = div().flex().flex_1().min_h_0().gap_4().child(list);
+        if let Some(panel) = panel {
+            row = row.child(panel);
+        }
+        row
+    } else {
+        let mut area = div().relative().flex().flex_1().min_h_0().child(list);
+        if let Some(panel) = panel {
+            area = area.child(div().absolute().top_0().left_0().size_full().child(panel));
+        }
+        area
     }
 }
 

@@ -232,6 +232,14 @@ pub struct AppState {
     page: Page,
     rows: Vec<ProfileRow>,
     selected: Option<ProfileId>,
+    /// Whether the Runtime Details panel is on screen.
+    ///
+    /// Separate from the selection, and false until something asks for it: the
+    /// list is what the page is for, and a panel that is always there takes the
+    /// height it needs whether or not it is being read. Choosing a profile is
+    /// the ask; closing the panel is the other answer, and it leaves the profile
+    /// chosen so the row stays the one the window is talking about.
+    details_open: bool,
     /// What the Profiles page is narrowing its list by. Empty means no filter.
     profile_filter: String,
     notice: Option<Notice>,
@@ -433,6 +441,7 @@ impl AppState {
             log: Vec::new(),
             log_filter: LogFilter::default(),
             details_tab: DetailsTab::default(),
+            details_open: false,
             log_file,
             log_file_error,
             export_path: String::new(),
@@ -562,6 +571,21 @@ impl AppState {
 
     pub fn select(&mut self, id: ProfileId) {
         self.selected = Some(id);
+        self.details_open = true;
+    }
+
+    /// Whether the Runtime Details panel is showing.
+    ///
+    /// True once a profile has been chosen and until the panel is closed. It
+    /// stays true with nothing selected - after the profile it was describing
+    /// was deleted - because the panel is what says so.
+    pub fn details_open(&self) -> bool {
+        self.details_open
+    }
+
+    /// Closes the panel. The chosen profile stays chosen, and keeps its row lit.
+    pub fn close_details(&mut self) {
+        self.details_open = false;
     }
 
     /// What the Profiles page is narrowing its list by.

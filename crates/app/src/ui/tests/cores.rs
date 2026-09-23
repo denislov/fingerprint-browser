@@ -18,9 +18,13 @@ fn a_new_profile_is_created_from_the_form_with_the_core_it_was_given(cx: &mut Te
 
     cx.update(|window, cx| window.click("new-profile", cx));
     settle(cx);
-    assert!(
-        cx.update(|window, _| window.try_find("editor-core-0").is_some()),
-        "the form offers the core the profile will run on"
+    let selected = view
+        .read_with(cx, |view, _| view.editor())
+        .expect("a form")
+        .read_with(cx, |editor, cx| editor.core(cx));
+    assert_eq!(
+        selected, seeded_core,
+        "the form opens on the core the profile will run on"
     );
 
     let editor = view.read_with(cx, |view, _| view.editor()).expect("a form");

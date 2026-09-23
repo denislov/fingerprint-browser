@@ -525,8 +525,7 @@ fn a_profile_can_be_edited_from_the_window(cx: &mut TestAppContext) {
 
     let id = seed_profile(cx, &view);
 
-    cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
-    settle(cx);
+    profile_menu(cx, id, ProfileMenu::Edit);
     assert!(
         cx.update(|window, _| window.try_find("editor-name").is_some()),
         "the editor opens on the profile"

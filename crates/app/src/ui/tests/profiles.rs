@@ -174,6 +174,19 @@ fn a_profile_data_directory_can_be_opened(cx: &mut TestAppContext) {
         cx.update(|window, cx| window.notifications(cx).len()) == 0,
         "the click queues a toast; the tick shows it, not the click itself"
     );
+
+    // The same act is in the row's menu, which is where everything a row does
+    // but does not show now lives: both routes reach the same opener.
+    profile_menu(cx, id, ProfileMenu::OpenDir);
+    wait_for_state(cx, &view, |state| {
+        state
+            .log_rows()
+            .iter()
+            .filter(|row| row.message.contains("Opened"))
+            .count()
+            == 2
+    });
+    assert_eq!(opener.opened(), vec![path.clone(), path]);
 }
 
 #[gpui_kit::test]
@@ -281,8 +294,7 @@ fn duplicating_adds_a_profile_and_deleting_removes_one(cx: &mut TestAppContext) 
 
     let id = seed_profile(cx, &view);
 
-    cx.update(|window, cx| window.click(format!("duplicate-{id}"), cx));
-    settle(cx);
+    profile_menu(cx, id, ProfileMenu::Duplicate);
     assert_eq!(
         view.read_with(cx, |view, _| view.state().rows().len()),
         2,
@@ -293,8 +305,7 @@ fn duplicating_adds_a_profile_and_deleting_removes_one(cx: &mut TestAppContext) 
         .expect("selected");
     assert_ne!(copy, id);
 
-    cx.update(|window, cx| window.click(format!("delete-{copy}"), cx));
-    settle(cx);
+    profile_menu(cx, copy, ProfileMenu::Delete);
     assert!(
         cx.update(|window, _| window.try_find("ok").is_some()),
         "deleting asks first"
@@ -311,4 +322,132 @@ fn duplicating_adds_a_profile_and_deleting_removes_one(cx: &mut TestAppContext) 
         view.read_with(cx, |view, _| view.state().profile(id).is_some()),
         "the original is untouched"
     );
+}
+
+/// The panel is opened by choosing a profile and closed by the reader.
+///
+/// It used to be on screen whether or not anybody was reading it, at a fixed
+/// height under the list. Opening it is now a decision, and closing it does not
+/// undo the choice the reader made: the row stays the one the window is talking
+/// about.
+#[gpui_kit::test]
+fn the_details_panel_is_opened_by_choosing_a_profile(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+
+    assert!(
+        cx.update(|window, _| window.try_find("details-panel").is_none()),
+        "with nothing chosen there is nothing to describe"
+    );
+
+    let id = seed_profile(cx, &view);
+    settle(cx);
+    assert!(
+        cx.update(|window, _| window.try_find("details-panel").is_some()),
+        "choosing a profile opens its details"
+    );
+
+    cx.update(|window, cx| window.click("details-close", cx));
+    settle(cx);
+    assert!(
+        cx.update(|window, _| window.try_find("details-panel").is_none()),
+        "the reader can put the panel away"
+    );
+    assert_eq!(
+        view.read_with(cx, |view, _| view.state().selected_id()),
+        Some(id),
+        "and the profile stays chosen"
+    );
+}
+
+/// A window with room for both puts the panel beside the list; one without
+/// covers the list with it.
+///
+/// The threshold is [`super::super::DETAILS_DOCK_MIN`], and the point of the
+/// test is that the two layouts are the two the design asked for: side by side
+/// where both stay readable, and replacing the list where they cannot.
+#[gpui_kit::test]
+fn a_wide_window_docks_the_details_panel_and_a_narrow_one_covers_the_list(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+
+    // Wide: the list keeps its columns and the panel takes a column of its own.
+    let wide = cx.open_window(size(px(1600.), px(900.)), |window, cx| {
+        Root::new(view.clone(), window, cx)
+    });
+    cx.update_window(wide.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let id = seed_profile(cx, &view);
+        window.render_frame(cx);
+        let list = window.find("profiles-scroll").bounds();
+        let panel = window.find("details-panel").bounds();
+        assert!(
+            window.find(format!("profile-{id}")).bounds().size.height > px(0.),
+            "the row is still drawn beside the panel"
+        );
+        assert!(
+            panel.left() >= list.right(),
+            "the panel sits past the list, not over it: {panel:?} vs {list:?}"
+        );
+    })
+    .unwrap();
+
+    // Narrow: there is no room for both, so the panel takes the list's place.
+    let narrow = cx.open_window(size(px(1100.), px(800.)), |window, cx| {
+        Root::new(view.clone(), window, cx)
+    });
+    cx.update_window(narrow.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let list = window.find("profiles-scroll").bounds();
+        let panel = window.find("details-panel").bounds();
+        assert!(
+            panel.left() <= list.left(),
+            "the panel starts where the list does: {panel:?} vs {list:?}"
+        );
+        assert!(
+            panel.size.width >= list.size.width,
+            "and covers it: {panel:?} vs {list:?}"
+        );
+    })
+    .unwrap();
+}
+
+/// Every column of a row starts where its heading does.
+///
+/// The list used to be a card per profile: two lines of text on the left and a
+/// pile of badges and buttons on the right, which is to say no columns at all.
+/// A reader comparing twelve profiles had nothing to read down.
+#[gpui_kit::test]
+fn the_rows_line_up_under_the_column_headings(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    let id = seed_named_profile(cx, &view, "Work laptop");
+
+    // A window wide enough to dock the panel: covering the list, the panel would
+    // be what the headings are measured against.
+    let wide = cx.open_window(size(px(1600.), px(900.)), |window, cx| {
+        Root::new(view.clone(), window, cx)
+    });
+    cx.update_window(wide.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let proxy_heading = window.find("column-proxy").bounds();
+        let state_heading = window.find("column-state").bounds();
+        let actions_heading = window.find("column-actions").bounds();
+        let route = window.find(format!("route-{id}")).bounds();
+        let state = window.find(format!("state-{id}")).bounds();
+        let more = window.find(format!("more-{id}")).bounds();
+
+        assert_aligned(proxy_heading.left(), route.left(), "the proxy column");
+        assert_aligned(state_heading.left(), state.left(), "the state column");
+        assert_aligned(actions_heading.right(), more.right(), "the actions column");
+    })
+    .unwrap();
+}
+
+/// Two edges are the same edge, within the rounding of a layout pass.
+fn assert_aligned(left: gpui_kit::Pixels, right: gpui_kit::Pixels, what: &str) {
+    let gap = (left - right).abs().as_f32();
+    assert!(gap < 0.5, "{what} is out by {gap}px: {left:?} vs {right:?}");
 }

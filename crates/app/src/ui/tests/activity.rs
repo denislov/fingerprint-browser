@@ -236,8 +236,7 @@ fn a_refused_edit_keeps_the_dialog_open_and_shows_why(cx: &mut TestAppContext) {
     let id = seed_profile(cx, &view);
     let name_before = view.read_with(cx, |view, _| view.state().rows()[0].profile.name.clone());
 
-    cx.update(|window, cx| window.click(format!("edit-{id}"), cx));
-    settle(cx);
+    profile_menu(cx, id, ProfileMenu::Edit);
 
     let editor = view
         .read_with(cx, |view, _| view.editor())

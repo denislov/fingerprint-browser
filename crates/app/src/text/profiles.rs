@@ -75,26 +75,6 @@ impl Text {
         }
     }
 
-    pub fn profile_meta_direct(&self, state: &str) -> String {
-        match self.lang {
-            Lang::En => format!("{state} · direct"),
-            Lang::Zh => format!("{state} · 直连"),
-        }
-    }
-
-    /// The seed and the surfaces derived from it, on one line.
-    pub fn profile_seed_line<B: std::fmt::Display, P: std::fmt::Display>(
-        &self,
-        seed: u32,
-        brand: B,
-        platform: P,
-    ) -> String {
-        match self.lang {
-            Lang::En => format!("seed {seed} · {brand} · {platform}"),
-            Lang::Zh => format!("种子 {seed} · {brand} · {platform}"),
-        }
-    }
-
     /// A state carrying a message from the runtime, which is not translated.
     pub fn profile_state_message(&self, state: &str, message: &str) -> String {
         match self.lang {

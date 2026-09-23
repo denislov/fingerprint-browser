@@ -101,6 +101,52 @@ fn built_profile(
     }
 }
 
+/// Draws one frame, so a change is on screen before it is looked for.
+fn draw(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+}
+
+/// Commits a choice in the form's core selector.
+///
+/// Through the selector's state rather than by clicking a row of the popup. The
+/// library's list is virtualised, so a row has a size only once the popup has
+/// been laid out, and in a test window the layer above the form never gets that
+/// pass - the component's own tests drive it the same way. What is worth pinning
+/// is what a committed choice does to the profile; that the popup opens and
+/// offers its rows is checked in a real window, where there are pixels to look
+/// at.
+fn pick_core(cx: &mut VisualTestContext, editor: &Entity<ProfileEditor>, id: CoreId) {
+    let select = editor.read_with(cx, |editor, _| editor.core_select());
+    cx.update(|window, cx| {
+        select.update(cx, |select, cx| {
+            select.set_selected_values(&[id], window, cx);
+        });
+    });
+}
+
+/// The same for the proxy selector. `None` is the direct connection.
+fn pick_proxy(cx: &mut VisualTestContext, editor: &Entity<ProfileEditor>, id: Option<ProxyId>) {
+    let select = editor.read_with(cx, |editor, _| editor.proxy_select());
+    cx.update(|window, cx| {
+        select.update(cx, |select, cx| {
+            select.set_selected_values(&[id], window, cx);
+        });
+    });
+}
+
+/// What a selector is showing, which is what a reader would see in its trigger.
+fn shown_core(cx: &mut VisualTestContext, editor: &Entity<ProfileEditor>) -> CoreId {
+    editor.read_with(cx, |editor, cx| {
+        editor
+            .core_select()
+            .read(cx)
+            .selected_value()
+            .expect("a committed selection")
+    })
+}
+
 fn set(cx: &mut VisualTestContext, input: &Entity<InputState>, text: &str) {
     let input = input.clone();
     let text = text.to_string();
@@ -270,20 +316,50 @@ fn the_proxy_the_profile_is_on_is_what_the_form_offers(cx: &mut TestAppContext) 
     );
 }
 
-/// The chip's id carries the index; its label must not.
+/// The selector offers Direct first, then every stored proxy.
 ///
-/// The first version built the id as `editor-proxy-{index}-{name}` and then
-/// showed that same string, so the window offered a proxy called
-/// "0-Office". The tests passed, because they clicked the string they had
-/// built; only the real window showed the mistake.
+/// Direct is a row rather than an empty field: a profile whose traffic leaves
+/// unproxied is a profile making a choice, and the choice has to be readable to
+/// be changed back.
 #[test]
-fn a_proxy_chip_is_labelled_with_its_name_alone() {
-    let (id, label) = super::proxy_chip(0, "Office");
-    assert_eq!(id, "editor-proxy-0");
-    assert_eq!(label, "Office");
-    assert!(!label.contains('0'), "the index must not reach the label");
-    let (_, label) = super::proxy_chip(3, "Home");
-    assert_eq!(label, "Home");
+fn the_proxy_selector_offers_direct_and_every_stored_proxy() {
+    let office = ProxyId::new();
+    let home = ProxyId::new();
+    let options = super::proxy_options(
+        &[(office, "Office".to_string()), (home, "Home".to_string())],
+        None,
+        en(),
+    );
+    let labels: Vec<&str> = options.iter().map(|option| option.name.as_str()).collect();
+    assert_eq!(labels, vec!["Direct", "Office", "Home"]);
+    assert_eq!(
+        options[0].id, None,
+        "the first row is the direct connection"
+    );
+    assert_eq!(options[1].id, Some(office));
+}
+
+/// The same for the cores, with the one in force kept when it is gone.
+#[test]
+fn the_core_selector_offers_every_core_and_keeps_a_missing_one() {
+    let first = CoreId::new();
+    let second = CoreId::new();
+    let cores = vec![
+        choice(first, "chrome 148", 148),
+        choice(second, "chrome", 0),
+    ];
+    let options = super::core_options(&cores, first, en());
+    let labels: Vec<&str> = options.iter().map(|option| option.label.as_str()).collect();
+    assert_eq!(labels, vec!["chrome 148", "chrome (version unknown)"]);
+
+    let gone = CoreId::new();
+    let options = super::core_options(&cores, gone, en());
+    let labels: Vec<&str> = options.iter().map(|option| option.label.as_str()).collect();
+    assert_eq!(options.len(), 3, "the missing core is offered as well");
+    assert!(
+        labels[2].contains("missing"),
+        "and named as missing: {labels:?}"
+    );
 }
 
 #[gpui_kit::test]
@@ -297,14 +373,14 @@ fn choosing_a_proxy_and_choosing_direct_change_the_assignment(cx: &mut TestAppCo
         "a profile with no proxy starts on Direct"
     );
 
-    click(cx, "editor-proxy-0");
+    pick_proxy(cx, &editor, Some(proxy));
     assert_eq!(
         built_profile(cx, &editor).proxy_id,
         Some(proxy),
         "picking a proxy assigns it"
     );
 
-    click(cx, "editor-proxy-direct");
+    pick_proxy(cx, &editor, None);
     assert_eq!(
         built_profile(cx, &editor).proxy_id,
         None,
@@ -327,10 +403,50 @@ fn an_assignment_to_a_missing_proxy_is_kept_and_shown(cx: &mut TestAppContext) {
         Some(gone),
         "the assignment survives even though the proxy is gone"
     );
+    assert_eq!(
+        editor.read_with(cx, |editor, cx| editor.proxy(cx)),
+        Some(gone),
+        "and the selector shows it rather than silently reading as Direct"
+    );
+}
+
+/// The overrides are folded away, and the fold says when one of them is set.
+///
+/// Most profiles never touch an override, and the form is read from the top: a
+/// group nobody uses should not sit between the reader and the fields everybody
+/// sets. What a folded group must not do is hide a change, so its heading says
+/// when it holds one.
+#[gpui_kit::test]
+fn the_overrides_are_folded_away_until_they_are_asked_for(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (editor, cx) = editor(cx, &profile());
+
+    assert!(!editor.read_with(cx, |editor, _| editor.advanced_open()));
     assert!(
-        editor
-            .read_with(cx, |editor, _| editor.proxy)
-            .is_some_and(|id| id == gone)
+        cx.update(|window, _| window.try_find("editor-brand-version").is_none()),
+        "a profile that overrides nothing does not show the overrides"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("editor-advanced-modified").is_none()),
+        "and nothing is marked as changed"
+    );
+
+    cx.update(|window, cx| window.click("editor-advanced-toggle", cx));
+    assert!(
+        editor.read_with(cx, |editor, _| editor.advanced_open()),
+        "the heading opens the group"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("editor-brand-version").is_some()),
+        "and the fields under it are there to fill in"
+    );
+
+    let brand_version = input(cx, &editor, |editor| editor.brand_version.clone());
+    set(cx, &brand_version, "148.0.0.0");
+    draw(cx);
+    assert!(
+        cx.update(|window, _| window.try_find("editor-advanced-modified").is_some()),
+        "a field with something in it marks the group it is folded into"
     );
 }
 
@@ -408,7 +524,7 @@ fn choosing_another_core_changes_which_engine_the_profile_is_created_on(cx: &mut
         "the first core is the default"
     );
 
-    click(cx, "editor-core-1");
+    pick_core(cx, &editor, second);
     assert_eq!(
         created(&editor, cx).core_id,
         second,
@@ -441,7 +557,7 @@ fn the_form_says_when_a_core_ignores_the_exclusions(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let modern = choice(CoreId::new(), "chrome 148", 148);
     let (editor, cx) = new_editor(cx, std::slice::from_ref(&modern));
-    let note = editor.read_with(cx, |editor, _| editor.core_note());
+    let note = editor.read_with(cx, |editor, cx| editor.core_note(cx));
     assert!(note.contains("spoofing exclusions honoured"), "{note}");
     assert!(!note.contains("ignored"), "{note}");
 
@@ -450,7 +566,7 @@ fn the_form_says_when_a_core_ignores_the_exclusions(cx: &mut TestAppContext) {
         ..choice(CoreId::new(), "chrome 142", 142)
     };
     let (editor, cx) = new_editor(cx, &[legacy]);
-    let note = editor.read_with(cx, |editor, _| editor.core_note());
+    let note = editor.read_with(cx, |editor, cx| editor.core_note(cx));
     assert!(
         note.contains("ignored by this engine"),
         "the form says the exclusions will not be applied: {note}"
@@ -493,7 +609,7 @@ fn a_core_with_no_version_is_shown_as_one_that_cannot_be_started(cx: &mut TestAp
         editor.read_with(cx, |editor, _| editor.cores[0].label(en())),
         "chrome (version unknown)"
     );
-    let note = editor.read_with(cx, |editor, _| editor.core_note());
+    let note = editor.read_with(cx, |editor, cx| editor.core_note(cx));
     assert!(note.contains("cannot be started"), "{note}");
 }
 
@@ -514,7 +630,7 @@ fn an_edit_can_move_a_profile_to_another_core(cx: &mut TestAppContext) {
         "an edit that does not touch the core keeps it"
     );
 
-    click(cx, "editor-core-1");
+    pick_core(cx, &editor, other);
     let moved = built_profile(cx, &editor);
     assert_eq!(
         moved.core_id, other,
@@ -537,12 +653,14 @@ fn a_missing_core_is_kept_and_named(cx: &mut TestAppContext) {
         gone,
         "the assignment survives even though the core is gone"
     );
-    let note = editor.read_with(cx, |editor, _| editor.core_note());
+    let note = editor.read_with(cx, |editor, cx| editor.core_note(cx));
     assert!(note.contains("no longer registered"), "{note}");
-    assert!(
-        cx.update(|window, _| window.try_find("editor-core-missing").is_some()),
-        "the missing core is shown rather than silently replaced"
+    assert_eq!(
+        editor.read_with(cx, |editor, cx| editor.core(cx)),
+        gone,
+        "the missing core is still what the selector shows"
     );
+    assert_eq!(shown_core(cx, &editor), gone);
 }
 
 fn created(editor: &Entity<ProfileEditor>, cx: &mut VisualTestContext) -> application::NewProfile {
@@ -553,9 +671,4 @@ fn created(editor: &Entity<ProfileEditor>, cx: &mut VisualTestContext) -> applic
         ProfileEdit::Create(draft) => draft,
         ProfileEdit::Save(_) => panic!("this form saves a profile"),
     }
-}
-
-fn click(cx: &mut VisualTestContext, id: &str) {
-    let id = id.to_string();
-    cx.update(|window, cx| window.click(id, cx));
 }

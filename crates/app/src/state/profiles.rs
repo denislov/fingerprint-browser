@@ -193,7 +193,7 @@ impl AppState {
         let duplicated = self.record(self.profiles.duplicate(id, name))?;
         self.load_rows()?;
         self.refresh_runtime();
-        self.selected = Some(duplicated.id);
+        self.select(duplicated.id);
         Ok(duplicated.id)
     }
 
@@ -422,7 +422,7 @@ impl AppState {
         let profile = self.record(self.profiles.create(draft))?;
         let id = profile.id;
         self.load()?;
-        self.selected = Some(id);
+        self.select(id);
         self.set_notice(Notice::info(t.profile_created(&profile.name)));
         Ok(id)
     }
