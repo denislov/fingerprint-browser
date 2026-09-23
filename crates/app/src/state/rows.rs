@@ -16,12 +16,14 @@ pub struct ProfileRow {
     /// keeps the row honest - the profile is on its way, and the Stop button
     /// beside it is what calls it off.
     pub checking_proxy: bool,
+    /// Queued in the supervisor but not yet acknowledged. Keeps Stop available.
+    pub queued_start: bool,
 }
 
 impl ProfileRow {
     /// Snapshot state, or `Stopped` when the profile was never started.
     pub fn state(&self) -> RuntimeState {
-        if self.checking_proxy {
+        if self.checking_proxy || self.queued_start {
             return RuntimeState::Starting;
         }
         self.snapshot

@@ -615,7 +615,7 @@ fn a_queued_start_holds_its_profile_until_the_snapshot_answers() {
         .state
         .browser_data_job(Direction::ToBackup)
         .expect_err("the queued start holds the profile");
-    assert!(error.contains("starting up"), "{error}");
+    assert!(error.contains("Work laptop"), "{error}");
 
     // The runtime answers. The snapshot refuses a copy from here on, and the
     // lease is gone - which is what lets the profile be restarted at all.
@@ -650,6 +650,8 @@ fn retrying_a_failed_start_keeps_its_lease_until_its_own_answer() {
         fixture.runtime.answer_nothing();
         fixture.state.start(id).unwrap();
         fixture.state.refresh_runtime();
+        assert!(fixture.state.row(id).unwrap().can_stop());
+        assert!(fixture.state.delete_profile(id).is_err());
         fixture.state.set_browser_data_path("/backups/fp");
         assert_eq!(fixture.state.operations.held(id), Some(Operation::Starting));
         assert!(fixture.state.browser_data_job(Direction::ToBackup).is_err());
@@ -664,4 +666,22 @@ fn retrying_a_failed_start_keeps_its_lease_until_its_own_answer() {
         assert_eq!(fixture.state.operations.held(id), None);
         assert!(fixture.state.browser_data_job(Direction::ToBackup).is_ok());
     }
+}
+
+#[test]
+fn a_queued_start_can_be_stopped_before_the_runtime_starts_it() {
+    let mut fixture = fixture();
+    seed_core(&fixture);
+    fixture.state.load().unwrap();
+    let id = fixture.state.create_profile("Queued").unwrap();
+    fixture.runtime.answer_nothing();
+    fixture.state.start(id).unwrap();
+    assert!(fixture.state.row(id).unwrap().can_stop());
+    fixture.state.stop(id).unwrap();
+    assert_eq!(fixture.state.operations.held(id), None);
+    assert_eq!(
+        fixture.state.row(id).unwrap().state(),
+        RuntimeState::Stopped
+    );
+    assert!(fixture.state.delete_profile(id).is_ok());
 }

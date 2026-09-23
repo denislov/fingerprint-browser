@@ -165,6 +165,11 @@ impl AppState {
     /// Removes a profile. Its browser data is kept on disk: deleting a profile
     /// should not be the same decision as destroying its sessions.
     pub fn delete_profile(&mut self, id: ProfileId) -> Result<(), AppError> {
+        if self.queued_starts.contains_key(&id) {
+            return Err(AppError::Conflict(
+                "stop the queued start before deleting this profile".into(),
+            ));
+        }
         // A profile that is being checked has no browser yet; leaving the check
         // pending would start a profile that no longer exists, so it is called
         // off with the record.

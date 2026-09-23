@@ -487,6 +487,7 @@ impl AppState {
                 let snapshot = runtime.snapshot(profile.id);
                 ProfileRow {
                     checking_proxy: self.pending_starts.contains_key(&profile.id),
+                    queued_start: self.queued_starts.contains_key(&profile.id),
                     profile,
                     core_name,
                     proxy_name,
@@ -523,6 +524,7 @@ impl AppState {
                 self.queued_starts.remove(&row.profile.id);
                 self.operations.free(row.profile.id, Operation::Starting);
             }
+            row.queued_start = self.queued_starts.contains_key(&row.profile.id);
         }
 
         // A check nobody ever answered is called off here rather than left to
