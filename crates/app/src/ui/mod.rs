@@ -490,6 +490,11 @@ impl Render for AppView {
                         let log_rows = self.state.log_rows();
                         let log_count = self.state.log_len();
                         let log_filter = self.state.log_filter();
+                        // How much room the log's message column has, measured from
+                        // the window: the clamp on a long line is what fits here.
+                        let message_width = (window.viewport_size().width.as_f32()
+                            - self::logs::MESSAGE_OFFSET)
+                            .max(160.0);
                         let settings_group = self.state.settings_group();
                         let log_status = match self.state.log_file_status() {
                             Ok(path) => Ok(path.display().to_string()),
@@ -538,6 +543,7 @@ impl Render for AppView {
                                     log_count,
                                     log_filter,
                                     self.state.expanded_logs(),
+                                    message_width,
                                     cx,
                                     p,
                                     t,

@@ -311,10 +311,14 @@ fn a_long_log_line_is_clamped_until_it_is_asked_for(cx: &mut TestAppContext) {
 
     // Clamped: the row offers the rest and says how much of it there is. The
     // visible text itself is what the real window shows; what a test can hold is
-    // that a line this long is not laid out whole.
+    // that a line this long is not laid out whole. Every character here is ASCII,
+    // so the width the clamp counts and the number of characters agree, and what
+    // fits is the message column's own width - measured here the way the page
+    // measures it, from the window.
+    let hidden = long.chars().count() - clamp(cx);
     let clamped = toggle(cx, 0);
     assert!(
-        clamped.contains(&(long.chars().count() - 150).to_string()),
+        clamped.contains(&hidden.to_string()),
         "the control says how much is hidden: {clamped}"
     );
     let collapsed_height = height(cx, 0);
@@ -353,6 +357,78 @@ fn a_long_log_line_is_clamped_until_it_is_asked_for(cx: &mut TestAppContext) {
     assert!(
         cx.update(|window, _| window.try_find("log-toggle-0").is_none()),
         "while the short new line has nothing to open"
+    );
+}
+
+/// How many columns of a log line fit in the window the test is driving.
+///
+/// The page's own rule, written out here rather than borrowed: it is the contract
+/// the test is holding the page to, and if the layout changes the two are meant to
+/// disagree loudly.
+fn clamp(cx: &mut gpui_kit::VisualTestContext) -> usize {
+    let width = cx.update(|window, _| window.viewport_size().width.as_f32());
+    crate::ui::logs::clamp_columns(width - crate::ui::logs::MESSAGE_OFFSET)
+}
+
+/// The clamp is measured in the columns a line takes, not in characters.
+///
+/// This window is read in two languages, and a Chinese character is two columns
+/// wide in any font that draws one. Measuring characters would let a line of
+/// Chinese run to twice the row a line of English would - which is the wrapping
+/// the clamp exists to stop.
+#[gpui_kit::test]
+fn a_long_line_is_measured_in_the_width_it_takes(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    let id = seed_profile(cx, &view);
+    let fitted = clamp(cx);
+
+    // Two hundred Chinese characters are four hundred columns, and only two
+    // hundred characters.
+    let wide = "标".repeat(200);
+    view.update(cx, |view, _| {
+        view.state_mut().record_event(&RuntimeEvent::Warning {
+            profile_id: id,
+            message: wide.clone(),
+        });
+    });
+    cx.update(|window, cx| window.click("nav-Log", cx));
+    settle(cx);
+
+    let control = cx
+        .update(|window, _| {
+            window
+                .find("log-toggle-0")
+                .label()
+                .map(|label| label.to_string())
+        })
+        .expect("a line of four hundred columns is clamped");
+    assert!(
+        control.contains(&(400 - fitted).to_string()),
+        "and says how many columns are hidden: {control}"
+    );
+
+    // The same two hundred characters in ASCII are two hundred columns, which is
+    // half the line - and short enough to be shown whole.
+    view.update(cx, |view, _| {
+        view.state_mut().record_event(&RuntimeEvent::Warning {
+            profile_id: id,
+            message: "a".repeat(200),
+        });
+    });
+    settle(cx);
+    assert!(
+        cx.update(|window, _| window.try_find("log-toggle-0").is_none()),
+        "two hundred columns fit where four hundred do not"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("log-toggle-1").is_some()),
+        "and the wide line is still clamped under it"
+    );
+    assert!(
+        crate::ui::logs::clamp_columns(1000.0) < 200,
+        "the clamp is a count of columns, not of characters"
     );
 }
 

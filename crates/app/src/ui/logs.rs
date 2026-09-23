@@ -11,13 +11,72 @@ use super::components::PageHeader;
 use super::*;
 use gpui_kit::base::SelectableText;
 
-/// How much of a long message is shown before it is clamped.
+/// How many columns of a message fit in the list at a given window width.
 ///
-/// Measured in characters rather than in rows: a row that wraps to four lines
-/// pushes everything below it down, and a list where one line is a paragraph is a
-/// list nobody scans. Long enough that most lines - a path, a refusal, a
-/// sentence from the engine - are shown whole.
-const CLAMP: usize = 150;
+/// The clamp is measured in columns rather than in rows: a row that wraps to four
+/// lines pushes everything below it down, and a list where one line is a
+/// paragraph is a list nobody scans. Columns rather than characters because the
+/// window is read in two languages and a Chinese character is two columns wide,
+/// so a hundred and fifty characters of English and a hundred and fifty of
+/// Chinese are not the same amount of line.
+///
+/// It is measured from the window rather than fixed, because a fixed number is
+/// wrong at both ends: generous enough for a maximized window wraps to two lines
+/// in a small one, and tight enough for a small one clamps a line the maximized
+/// window could show whole.
+///
+/// [`ADVANCE`] is the width one column of the interface font takes. It is an
+/// approximation - the font is proportional, and a `w` is wider than an `i` - but
+/// it is the right approximation here, because the two languages differ by a
+/// factor of two and two Latin letters do not.
+pub(super) fn clamp_columns(available: f32) -> usize {
+    const ADVANCE: f32 = 6.2;
+    /// Below this the control is longer than the line it would hide.
+    const FLOOR: usize = 40;
+    ((available / ADVANCE) as usize).max(FLOOR)
+}
+
+/// How wide a message is when it is drawn, in columns of a monospaced grid.
+///
+/// The same rule a terminal uses, and for the same reason: the East Asian wide
+/// and fullwidth forms take two columns, everything else one. It is an
+/// approximation of a proportional font - a `w` is wider than an `i` - but it is
+/// the approximation that matters here, because the difference between the two
+/// languages is eight times the difference between two Latin letters.
+fn columns(text: &str) -> usize {
+    text.chars()
+        .map(|character| match character.is_ascii() {
+            true => 1,
+            false => unicode_width(character),
+        })
+        .sum()
+}
+
+/// Two columns for the wide and fullwidth forms, one for the rest.
+///
+/// Written out rather than pulled in as a dependency: the ranges that matter
+/// here are the ones the two languages this window speaks use, and they are
+/// stable. A character outside them is counted as one, which is what the
+/// fallback font does with it anyway.
+fn unicode_width(character: char) -> usize {
+    match character as u32 {
+        // CJK radicals, kangxi, ideographs, and the kana and hangul that share
+        // the block, plus the fullwidth forms and the CJK punctuation.
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x3FFFD => 2,
+        _ => 1,
+    }
+}
 
 pub(super) fn logs_header(
     filter: LogFilter,
@@ -156,15 +215,18 @@ pub(super) fn list_header(p: Palette, t: &Text) -> Div {
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn logs_body(
     rows: &[LogRow],
     total: usize,
     filter: LogFilter,
     expanded: &std::collections::HashSet<SystemTime>,
+    message_width: f32,
     cx: &mut Context<AppView>,
     p: Palette,
     t: &'static Text,
 ) -> impl IntoElement {
+    let clamp = clamp_columns(message_width);
     div()
         .flex()
         .flex_col()
@@ -200,11 +262,9 @@ pub(super) fn logs_body(
                             .child(message),
                     )
                 })
-                .children(
-                    rows.iter().enumerate().map(|(index, row)| {
-                        log_row(row, index, expanded.contains(&row.at), cx, p, t)
-                    }),
-                ),
+                .children(rows.iter().enumerate().map(|(index, row)| {
+                    log_row(row, index, expanded.contains(&row.at), clamp, cx, p, t)
+                })),
         )
 }
 
@@ -218,14 +278,27 @@ fn log_row(
     row: &LogRow,
     index: usize,
     expanded: bool,
+    clamp: usize,
     cx: &mut Context<AppView>,
     p: Palette,
     t: &'static Text,
 ) -> impl IntoElement + use<> {
-    let length = row.message.chars().count();
-    let clamped = length > CLAMP && !expanded;
+    let width = columns(&row.message);
+    let clamped = width > clamp && !expanded;
     let shown = if clamped {
-        let mut text: String = row.message.chars().take(CLAMP).collect();
+        let mut text = String::new();
+        let mut used = 0;
+        for character in row.message.chars() {
+            let wide = match character.is_ascii() {
+                true => 1,
+                false => unicode_width(character),
+            };
+            if used + wide > clamp {
+                break;
+            }
+            used += wide;
+            text.push(character);
+        }
         text.push('…');
         text
     } else {
@@ -298,7 +371,7 @@ fn log_row(
                         .text_color(rgb(p.text_soft))
                         .child(SelectableText::new(format!("log-message-{index}"), shown)),
                 )
-                .when(length > CLAMP, |this| {
+                .when(width > clamp, |this| {
                     this.child(
                         Button::new(format!("log-toggle-{index}"))
                             .label(if expanded {
@@ -311,7 +384,7 @@ fn log_row(
                             .accessibility_label(if expanded {
                                 t.log_collapse_aria()
                             } else {
-                                t.log_expand_aria(length - CLAMP)
+                                t.log_expand_aria(width - clamp)
                             })
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.on_toggle_log_line(at, cx)),
@@ -325,6 +398,14 @@ fn log_row(
 const COLUMN_TIME: f32 = 72.0;
 const COLUMN_LEVEL: f32 = 64.0;
 const COLUMN_WHO: f32 = 140.0;
+
+/// What one row takes before the message column begins.
+///
+/// The sidebar, the page's padding on both sides, the row's own padding, the
+/// three fixed columns and the gaps between them: 200 + 48 + 32 + 276 + 36. What
+/// is left of the window is the message, which is the column the clamp is
+/// measured against.
+pub(super) const MESSAGE_OFFSET: f32 = 592.0;
 
 pub(super) fn log_level_color(level: LogLevel, p: Palette) -> u32 {
     match level {

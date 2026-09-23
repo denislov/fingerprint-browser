@@ -254,7 +254,9 @@ says nothing about, and the notes are that section rather than the whole file.
 - A log line longer than a row is clamped and can be opened, and the list's
   columns are named. A message long enough to wrap pushed every line below it down,
   so one paragraph from an engine turned the page into a wall; a line is now
-  clamped at 150 characters with a **Show all** control that says how much is
+  clamped to the width the message column actually has - measured from the window,
+  with a Chinese character counted as the two columns it draws in - with a
+  **Show all** control that says how much is
   hidden, keyed by when the line was written rather than by its place in the list -
   a new line arrives at the top and would otherwise move every index under it. The
   message itself is selectable text, so the exact wording can be quoted, and the
