@@ -251,10 +251,6 @@ impl Environment {
     }
 }
 
-/// Where the config file used to live: the platform's config directory.
-///
-/// Kept as a migration source. A file here is read once, folded into the data
-/// directory, and removed; nothing writes here any more.
 mod resolution;
 pub use resolution::language_hint;
 use resolution::*;

@@ -1,6 +1,7 @@
 //! Environment precedence and legacy settings migration.
 use super::*;
 
+/// The previous config directory is a migration source, never a write target.
 pub(super) fn legacy_config_path(host: &paths::Host) -> PathBuf {
     paths::config_dir(host)
         .unwrap_or_else(|| PathBuf::from(".").join(paths::CONFIG_DIR))

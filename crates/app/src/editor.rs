@@ -418,15 +418,9 @@ impl ProfileEditor {
     }
 }
 
-/// The proxy assignment, as chips: Direct plus every stored proxy.
-///
-/// A seed that is very unlikely to repeat, from the clock.
+/// Use the same OS entropy source as service-created profiles and duplicates.
 fn profile_seed() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    (now.as_nanos() & 0xFFFF_FFFF) as u32
+    application::profile_service::random_seed()
 }
 
 mod render;

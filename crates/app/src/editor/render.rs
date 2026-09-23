@@ -1,9 +1,6 @@
 //! Profile form rendering and choice controls.
 use super::*;
 
-/// A chip whose id is no longer in the list is still shown, marked as missing:
-/// a profile assigned to a proxy that was deleted elsewhere must not silently
-/// read as Direct.
 /// The element id and the visible label of one proxy chip.
 ///
 /// They are separate on purpose. The id is positional so a test can click it
@@ -13,6 +10,8 @@ pub(super) fn proxy_chip(index: usize, name: &str) -> (String, String) {
     (format!("editor-proxy-{index}"), name.to_string())
 }
 
+/// The proxy assignment, as chips: Direct plus every stored proxy.
+/// Missing assignments stay visible rather than silently becoming Direct.
 pub(super) fn proxy_row(
     editor: Entity<ProfileEditor>,
     selected: Option<ProxyId>,

@@ -103,7 +103,7 @@ impl DefaultProfileService {
 /// UUID is drawn from the OS's entropy, and four bytes of one is the cheapest
 /// portable way to ask for that - the same call that mints every identifier in
 /// this program.
-fn random_seed() -> u32 {
+pub fn random_seed() -> u32 {
     let uuid = uuid::Uuid::new_v4();
     let bytes = uuid.as_bytes();
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])

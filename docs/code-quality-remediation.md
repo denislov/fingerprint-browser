@@ -67,5 +67,10 @@ public entry points are retained; obsolete foreign-key and timeout comments
 were corrected. Runtime/domain tests and strict Clippy passed before the app
 reorganization; the full workspace is validated again after it.
 
+Follow-up: the profile editor's initial seed and reroll now use the same OS
+entropy source as application-created profiles, replacing the remaining clock
+seed path found during the form split. Existing editor and seed-source tests
+exercise both creation paths.
+
 Real-browser, real-Xray and platform-specific tests require their corresponding
 runtime environment; ordinary workspace tests do not replace those checks.
