@@ -65,12 +65,45 @@ resolution, editor rendering, and text formatting have separate homes. Large
 state/UI test suites are grouped by scenario with shared fixtures. Existing
 public entry points are retained; obsolete foreign-key and timeout comments
 were corrected. Runtime/domain tests and strict Clippy passed before the app
-reorganization; the full workspace is validated again after it.
+reorganization; the full workspace gate also passes after it.
 
 Follow-up: the profile editor's initial seed and reroll now use the same OS
 entropy source as application-created profiles, replacing the remaining clock
 seed path found during the form split. Existing editor and seed-source tests
 exercise both creation paths.
+
+## Final validation
+
+`CARGO_NET_OFFLINE=true ./scripts/check.sh` passed on Linux:
+
+- Formatting and workspace compilation.
+- 678 tests passed, zero failures, 24 environment-dependent tests ignored.
+- Workspace/all-target Clippy with warnings denied.
+- Packaging script syntax and changelog extraction checks.
+
+The independent reproductions from the review were rerun against the final
+code: overlapping backup paths return an error with the original Cookies file
+intact; encoded password whitespace is retained; a 150 ms drip-feed diagnostic
+returns Timeout at approximately 154 ms; dangling insert and update both return
+`StorageError::Dangling`. Windows execution and opt-in browser/Xray tests have
+not been run in this Linux environment.
+
+## Implementation commits
+
+| Commit | Stage |
+| --- | --- |
+| `4b44f2e` | Browser-data path checks and owned recovery |
+| `5294372` | Restore installation lease and service coordination |
+| `6662728` | Request-specific runtime acknowledgements |
+| `ddb0934` | Diagnostic task identity and isolated engine directories |
+| `2bed082` | Absolute diagnostic deadlines |
+| `4f2698a` | Decoded password preservation |
+| `a5d0f58` | Atomic backup/settings replacement |
+| `db0fb91` | Repository errors and shared row decoding |
+| `e0c341b` | Runtime and URI responsibility split |
+| `d6279e7` | App presentation, worker and test organization |
+| `a0f885b` | Queued-start cancellation and deletion protection |
+| `c5ee291` | Editor seed entropy and adjacent documentation cleanup |
 
 Real-browser, real-Xray and platform-specific tests require their corresponding
 runtime environment; ordinary workspace tests do not replace those checks.
