@@ -350,14 +350,19 @@ pub(super) fn proxy_test_cell(
                     .text_color(rgb(p.danger))
                     .child(test.label(t)),
             )
+            // In a row of its own: the column stretches its children, and a
+            // button given the whole width centres its label under the failure
+            // it belongs to rather than sitting at the column's edge with it.
             .child(
-                Button::new(format!("proxy-diagnostics-{id}"))
-                    .label(t.proxy_diagnostics)
-                    .ghost()
-                    .compact()
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.on_show_proxy_diagnostics(id, cx)),
-                    ),
+                div().flex().child(
+                    Button::new(format!("proxy-diagnostics-{id}"))
+                        .label(t.proxy_diagnostics)
+                        .ghost()
+                        .compact()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.on_show_proxy_diagnostics(id, cx)
+                        })),
+                ),
             ),
     })
 }
