@@ -356,6 +356,9 @@ fn window<'a>(
     view: &gpui_kit::Entity<AppView>,
 ) -> &'a mut gpui_kit::VisualTestContext {
     cx.update(|cx| cx.set_reduce_motion(true));
+    // The window's own keys, bound once per window: the program binds them at
+    // startup, and a test window is the only window there is.
+    cx.update(crate::ui::keys::bind);
     let (_, cx) = cx.add_window_view({
         let view = view.clone();
         move |window, cx| Root::new(view, window, cx)
@@ -747,6 +750,7 @@ fn view_with_browser_data(
 
 mod activity;
 mod cores;
+mod keyboard;
 mod maintenance;
 mod profiles;
 mod proxies;

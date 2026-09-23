@@ -624,8 +624,14 @@ impl AppView {
     }
 
     /// Puts the panel away. The profile stays chosen: the row it belongs to is
-    /// still where the reader left it.
+    /// still where the reader left it, and the keyboard goes back to it - the
+    /// panel may have been opened with Enter, and the reader should not have to
+    /// find the row again to carry on down the list.
     pub(super) fn on_close_details(&mut self, cx: &mut Context<Self>) {
+        // Only when it was open: Escape is bound everywhere, and a key that
+        // moved the keyboard out of wherever it was on a page with no panel
+        // would be a key that did something invisible.
+        self.focus_row = self.state.details_open();
         self.state.close_details();
         cx.notify();
     }

@@ -55,6 +55,19 @@ impl Text {
         }
     }
 
+    /// The accessible name of one profile row.
+    ///
+    /// A row is read as one thing rather than as the four cells it is drawn as:
+    /// the name, then the state, then the engine under it. The state and the core
+    /// are in the row's other columns, and a reader who cannot see the row is
+    /// owed them in the order the row draws them.
+    pub fn profile_row_aria(&self, name: &str, state: &str, core: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{name}, {state}, core {core}"),
+            Lang::Zh => format!("{name}，{state}，内核 {core}"),
+        }
+    }
+
     /// The accessible name of one row's overflow menu.
     ///
     /// It names the row, because a list of menus all called "More" is a list

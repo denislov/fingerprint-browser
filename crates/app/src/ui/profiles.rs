@@ -199,14 +199,32 @@ pub(super) fn list_header(p: Palette, t: &Text) -> Div {
         )
 }
 
+/// What the list is drawn from, apart from the rows themselves.
+///
+/// The four lookups a row needs - which profile is chosen, what has been read
+/// about it, and where its focus handle is - travel together because every row
+/// asks all four, and because a page that passed three of them would be a page
+/// whose rows disagreed about what the list was showing.
+pub(super) struct ProfileRows<'a> {
+    pub rows: &'a [ProfileRow],
+    pub selected: Option<ProfileId>,
+    pub verifications: &'a std::collections::HashMap<ProfileId, Verification>,
+    pub focus: &'a std::collections::HashMap<ProfileId, FocusHandle>,
+}
+
 pub(super) fn profile_list(
-    rows: &[ProfileRow],
-    selected_id: Option<ProfileId>,
-    verifications: &std::collections::HashMap<ProfileId, Verification>,
+    list: ProfileRows<'_>,
+    window: &mut Window,
     cx: &mut Context<AppView>,
     p: Palette,
     t: &'static Text,
 ) -> Div {
+    let ProfileRows {
+        rows,
+        selected: selected_id,
+        verifications,
+        focus,
+    } = list;
     div()
         .flex()
         .flex_col()
@@ -214,7 +232,14 @@ pub(super) fn profile_list(
         .children(rows.iter().map(|row| {
             let id = row.profile.id;
             let is_selected = selected_id == Some(id);
-
+            // A row is a keyboard target as well as a mouse one: the list is the
+            // page's content, and the only way to open the panel behind a row
+            // without a pointer would otherwise be to edit the profile.
+            let handle = focus.get(&id);
+            let focused = handle.is_some_and(|handle| handle.is_focused(window));
+            // The chosen row and the focused one are two different things and
+            // are drawn as two: selection is the background and the accent edge,
+            // focus is the ring the rest of the window's controls use.
             div()
                 .id(format!("profile-{id}"))
                 .test_support()
@@ -232,6 +257,25 @@ pub(super) fn profile_list(
                     this.hover(|this| this.bg(rgb(p.hover)))
                 })
                 .cursor_pointer()
+                .aria_label(t.profile_row_aria(
+                    &row.profile.name,
+                    row.state_label(t),
+                    &row.core_name,
+                ))
+                .when_some(handle, |this, handle| {
+                    this.track_focus(handle)
+                        .tab_stop(true)
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                            // Enter, and not Space: a list that scrolls answers
+                            // Space by paging, and a row that swallowed it would
+                            // take that away from the reader.
+                            if event.keystroke.key == "enter" {
+                                this.on_select(id, cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                })
+                .when(focused, |this| this.focus_ring_style(window, cx))
                 .on_click(cx.listener(move |this, _, _, cx| this.on_select(id, cx)))
                 // What the profile is: the name, and the engine under it. The
                 // seed and the platform it claims are details, not a byline.

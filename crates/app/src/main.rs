@@ -331,6 +331,10 @@ fn main() {
         .with_assets(ui::icons::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            // The window's own keyboard, after the library's: those bindings
+            // carry a key context and these do not, so the library's win wherever
+            // both would answer the same key.
+            ui::keys::bind(cx);
             // The appearance the user last chose, applied before the first frame so
             // the window is never painted in the other palette and then corrected.
             // The component library's own default is light; this one call moves both

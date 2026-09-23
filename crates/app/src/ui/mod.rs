@@ -143,6 +143,45 @@ pub struct AppView {
     exit_remember: bool,
     /// The same, for the filter field's change events.
     filter_changed: Option<Subscription>,
+    /// A focus handle per profile row, made the first time that row is drawn.
+    ///
+    /// A row is a keyboard target: Tab reaches it, Enter opens the panel that
+    /// describes it, and closing that panel puts the keyboard back where it came
+    /// from. The handle has to outlive the frame that drew the row for the last
+    /// part to be possible, so it is kept here, keyed by the profile it belongs
+    /// to, and dropped when the profile is.
+    row_focus: std::collections::HashMap<ProfileId, FocusHandle>,
+    /// A shortcut has asked for the filter field, and the frame that can focus it
+    /// has not been drawn yet.
+    ///
+    /// The field is built while rendering - an `InputState` needs a window - so a
+    /// request that arrives between frames is remembered and honoured once there
+    /// is something to focus.
+    focus_filter: bool,
+    /// The details panel has just been put away and the keyboard belongs back on
+    /// the row it was opened from. Deferred for the same reason.
+    focus_row: bool,
+    /// Escape was pressed, and which layer that closes is decided where the
+    /// window is: a dialog is a layer this view cannot see, and the test for one
+    /// needs a `Window`.
+    escape: bool,
+    /// The window's own focus: what the keyboard belongs to before it has chosen
+    /// a control.
+    ///
+    /// A window that opens with nothing focused answers Tab with nothing at all -
+    /// the keymap matches bindings along the path from the focused element, and
+    /// there is no path - so the first frame puts the keyboard here. It is not a
+    /// tab stop of its own: Tab from it reaches the first control, which is the
+    /// first thing in the sidebar.
+    ///
+    /// Made in [`AppView::boot`] rather than here because a handle needs an app,
+    /// and this constructor is handed the state instead of the app: the view is
+    /// built before there is a window, and the handle is not needed until there
+    /// is one.
+    view_focus: Option<FocusHandle>,
+    /// Whether that has happened. Once is enough: after it, the keyboard is
+    /// wherever the reader put it.
+    focused_once: bool,
 }
 
 impl AppView {
@@ -200,6 +239,12 @@ impl AppView {
             close_hook: false,
             exit_remember: false,
             filter_changed: None,
+            row_focus: std::collections::HashMap::new(),
+            focus_filter: false,
+            focus_row: false,
+            escape: false,
+            view_focus: None,
+            focused_once: false,
         }
     }
 
@@ -297,6 +342,7 @@ impl AppView {
     /// Load storage once, then keep reconciling from snapshots in the background.
     pub fn boot(&mut self, cx: &mut Context<Self>) {
         let _ = self.state.load();
+        self.view_focus = Some(cx.focus_handle());
         // Quitting on the last closed window is the default on Windows/Linux but
         // not on macOS; make it uniform so the supervisor shutdown always runs.
         //
@@ -308,6 +354,26 @@ impl AppView {
                 cx.quit();
             }
         }));
+        // The window's own two keys. A global listener rather than an
+        // `on_action` on a page, because both have to work with the keyboard
+        // wherever it happens to be - including nowhere, which is where a window
+        // that has just opened is.
+        let view = cx.entity().downgrade();
+        gpui_kit::App::on_action(
+            cx,
+            move |_: &keys::FocusProfileFilter, cx: &mut gpui_kit::App| {
+                view.update(cx, |view, cx| view.on_focus_profile_filter(cx))
+                    .ok();
+            },
+        );
+        let view = cx.entity().downgrade();
+        gpui_kit::App::on_action(cx, move |_: &keys::CloseDetails, cx: &mut gpui_kit::App| {
+            view.update(cx, |view, cx| {
+                view.escape = true;
+                cx.notify();
+            })
+            .ok();
+        });
         self.poll_runtime(cx);
     }
 
@@ -347,6 +413,45 @@ impl AppView {
         input
     }
 
+    /// The focus handles of the rows this frame is about to draw.
+    ///
+    /// One per profile, made on first sight and kept afterwards: a handle made
+    /// fresh every frame would drop the keyboard at every state change, because
+    /// the row the reader is standing on would no longer be the row on screen.
+    /// Profiles that are gone are forgotten here, which is also when their
+    /// handles are released.
+    fn row_focus_handles(
+        &mut self,
+        rows: &[ProfileRow],
+        cx: &mut App,
+    ) -> std::collections::HashMap<ProfileId, FocusHandle> {
+        for row in rows {
+            let id = row.profile.id;
+            // The flag is on the handle rather than on the element: the tab
+            // order is built from the handles, and only a handle that says it is
+            // a stop is one Tab reaches.
+            self.row_focus
+                .entry(id)
+                .or_insert_with(|| cx.focus_handle().tab_stop(true));
+        }
+        let listed: std::collections::HashSet<ProfileId> =
+            rows.iter().map(|row| row.profile.id).collect();
+        self.row_focus.retain(|id, _| listed.contains(id));
+        self.row_focus.clone()
+    }
+
+    /// Puts the keyboard in the profile filter, wherever the window was.
+    ///
+    /// The page comes first: a shortcut that put the cursor in a field on a page
+    /// that is not on screen would look like it had done nothing at all.
+    pub(super) fn on_focus_profile_filter(&mut self, cx: &mut Context<Self>) {
+        if self.state.page() != Page::Profiles {
+            self.state.set_page(Page::Profiles);
+        }
+        self.focus_filter = true;
+        cx.notify();
+    }
+
     /// Narrows the profiles list to what the field holds.
     ///
     /// Only what the page lists. A profile that stops matching keeps running,
@@ -383,6 +488,7 @@ pub(crate) mod components;
 mod cores;
 mod details;
 pub(crate) mod icons;
+pub(crate) mod keys;
 mod lifecycle;
 mod logs;
 mod profiles;
@@ -393,12 +499,13 @@ mod workers;
 use self::cores::{cores_body, cores_header};
 use self::details::details_panel;
 use self::logs::{format_age, logs_body, logs_header};
-use self::profiles::{empty_hint, list_header, profile_list, profiles_header};
+use self::profiles::{ProfileRows, empty_hint, list_header, profile_list, profiles_header};
 use self::proxies::{proxies_body, proxies_header};
 use self::settings::{
     SettingsCards, SettingsExport, exit_choice, settings_body, settings_groups, settings_header,
 };
 use gpui_kit::assets::IconName;
+use gpui_kit::component::ThemeStyled as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 
 impl Render for AppView {
@@ -417,6 +524,22 @@ impl Render for AppView {
             });
         }
 
+        // Escape, one layer at a time. A dialog is drawn by the Root rather than
+        // by this view, so the only way to know it is there is to ask the window;
+        // and a dialog opened from a row's menu is opened while the keyboard is
+        // still on the trigger, which is why this cannot be left to the dialog's
+        // own Escape binding.
+        if std::mem::take(&mut self.escape) {
+            if window.has_active_dialog(cx) {
+                // Closed through the library's own path, on the next turn of the
+                // loop: closing a dialog means updating the Root, and the Root is
+                // what is drawing this frame.
+                window.defer(cx, |window, cx| window.close_dialog(cx));
+            } else {
+                self.on_close_details(cx);
+            }
+        }
+
         let t = self.state.text();
         let p = palette(cx);
         // Where the details panel goes: beside the list when the window has
@@ -432,6 +555,11 @@ impl Render for AppView {
         // The filter field is built here because rendering is the first place
         // with a window to give an `InputState`; the view keeps it after that.
         let filter_input = self.ensure_filter_input(window, cx);
+        // A shortcut asks for the field between frames; this is the first frame
+        // that has one to give the keyboard to.
+        if std::mem::take(&mut self.focus_filter) {
+            window.focus(&filter_input.read(cx).focus_handle(cx), cx);
+        }
         let export_input = self.ensure_export_input(window, cx);
         let import_input = self.ensure_import_input(window, cx);
         let restore_input = self.ensure_restore_input(window, cx);
@@ -462,7 +590,18 @@ impl Render for AppView {
             .map(|id| self.state.log_tail(id))
             .unwrap_or_default();
 
+        if !self.focused_once
+            && let Some(handle) = self.view_focus.clone()
+        {
+            self.focused_once = true;
+            window.focus(&handle, cx);
+        }
+
         div()
+            .id("window-body")
+            .when_some(self.view_focus.clone(), |this, handle| {
+                this.track_focus(&handle)
+            })
             .flex()
             .flex_col()
             .size_full()
@@ -573,6 +712,10 @@ impl Render for AppView {
                                 ))
                             })
                             .when(page == Page::Profiles, |this| {
+                                // Before the rows are drawn, because the handle a
+                                // row tracks has to be the one the panel's close
+                                // puts the keyboard back on.
+                                let row_focus = self.row_focus_handles(&visible, cx);
                                 let list = div()
                                     .flex()
                                     .flex_col()
@@ -601,14 +744,27 @@ impl Render for AppView {
                                                 t,
                                             ))
                                             .child(profile_list(
-                                                &visible,
-                                                selected_id,
-                                                &verifications,
+                                                ProfileRows {
+                                                    rows: &visible,
+                                                    selected: selected_id,
+                                                    verifications: &verifications,
+                                                    focus: &row_focus,
+                                                },
+                                                window,
                                                 cx,
                                                 p,
                                                 t,
                                             )),
                                     );
+                                // The keyboard goes back to the row the panel was
+                                // opened from: a reader who opened it with Enter
+                                // should not have to find the row again.
+                                if std::mem::take(&mut self.focus_row)
+                                    && let Some(handle) =
+                                        selected_id.and_then(|id| row_focus.get(&id))
+                                {
+                                    window.focus(handle, cx);
+                                }
                                 // The panel answers for the profile the window
                                 // has chosen, and is on screen only while it is
                                 // being read: a panel fixed under the list cost
