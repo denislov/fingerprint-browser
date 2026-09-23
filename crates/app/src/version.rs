@@ -10,6 +10,14 @@
 /// window speaks, like `SOCKS5` and the `FP_BROWSER_*` variables.
 pub const NAME: &str = "Fingerprint Browser";
 
+/// The short name the sidebar's brand shows.
+///
+/// The sidebar has room for a mark and a word, not for the name the title bar
+/// and a report need spelled out, so the brand there is the short form. One
+/// constant rather than a literal in the window: the mark and the word beside
+/// it are the same brand, and a second copy would be one that drifts.
+pub const BRAND: &str = "FpBrowser";
+
 /// The crate version, from the workspace's `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -284,7 +284,20 @@ struct Stored {
     /// What closing the window does, the same way. Absent means "ask", which is
     /// also what a file written before the exit modes existed means.
     exit_mode: Option<String>,
+    /// Whether the sidebar is drawn as a rail of icons, the same way. Absent
+    /// means the expanded sidebar, which is also what a file written before the
+    /// rail existed means.
+    sidebar: Option<String>,
 }
+
+/// The name a collapsed sidebar is stored under.
+///
+/// A name rather than a flag in the file, the way the appearance is: a stored
+/// value this build does not know falls back to the expanded sidebar instead of
+/// failing the parse, and a parse failure would cost the reader every other
+/// setting in the same file. The expanded sidebar is the fallback because it is
+/// what every config file written before this one means.
+const SIDEBAR_COLLAPSED: &str = "collapsed";
 
 /// The environment, read once so a test can supply its own.
 #[derive(Debug, Default, Clone)]
@@ -336,6 +349,10 @@ pub struct Settings {
     /// language: it is read when the window is closed, which is a decision made
     /// long after this read.
     exit_mode: ExitMode,
+    /// Whether the sidebar is a rail of icons. Resolved once, like the rest:
+    /// it is the shape the window is drawn in, and the switch that changes it
+    /// writes the file before the window moves.
+    sidebar_collapsed: bool,
 }
 
 impl Settings {
@@ -367,6 +384,13 @@ impl Settings {
         // Like the appearance: a standing choice about this installation, not
         // about what this process does, so no environment override.
         let exit_mode = ExitMode::from_code(stored.exit_mode.as_deref().unwrap_or(""));
+        // The same again: nothing here is read from the environment, because
+        // how wide the sidebar is is not something a script starts the program
+        // with.
+        let sidebar_collapsed = stored
+            .sidebar
+            .as_deref()
+            .is_some_and(|code| code.trim().eq_ignore_ascii_case(SIDEBAR_COLLAPSED));
 
         // An error is worth more than the migration note, and only one of them
         // can be set: the move either read the old file or it did not.
@@ -405,6 +429,7 @@ impl Settings {
             theme,
             lang,
             exit_mode,
+            sidebar_collapsed,
         };
         (settings, notice)
     }
@@ -512,6 +537,35 @@ impl Settings {
 
     pub fn runtime_dir(&self) -> PathBuf {
         self.data_dir.join("runtime")
+    }
+
+    /// Whether the sidebar is drawn as a rail of icons.
+    pub fn sidebar_collapsed(&self) -> bool {
+        self.sidebar_collapsed
+    }
+
+    /// Stores whether the sidebar is a rail.
+    ///
+    /// Written before it is used, like the appearance and the language: a config
+    /// file that cannot be written refuses the switch rather than drawing a
+    /// sidebar that would be back to its old width by the next start. The
+    /// refusal costs the reader nothing but the click - the window they were
+    /// looking at stays as it was, and the banner says why.
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) -> Result<(), String> {
+        if let Some(error) = &self.config_error {
+            return Err(self
+                .text()
+                .settings_cannot_write(&self.config_path.display().to_string(), error));
+        }
+        let mut stored = self.stored.clone();
+        // Removed rather than written as "expanded": absent is what the file
+        // meant before this setting existed, so the two spellings would be a
+        // second way to say the same thing in a file people read.
+        stored.sidebar = collapsed.then(|| SIDEBAR_COLLAPSED.to_string());
+        write_config(&self.config_path, &stored, self.text())?;
+        self.stored = stored;
+        self.sidebar_collapsed = collapsed;
+        Ok(())
     }
 
     /// Every line of the settings page, in the order it is shown.

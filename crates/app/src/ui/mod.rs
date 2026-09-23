@@ -52,11 +52,13 @@ const PROFILE_FILTER_WIDTH: f32 = 320.0;
 
 /// The window width at which the details panel can sit beside the list.
 ///
-/// The sum is the sidebar, the page's padding on both sides, the panel, the gap
-/// between the two columns and the list: 200 + 48 + 380 + 16 + 720. Below it the
-/// panel covers the list instead, because a list narrower than that cannot show
-/// four columns of anything.
-const DETAILS_DOCK_MIN: f32 = 1364.0;
+/// What the docked panel needs *besides* the sidebar: the page's padding on both
+/// sides, the panel, the gap between the columns and the list - 48 + 380 + 16 +
+/// 720. The sidebar is added to it where it is measured, because how wide that
+/// is depends on whether its labels are showing. Below the sum the panel covers
+/// the list instead, because a list narrower than that cannot show four columns
+/// of anything.
+const DETAILS_DOCK_REST: f32 = 1164.0;
 
 pub struct AppView {
     /// The editor behind the open dialog, if any.
@@ -542,13 +544,24 @@ impl Render for AppView {
 
         let t = self.state.text();
         let p = palette(cx);
+        // The sidebar's shape this frame. Read here rather than in `sidebar`,
+        // because the two breakpoints below are sums that include it: a rail
+        // gives the page 144 pixels back, and a window that kept the old
+        // thresholds would fold the table's columns and cover the list with the
+        // panel while there was room for both.
+        let collapsed = self.state.sidebar_collapsed();
+        let sidebar_width = if collapsed {
+            components::SIDEBAR_RAIL
+        } else {
+            components::SIDEBAR
+        };
         // Where the details panel goes: beside the list when the window has
         // room for both, over it when a readable list and a readable panel
         // cannot both fit. Measured on every frame, so resizing the window moves
         // the panel rather than requiring a restart.
-        let docked = window.viewport_size().width.as_f32() >= DETAILS_DOCK_MIN;
-        let compact_resources =
-            window.viewport_size().width.as_f32() < components::RESOURCE_TABLE_MIN;
+        let width = window.viewport_size().width.as_f32();
+        let docked = width >= DETAILS_DOCK_REST + sidebar_width;
+        let compact_resources = width < components::resource_table_min(sidebar_width);
         // The overlay layers live above the view and are rendered by the view
         // itself: without these, a dialog can be opened and never appear.
         let dialogs = Root::render_dialog_layer(window, cx);
@@ -615,7 +628,7 @@ impl Render for AppView {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(sidebar(self.state.page(), cx, t))
+                    .child(sidebar(self.state.page(), collapsed, cx, t))
                     .child({
                         let page = self.state.page();
                         let proxy_rows = self.state.proxy_rows().unwrap_or_default();
@@ -804,8 +817,9 @@ impl Render for AppView {
 ///
 /// Two shapes, one panel. Docked, the panel is a column beside the list and both
 /// stay readable; covering, it takes the list's place and carries the button
-/// that gives it back. Which one a window gets is [`DETAILS_DOCK_MIN`], decided
-/// from the window's own width rather than from anything the user has to set.
+/// that gives it back. Which one a window gets is [`DETAILS_DOCK_REST`] plus the
+/// sidebar's own width, decided from the window's width rather than from anything
+/// the user has to set.
 fn profiles_workspace(
     list: impl IntoElement,
     panel: Option<impl IntoElement>,
@@ -828,10 +842,32 @@ fn profiles_workspace(
 
 /// The pages that sit under the brand, in the order the sidebar lists them.
 ///
-/// Settings is not one of them: it is about the program rather than about what
-/// the program manages, so it is pinned to the foot of the sidebar where a
-/// settings entry belongs.
-const WORK_PAGES: [Page; 4] = [Page::Profiles, Page::Proxies, Page::Cores, Page::Log];
+/// Settings is the last of them rather than an entry pinned to the foot: it is
+/// one more place the window goes, and a reader looking for it looks where the
+/// other four are. The footer below keeps the version and the rare actions, so
+/// the list still ends where the chrome does.
+const PAGES: [Page; 5] = [
+    Page::Profiles,
+    Page::Proxies,
+    Page::Cores,
+    Page::Log,
+    Page::Settings,
+];
+
+/// The height of one row of that list.
+///
+/// The library's own medium button is 32 high; a navigation is read a row at a
+/// time and the selected row is a pill, so the row gets a little more room than
+/// the controls it is made of.
+const NAV_ROW: f32 = 36.0;
+
+/// The height of the sidebar's head, in both of the shapes it has.
+///
+/// Fixed rather than left to its contents, so the first navigation row is at the
+/// same height with the labels showing and with them put away: the list is the
+/// thing the reader is aiming at, and it should not move under the pointer that
+/// just collapsed the sidebar.
+const SIDEBAR_HEAD: f32 = 56.0;
 
 /// What a page looks like in the navigation.
 fn nav_glyph(page: Page) -> IconName {
@@ -851,61 +887,195 @@ fn nav_glyph(page: Page) -> IconName {
 /// window's own close control is the exit affordance, the brand's menu carries
 /// the low-frequency variants of it, and the page below gets the height that the
 /// removed header used to take.
-fn sidebar(page: Page, cx: &mut Context<AppView>, t: &'static Text) -> Div {
+///
+/// One list, laid against the sidebar's left edge, with the same indent as the
+/// brand above it. Settings is the last row of that list rather than a block of
+/// its own at the foot: a navigation that puts one of its five destinations
+/// somewhere else makes the reader look in two places for one thing.
+///
+/// Collapsed, the same list is [`SIDEBAR_RAIL`] wide and shows the marks alone.
+/// Nothing is rebuilt for it: a row is the same element either way, with its
+/// label left out and the row's own tooltip carrying the name instead - which is
+/// what a reader who cannot see the word needs, and what a screen reader was
+/// already getting from the row's accessible name.
+///
+/// [`SIDEBAR_RAIL`]: components::SIDEBAR_RAIL
+fn sidebar(
+    page: Page,
+    collapsed: bool,
+    cx: &mut Context<AppView>,
+    t: &'static Text,
+) -> impl IntoElement {
     let p = palette(cx);
     // Built with a loop rather than a `map`: a navigation item borrows the
     // context it listens on, and a closure that captured the context mutably
     // could not hand one back.
-    let mut work = div().flex().flex_col().gap_1().flex_1().min_h_0().px_3();
-    for candidate in WORK_PAGES {
-        work = work.child(nav_item(candidate, page, cx, t));
+    let mut nav = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .flex_1()
+        .min_h_0()
+        // The rail keeps a smaller margin than the open sidebar: its rows are
+        // as wide as the mark plus the padding the button draws around it, and
+        // the margin is what is left of the rail.
+        .when(collapsed, |this| this.px_2())
+        .when(!collapsed, |this| this.px_3());
+    for candidate in PAGES {
+        nav = nav.child(nav_item(candidate, page, collapsed, cx, t));
     }
 
     div()
+        .id("sidebar")
+        .test_support()
         .flex()
         .flex_col()
-        .w(px(components::SIDEBAR))
+        .w(px(if collapsed {
+            components::SIDEBAR_RAIL
+        } else {
+            components::SIDEBAR
+        }))
         .flex_shrink_0()
         .border_r_1()
         .border_color(rgb(p.border))
         .bg(rgb(p.panel))
-        .child(brand())
-        .child(work)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .px_3()
-                .child(nav_item(Page::Settings, page, cx, t)),
-        )
-        .child(sidebar_footer(cx, t))
+        .child(brand(collapsed, cx, t))
+        .child(nav)
+        .child(sidebar_footer(collapsed, cx, t))
 }
 
-/// The product's mark and name, at the head of the sidebar.
+/// The product's mark, its name, and the way between the two widths.
 ///
-/// The mark is the same SVG the packaging scripts turn into the window and tray
-/// icons, so the window cannot end up wearing two different logos.
-fn brand() -> Div {
+/// Open, the head is one row: the mark, the name, and the switch at the far edge
+/// of it.
+///
+/// As a rail it is the mark, and the switch *is* the mark: a rail has room for
+/// one control, and a control that is always drawn is one the reader has to
+/// learn before the rail reads as a navigation at all. Nothing moves when the
+/// pointer arrives - see [`rail_head`] - so the list below the head stays where
+/// it was either way.
+fn brand(collapsed: bool, cx: &mut Context<AppView>, t: &'static Text) -> impl IntoElement {
+    if collapsed {
+        return rail_head(cx, t).into_any_element();
+    }
     div()
+        .h(px(SIDEBAR_HEAD))
         .flex()
         .items_center()
         .gap_2()
         .px_3()
-        .py_4()
-        .child(img(icons::BRAND).w(px(24.0)).h(px(24.0)).flex_shrink_0())
+        .child(brand_mark())
         .child(
             div()
                 .min_w_0()
                 .truncate()
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(version::NAME),
+                .child(version::BRAND),
+        )
+        // The name keeps its natural width and the switch takes the far edge,
+        // rather than the name being pushed there by a spacer: a translated name
+        // is not a fixed width, and this way the switch is at the same x in
+        // either language.
+        .child(div().flex_1())
+        .child(sidebar_toggle(cx, t))
+        .into_any_element()
+}
+
+/// The product's mark.
+///
+/// The same SVG the packaging scripts turn into the window and tray icons, so
+/// the window cannot end up wearing two different logos.
+fn brand_mark() -> impl IntoElement {
+    img(icons::BRAND).w(px(24.0)).h(px(24.0)).flex_shrink_0()
+}
+
+/// The head as a rail: the mark, which is also the switch.
+///
+/// The whole head is the button. Hovering it swaps the mark for the switch in
+/// the same place - which is where a reader looks for one, and which says what
+/// the click will do without a control that has to be read first. Leaving takes
+/// the mark back.
+///
+/// The swap is drawn, not rebuilt: both marks are in the button, one over the
+/// other, and the group's hover decides which of them is seen. So the button is
+/// there whether or not a pointer is - a rail whose only way out appears on
+/// hover would be a rail the keyboard cannot leave.
+fn rail_head(cx: &mut Context<AppView>, t: &'static Text) -> impl IntoElement {
+    let p = palette(cx);
+    Button::new("sidebar-toggle")
+        .ghost()
+        .tooltip(t.sidebar_expand)
+        .accessibility_label(t.sidebar_expand)
+        .w_full()
+        .h(px(SIDEBAR_HEAD))
+        // Cancelled because the content is laid out here rather than by the
+        // library: the mark is 24 wide, and the padding a button normally keeps
+        // around its content would leave the row too narrow to draw it in.
+        .px_0()
+        .on_click(cx.listener(|this, _, _, cx| this.on_toggle_sidebar(cx)))
+        .child(
+            div()
+                .id("sidebar-head")
+                .test_support()
+                .group("sidebar-head")
+                .relative()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().id("sidebar-mark").test_support().child(brand_mark()))
+                .child(
+                    div()
+                        .id("sidebar-switch")
+                        .test_support()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        // The switch is drawn over the mark, so the cover behind
+                        // it has to be the colour it hides: two marks on top of
+                        // each other read as neither.
+                        .bg(rgb(p.panel))
+                        .invisible()
+                        .group_hover("sidebar-head", |this| this.visible())
+                        .child(icons::nav(icons::glyph::SIDEBAR_EXPAND)),
+                ),
         )
 }
 
+/// The switch that puts the labels away.
+///
+/// The open head's copy of it: at the far edge of the row, always drawn, and
+/// carrying the mark that says which way the next click goes. The rail's is the
+/// head itself - [`rail_head`] - because a rail has no room for a second control.
+fn sidebar_toggle(cx: &mut Context<AppView>, t: &'static Text) -> Button {
+    components::icon_button(
+        "sidebar-toggle",
+        icons::glyph::SIDEBAR_COLLAPSE,
+        t.sidebar_collapse,
+    )
+    .on_click(cx.listener(|this, _, _, cx| this.on_toggle_sidebar(cx)))
+}
+
 /// One page in the navigation: an icon, the name, and the state of the choice.
-fn nav_item(candidate: Page, page: Page, cx: &mut Context<AppView>, t: &Text) -> impl IntoElement {
+///
+/// The icon and the name go in one child rather than in the button's own `icon`
+/// and `label` slots. The component library lays those out centred in the row,
+/// which puts every name at a different x - the mark and the word move with the
+/// length of the word - and a navigation is read down a column, not across a
+/// line. The child fills the row, so where it starts is where the button's own
+/// padding ends, and everything inside it starts there too, on every row.
+fn nav_item(
+    candidate: Page,
+    page: Page,
+    collapsed: bool,
+    cx: &mut Context<AppView>,
+    t: &Text,
+) -> impl IntoElement {
     let p = palette(cx);
     let active = candidate == page;
     let ready = candidate.is_ready();
@@ -920,15 +1090,14 @@ fn nav_item(candidate: Page, page: Page, cx: &mut Context<AppView>, t: &Text) ->
         .selected(active)
         .disabled(!ready)
         .w_full()
-        .justify_start()
         .accessibility_label(label.clone())
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(px(36.0))
-        .px_3()
+        .h(px(NAV_ROW))
         .rounded(px(components::RADIUS_CONTROL))
         .text_sm()
+        // With the label gone the name has to be somewhere a pointer can find
+        // it: the row keeps it as its tooltip, which is also the only place a
+        // reader can check what a mark in the rail means.
+        .when(collapsed, |this| this.tooltip(label.clone()))
         .when(active, |this| {
             this.bg(rgb(p.selected))
                 .text_color(rgb(p.accent))
@@ -940,8 +1109,31 @@ fn nav_item(candidate: Page, page: Page, cx: &mut Context<AppView>, t: &Text) ->
             this.text_color(rgb(p.secondary)).cursor_pointer()
         })
         .when(!ready, |this| this.text_color(rgb(p.dim)))
-        .child(icons::nav(nav_glyph(candidate)))
-        .child(label)
+        .child(
+            div()
+                .id(format!("nav-row-{}", candidate.id()))
+                .test_support()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                // The rail has one column, not two: the mark is centred in the
+                // row rather than sitting where the label would have started.
+                .when(collapsed, |this| this.justify_center())
+                .when(!collapsed, |this| this.justify_start())
+                .gap_2()
+                .child(icons::nav(nav_glyph(candidate)))
+                .when(!collapsed, |this| {
+                    this.child(
+                        div()
+                            .id(format!("nav-label-{}", candidate.id()))
+                            .test_support()
+                            .min_w_0()
+                            .truncate()
+                            .child(label),
+                    )
+                }),
+        )
         .when(ready, |this| {
             this.on_click(cx.listener(move |this, _, _, cx| this.on_page(candidate, cx)))
         })
@@ -952,7 +1144,11 @@ fn nav_item(candidate: Page, page: Page, cx: &mut Context<AppView>, t: &Text) ->
 /// What lives here is everything that used to be in the removed header and
 /// everything too rare to deserve a page: about, closing the window through the
 /// saved exit policy, and stopping everything.
-fn sidebar_footer(cx: &mut Context<AppView>, t: &'static Text) -> Div {
+///
+/// As a rail there is no room for the version - "v0.1.0" is wider than the rail
+/// and a clipped word is worse than none - so the menu is all that is left, and
+/// it is centred where the mark above it is.
+fn sidebar_footer(collapsed: bool, cx: &mut Context<AppView>, t: &'static Text) -> Div {
     let p = palette(cx);
     let view = cx.entity().downgrade();
     let about = view.clone();
@@ -967,12 +1163,15 @@ fn sidebar_footer(cx: &mut Context<AppView>, t: &'static Text) -> Div {
         .py_3()
         .border_t_1()
         .border_color(rgb(p.border))
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(p.dim))
-                .child(format!("v{}", version::VERSION)),
-        )
+        .when(collapsed, |this| this.justify_center().px_2())
+        .when(!collapsed, |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(p.dim))
+                    .child(format!("v{}", version::VERSION)),
+            )
+        })
         .child(
             components::icon_button("brand-more", icons::glyph::MORE, t.menu_more).dropdown_menu(
                 move |menu, _window, _cx| {

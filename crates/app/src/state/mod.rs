@@ -714,6 +714,28 @@ impl AppState {
         self.settings.theme()
     }
 
+    /// Whether the sidebar is a rail of icons.
+    pub fn sidebar_collapsed(&self) -> bool {
+        self.settings.sidebar_collapsed()
+    }
+
+    /// Stores the sidebar's shape for the next start.
+    ///
+    /// An answer rather than a sentence: collapsing the sidebar says what it did
+    /// on the screen, so a toast repeating it would be the window narrating a
+    /// click back to the reader. A refusal is not like that - the sidebar did
+    /// not move, and only the banner can say why.
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) -> Result<(), AppError> {
+        let result = self
+            .settings
+            .set_sidebar_collapsed(collapsed)
+            .map_err(AppError::Conflict);
+        if let Err(error) = &result {
+            self.set_notice(Notice::error(error.to_string()));
+        }
+        result
+    }
+
     /// Ends this run with every running session left running.
     ///
     /// The browsers and the tunnels stay, and the runtime marks their records so

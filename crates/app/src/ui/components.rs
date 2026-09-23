@@ -23,14 +23,33 @@ use gpui_kit::assets::IconName;
 /// beside it is what the reader came for.
 pub const SIDEBAR: f32 = 200.0;
 
+/// The sidebar's width with every label put away.
+///
+/// A navigation mark, the padding the row's own button draws around it and the
+/// margin the list keeps from the window's edge: 18 + 20 + 16, with two pixels
+/// over. Every pixel here is one the page beside it does not have, so the rail
+/// is as narrow as the mark and its button allow and no narrower.
+pub const SIDEBAR_RAIL: f32 = 56.0;
+
 /// The padding around a page's content.
 pub const PAGE_PADDING: f32 = 24.0;
 
-/// Below this viewport width, resource metadata moves below the name. The
-/// widest table needs 770px of fixed columns, 64px of gaps, 34px of row padding
-/// and borders, plus a readable name (200px), sidebar and page padding. Keep
-/// this independent of the profile details panel's docking breakpoint.
-pub const RESOURCE_TABLE_MIN: f32 = 1364.0;
+/// What the widest table needs besides the sidebar. The table's fixed columns,
+/// its gaps, its row padding and borders, a name that can be read, and the
+/// page's own padding on both sides. Kept separate from the profile details
+/// panel's docking breakpoint, which is a different sum that happens to land on
+/// the same number.
+pub const RESOURCE_TABLE_REST: f32 = 1164.0;
+
+/// Below this viewport width, resource metadata moves below the name.
+///
+/// A function of the sidebar rather than a number of its own, because the room
+/// the table has is the window minus the sidebar: collapsing the sidebar to its
+/// rail hands the table 144 pixels back, and a threshold that ignored them would
+/// put a name's metadata on a second line in a window with room for one.
+pub fn resource_table_min(sidebar: f32) -> f32 {
+    sidebar + RESOURCE_TABLE_REST
+}
 
 /// A page title's size.
 pub const TITLE: f32 = 22.0;

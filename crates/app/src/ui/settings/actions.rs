@@ -402,4 +402,18 @@ impl AppView {
         self.state.set_settings_group(group);
         cx.notify();
     }
+
+    /// Puts the sidebar's labels away, or brings them back.
+    ///
+    /// Nothing to apply beyond a repaint: the width and the labels are read from
+    /// the state during the render that is about to happen, so the page beside
+    /// the sidebar gets the room in the same frame the rail takes it. The new
+    /// width is stored *before* it is drawn, like the palette: a config file
+    /// that cannot be written refuses rather than showing a layout that would be
+    /// back to its old shape by the next start.
+    pub(in crate::ui) fn on_toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        let collapsed = self.state.sidebar_collapsed();
+        let _ = self.state.set_sidebar_collapsed(!collapsed);
+        cx.notify();
+    }
 }

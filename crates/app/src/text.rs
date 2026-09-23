@@ -178,6 +178,11 @@ catalog! {
     nav_cores => "Browser Cores" => "浏览器内核";
     nav_log => "Log" => "日志";
     nav_settings => "Settings" => "设置";
+    // The switch that puts the navigation's labels away. It is named for what
+    // the click does rather than for the state the sidebar is in, because it is
+    // a button's label and a button is read as what pressing it will do.
+    sidebar_collapse => "Collapse the sidebar" => "折叠侧栏";
+    sidebar_expand => "Expand the sidebar" => "展开侧栏";
 
     // ---- the profiles page ----
     profiles_intro => "Each profile owns its seed, data directory and browser process."

@@ -233,6 +233,194 @@ fn profiles_can_be_created_started_and_stopped_from_the_window(cx: &mut TestAppC
     assert!(commands[1].starts_with("stop:"));
 }
 
+/// The sidebar folds to a rail of marks, and open again, with the choice
+/// written down.
+///
+/// The rail is the same five rows with their names left out: the marks are the
+/// navigation, and the name each mark stands for is still on the row as its
+/// accessible name - which is what a screen reader reads, and what a pointer
+/// gets on hover. The switch writes before the window moves, so a config file
+/// that cannot be written leaves the sidebar where it was rather than drawing
+/// one that would be back to its old width by the next start.
+#[gpui_kit::test]
+fn the_sidebar_folds_to_a_rail_and_opens_again(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = std::env::temp_dir().join(format!("fp-ui-sidebar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let config = dir.join("config.json");
+    let (view, _runtime) = view_with_config(cx, &config);
+    let cx = window(cx, &view);
+
+    let width = |cx: &mut gpui_kit::VisualTestContext| {
+        cx.update(|window, _| window.find("sidebar").bounds().size.width)
+    };
+    let name = |cx: &mut gpui_kit::VisualTestContext, page: crate::state::Page| {
+        cx.update(|window, _| {
+            window
+                .find(format!("nav-{}", page.id()))
+                .label()
+                .map(str::to_string)
+        })
+    };
+
+    assert_eq!(
+        width(cx),
+        px(crate::ui::components::SIDEBAR),
+        "the sidebar opens as designed"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("nav-label-Profiles").is_some()),
+        "and it names its pages"
+    );
+
+    cx.update(|window, cx| window.click("sidebar-toggle", cx));
+    settle(cx);
+
+    assert_eq!(
+        width(cx),
+        px(crate::ui::components::SIDEBAR_RAIL),
+        "the rail is as wide as its marks"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("nav-label-Profiles").is_none()),
+        "the names are put away"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("nav-Profiles").is_some()),
+        "the marks are not"
+    );
+    assert_eq!(
+        name(cx, crate::state::Page::Profiles).as_deref(),
+        Some("Profiles"),
+        "the row still says which page it is, for a screen reader and a hover"
+    );
+    assert_eq!(
+        name(cx, crate::state::Page::Settings).as_deref(),
+        Some("Settings"),
+        "on every row, not only the first"
+    );
+    assert!(
+        std::fs::read_to_string(&config)
+            .expect("the switch wrote the config file")
+            .contains("collapsed"),
+        "the choice is written before the window moves"
+    );
+
+    // And back: one control for both directions.
+    cx.update(|window, cx| window.click("sidebar-toggle", cx));
+    settle(cx);
+    assert_eq!(
+        width(cx),
+        px(crate::ui::components::SIDEBAR),
+        "the labels come back with the width"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("nav-label-Profiles").is_some()),
+        "and the names with them"
+    );
+    assert!(
+        !std::fs::read_to_string(&config)
+            .expect("the switch wrote the config file")
+            .contains("collapsed"),
+        "expanding leaves the file with one spelling of expanded"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The rail's switch is the mark until the pointer arrives.
+///
+/// A rail has room for one control, so the mark is the control: hovering the
+/// head draws the switch where the mark was. The button exists either way - one
+/// that appeared only under a pointer would be one the keyboard could never
+/// reach - so what is pinned here is what is *seen*, which is the whole of the
+/// difference between the two states.
+#[gpui_kit::test]
+fn the_rail_shows_the_switch_only_under_the_pointer(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = std::env::temp_dir().join(format!("fp-ui-rail-hover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("config.json"), r#"{"sidebar": "collapsed"}"#).expect("temp config");
+    let (view, _runtime) = view_with_config(cx, &dir.join("config.json"));
+    let cx = window(cx, &view);
+
+    let drawn = |cx: &mut gpui_kit::VisualTestContext, id: &'static str| {
+        cx.update(|window, _| window.find(id).visible())
+    };
+
+    assert!(drawn(cx, "sidebar-mark"), "the mark is what the rail shows");
+
+    // The head is the window's top-left corner, which is where a test's pointer
+    // starts: it has to be taken away before there is anything to see.
+    cx.update(|window, cx| window.hover("nav-row-Profiles", cx));
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(
+        !drawn(cx, "sidebar-switch"),
+        "and the switch is not drawn while the pointer is away"
+    );
+
+    cx.update(|window, cx| window.hover("sidebar-head", cx));
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(
+        drawn(cx, "sidebar-switch"),
+        "the pointer over the head brings the switch out"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every row of the navigation starts at the same left edge.
+///
+/// The icon and the name are drawn by the row rather than handed to the button's
+/// own `icon` and `label` slots, because the library centres those: a centred row
+/// puts the long name further left than the short one, and a reader looking down
+/// the sidebar finds every page's mark at a different place. This pins the two
+/// columns a list read downwards is built from.
+#[gpui_kit::test]
+fn every_sidebar_row_starts_at_the_same_left_edge(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+
+    let bounds = |cx: &mut gpui_kit::VisualTestContext, id: String| {
+        cx.update(move |window, _| window.find(id).bounds())
+    };
+    let pages = [
+        crate::state::Page::Profiles,
+        crate::state::Page::Proxies,
+        crate::state::Page::Cores,
+        crate::state::Page::Log,
+        crate::state::Page::Settings,
+    ];
+    let rows: Vec<_> = pages
+        .iter()
+        .map(|page| bounds(cx, format!("nav-row-{}", page.id())).left())
+        .collect();
+    let labels: Vec<_> = pages
+        .iter()
+        .map(|page| bounds(cx, format!("nav-label-{}", page.id())).left())
+        .collect();
+
+    assert_eq!(rows.len(), 5, "the five destinations are one list");
+    assert!(
+        rows.iter().all(|left| *left == rows[0]),
+        "every row starts at the same left edge: {rows:?}"
+    );
+    assert!(
+        labels.iter().all(|left| *left == labels[0]),
+        "every name sits in one column under the icons: {labels:?}"
+    );
+    // And the column is at the left of the row, not in the middle of it: the
+    // name follows the icon, and starts well before the row's own midpoint.
+    let row = bounds(cx, "nav-row-Profiles".to_string());
+    assert!(
+        labels[0] > row.left() && labels[0] - row.left() < row.size.width / 2.0,
+        "the mark and the name are at the row's left edge: {row:?} against {labels:?}"
+    );
+}
+
 #[gpui_kit::test]
 fn the_sidebar_switches_to_the_proxies_page(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);

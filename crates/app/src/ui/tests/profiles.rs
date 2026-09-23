@@ -364,9 +364,10 @@ fn the_details_panel_is_opened_by_choosing_a_profile(cx: &mut TestAppContext) {
 /// A window with room for both puts the panel beside the list; one without
 /// covers the list with it.
 ///
-/// The threshold is [`super::super::DETAILS_DOCK_MIN`], and the point of the
-/// test is that the two layouts are the two the design asked for: side by side
-/// where both stay readable, and replacing the list where they cannot.
+/// The threshold is [`super::super::DETAILS_DOCK_REST`] plus the sidebar, and
+/// the point of the test is that the two layouts are the two the design asked
+/// for: side by side where both stay readable, and replacing the list where they
+/// cannot.
 #[gpui_kit::test]
 fn a_wide_window_docks_the_details_panel_and_a_narrow_one_covers_the_list(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);

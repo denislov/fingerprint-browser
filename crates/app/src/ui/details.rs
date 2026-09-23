@@ -12,7 +12,8 @@
 //! for both, it takes a column of its own beside the list and the two stay in
 //! view together; narrower, it covers the list and carries the way back, because
 //! a panel narrow enough to leave a readable list beside it would not be worth
-//! reading itself. The threshold is in [`super::DETAILS_DOCK_MIN`].
+//! reading itself. The threshold is in [`super::DETAILS_DOCK_REST`], plus the
+//! sidebar's own width, which is not always the same.
 
 use super::components::{Tone, status_badge};
 use super::logs::log_level_color;
@@ -22,7 +23,7 @@ use super::*;
 ///
 /// Wide enough for a label column and a path, which is the widest thing it
 /// holds, and inside the 360-400 the design asks for. What it costs the list is
-/// [`super::DETAILS_DOCK_MIN`] minus the sidebar, the page padding and this.
+/// [`super::DETAILS_DOCK_REST`] minus the page padding and this.
 pub(super) const PANEL_WIDTH: f32 = 380.0;
 
 /// The label column of a value row, so every value in every section starts on

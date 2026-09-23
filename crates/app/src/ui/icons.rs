@@ -131,6 +131,10 @@ pub mod glyph {
 
     // ---- the shell ----
     pub const MORE: IconName = IconName::Ellipsis;
+    /// Putting the navigation's labels away, and bringing them back: a sidebar
+    /// drawn with a mark, and one drawn on its own.
+    pub const SIDEBAR_COLLAPSE: IconName = IconName::PanelLeftClose;
+    pub const SIDEBAR_EXPAND: IconName = IconName::PanelLeftOpen;
     pub const ABOUT: IconName = IconName::Info;
     pub const CLOSE_WINDOW: IconName = IconName::Close;
     pub const QUIT_ALL: IconName = IconName::Power;

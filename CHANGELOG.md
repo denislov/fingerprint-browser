@@ -325,6 +325,36 @@ says nothing about, and the notes are that section rather than the whole file.
   the profiles the answer is about: what keeps managing them, what keeps going
   with no window over it, and what is stopped. With nothing running the standing
   sentence is still the whole truth.
+- The sidebar names the program in short form and keeps its five destinations in
+  one left-aligned list. The brand read **Fingerprint Browser** in a 200-pixel
+  column it shared with the mark, and Settings was pinned to the foot as a block
+  of its own - so the pages were found in one place and the fifth destination in
+  another. The brand now reads **FpBrowser**, and Settings is the last row of the
+  same list as Profiles, Proxies, Browser Cores and Log. The window title and
+  `--version` keep the spelled-out name: those are read in a report, where the
+  full name is worth the columns. Each row also draws its mark and its name
+  itself rather than handing them to the button's own `icon` and `label` slots,
+  which the component library centres: the marks and the names now sit in two
+  columns, instead of finding a place that moved with the length of each name.
+  `every_sidebar_row_starts_at_the_same_left_edge` pins the two edges.
+- The sidebar folds to a rail of marks and opens again, and the choice is kept
+  for the next start. Open, the switch is at the far edge of the head, beside the
+  brand; as a rail the head **is** the switch, because 56 pixels hold one control
+  and a switch that is always drawn is one the reader has to learn before the
+  rail reads as a navigation at all. The mark is what the rail shows, and the
+  pointer over the head swaps the mark for the switch in the same place - drawn
+  over it rather than rebuilt, so the button is there whether or not a pointer is
+  and the keyboard can still reach the only way out of the rail. Collapsed, the
+  five rows are the same rows with their names left out, and each keeps its name
+  as the accessible label and as its tooltip. The version in the foot is dropped
+  rather than clipped - a clipped word is worse than none - and the overflow menu
+  takes its place. Two numbers that were sums including the sidebar - where the
+  table's columns fold and where the details panel stops docking - are now
+  measured against the sidebar that is actually drawn, because a rail hands the
+  page 144 pixels back and a threshold that ignored them would fold a table that
+  fits. The state is stored under `sidebar` as `"collapsed"`, absent meaning the
+  sidebar as designed, and a name this build does not know means the same rather
+  than a config file that will not parse.
 
 ## [0.1.0] - 2026-09-22
 

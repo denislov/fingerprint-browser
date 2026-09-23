@@ -22,6 +22,19 @@ fn click(cx: &mut gpui_kit::VisualTestContext, id: String) {
     cx.update(move |window, cx| window.click(id, cx));
 }
 
+/// Presses Enter on whatever has the keyboard.
+///
+/// A plain component-library button answers the key *up*, so dispatching the
+/// press alone leaves it untouched - a row that binds Enter itself answers the
+/// press and needs nothing more, but the two events cost one helper and read the
+/// same everywhere.
+fn press_enter(cx: &mut gpui_kit::VisualTestContext) {
+    cx.update(|window, cx| window.press("enter", cx));
+    cx.simulate_event(gpui_kit::KeyUpEvent {
+        keystroke: gpui_kit::Keystroke::parse("enter").unwrap(),
+    });
+}
+
 /// Tabs until the keyboard is on `row`, and says whether it ever arrived.
 ///
 /// The tab order is the library's, built from the tree this window renders, so a
@@ -348,10 +361,7 @@ fn settings_groups_are_keyboard_reachable(cx: &mut TestAppContext) {
         tab_to_row(cx, group.id().into()),
         "settings groups must be Tab targets"
     );
-    cx.update(|window, cx| window.press("enter", cx));
-    cx.simulate_event(gpui_kit::KeyUpEvent {
-        keystroke: gpui_kit::Keystroke::parse("enter").unwrap(),
-    });
+    press_enter(cx);
     settle(cx);
     assert_eq!(
         view.read_with(cx, |view, _| view.state().settings_group()),
@@ -432,10 +442,7 @@ fn navigation_and_settings_choices_work_without_a_pointer(cx: &mut TestAppContex
     let (view, _runtime) = view(cx);
     let cx = window(cx, &view);
     assert!(tab_to_row(cx, "nav-Settings".into()));
-    cx.update(|window, cx| window.press("enter", cx));
-    cx.simulate_event(gpui_kit::KeyUpEvent {
-        keystroke: gpui_kit::Keystroke::parse("enter").unwrap(),
-    });
+    press_enter(cx);
     settle(cx);
     assert_eq!(
         view.read_with(cx, |view, _| view.state().page()),
@@ -494,4 +501,48 @@ fn search_shortcut_does_not_steal_focus_from_a_dialog(cx: &mut TestAppContext) {
     let filter = view.read_with(cx, |view, _| view.filter_input().unwrap());
     assert!(!cx.update(|window, cx| filter.read(cx).focus_handle(cx).is_focused(window)));
     assert!(cx.update(|window, cx| window.has_active_dialog(cx)));
+}
+
+/// The switch that folds the sidebar is a control like any other, and the rail
+/// it leaves is the same navigation.
+///
+/// A rail of marks is exactly the shape that loses a keyboard path if it is
+/// built as pictures: the row has to stay a button with a name, and the switch
+/// has to stay reachable from wherever the keyboard is when the sidebar moves.
+#[gpui_kit::test]
+fn the_sidebar_switch_and_its_rail_answer_the_keyboard(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = std::env::temp_dir().join(format!("fp-ui-rail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let (view, _runtime) = view_with_config(cx, &dir.join("config.json"));
+    let cx = window(cx, &view);
+
+    // The switch is the first control in the window: the head of the sidebar
+    // comes before the pages it navigates to.
+    assert!(
+        tab_to_row(cx, "sidebar-toggle".into()),
+        "Tab reaches the switch"
+    );
+    press_enter(cx);
+    settle(cx);
+    assert!(
+        view.read_with(cx, |view, _| view.state().sidebar_collapsed()),
+        "Enter folds the names away"
+    );
+
+    // The rail is the same five rows, so the keyboard path the window was given
+    // is the one it still has: a mark Tab reaches still goes to its page.
+    assert!(
+        tab_to_row(cx, "nav-Settings".into()),
+        "Tab reaches a mark in the rail"
+    );
+    press_enter(cx);
+    settle(cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.state().page()),
+        Page::Settings
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

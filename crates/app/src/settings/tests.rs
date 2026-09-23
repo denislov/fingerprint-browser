@@ -506,6 +506,44 @@ fn the_exit_mode_is_stored_and_an_unknown_one_means_asking() {
     assert_eq!(unknown.exit_mode(), ExitMode::Ask);
 }
 
+/// The sidebar's shape survives a restart, expanding is written as the absent
+/// value rather than as a second spelling of the same thing, and a name from a
+/// later build means the expanded sidebar instead of a config file this build
+/// refuses to read.
+#[test]
+fn the_sidebar_shape_is_stored_and_an_unknown_one_means_expanded() {
+    let config = TempConfig::new("sidebar");
+    config.write(r#"{"xray_executable": "/srv/xray"}"#);
+    let (mut settings, _) = Settings::load(env(&config));
+    assert!(!settings.sidebar_collapsed(), "absent means expanded");
+
+    settings.set_sidebar_collapsed(true).expect("save");
+    assert!(settings.sidebar_collapsed());
+    assert_eq!(
+        settings.xray_executable(),
+        Path::new("/srv/xray"),
+        "kept across the rewrite"
+    );
+    assert!(config.read().contains("collapsed"), "{}", config.read());
+
+    let (reloaded, _) = Settings::load(env(&config));
+    assert!(reloaded.sidebar_collapsed(), "the choice outlives the run");
+
+    // Expanded is the absent value, not a second name for it: the file people
+    // read should have one way to say "the sidebar as designed".
+    let (mut expanded, _) = Settings::load(env(&config));
+    expanded.set_sidebar_collapsed(false).expect("save");
+    assert!(
+        config.read().contains(r#""sidebar": null"#),
+        "expanded is the absent value: {}",
+        config.read()
+    );
+
+    config.write(r#"{"sidebar": "folded-away"}"#);
+    let (unknown, _) = Settings::load(env(&config));
+    assert!(!unknown.sidebar_collapsed(), "not knowing is not a refusal");
+}
+
 /// The language survives a restart, a region is not a different language,
 /// and a name this build does not know starts in English rather than
 /// refusing to start at all.
