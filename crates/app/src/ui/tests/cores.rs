@@ -497,6 +497,7 @@ fn the_core_rows_line_up_under_the_column_headings(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (view, _runtime) = view(cx);
     let cx = window(cx, &view);
+    cx.simulate_resize(size(px(1440.), px(900.)));
 
     cx.update(|window, cx| window.click("nav-Cores", cx));
     settle(cx);

@@ -62,13 +62,9 @@ pub(super) fn settings_groups(
                 .gap_2()
                 .children(SettingGroup::ALL.map(|option| {
                     let active = option == group;
-                    components::chip(option.id().to_string(), option.label(t), active, p)
-                        .test_support()
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.on_set_settings_group(option, cx)
-                            }),
-                        )
+                    components::chip(option.id().to_string(), option.label(t), active, p).on_click(
+                        cx.listener(move |this, _, _, cx| this.on_set_settings_group(option, cx)),
+                    )
                 })),
         )
         .child(
@@ -305,8 +301,7 @@ pub(super) fn appearance_card(
                     active,
                     p,
                 )
-                .test_support()
-                .aria_label(t.theme_aria(option.label(t)))
+                .accessibility_label(t.theme_aria(option.label(t)))
                 .on_click(cx.listener(move |this, _, _, cx| this.on_choose_theme(option, cx)))
             })),
         )
@@ -321,7 +316,6 @@ pub(super) fn appearance_card(
                     active,
                     p,
                 )
-                .test_support()
                 .on_click(cx.listener(move |this, _, _, cx| this.on_choose_language(option, cx)))
             })),
         )
@@ -368,7 +362,6 @@ pub(super) fn exit_mode_card(
                         active,
                         p,
                     )
-                    .test_support()
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.on_choose_exit_mode(option, cx)),
                     )
@@ -391,7 +384,7 @@ pub(super) fn exit_mode_card(
 /// decision made on a guess. Each row carries a mark of its own as well, so the
 /// three are told apart before the words are read - and the one that stops
 /// something is the only one drawn in the failure colour.
-pub(super) fn exit_choice(exit: Exit, running: usize, p: Palette, t: &Text) -> Stateful<Div> {
+pub(super) fn exit_choice(exit: Exit, running: usize, p: Palette, t: &Text) -> Button {
     // A given height, because the three answers have to look like three of the
     // same thing. Left to itself the dialog's content box gave the last row a
     // text line less than the two above it, and that row's own note then painted
@@ -406,15 +399,13 @@ pub(super) fn exit_choice(exit: Exit, running: usize, p: Palette, t: &Text) -> S
         Exit::ExitAll => (icons::glyph::EXIT_STOP_ALL, p.danger_strong),
     };
     let note = t.exit_choice_note(exit, running);
-    div()
-        .id(format!("exit-choice-{}", exit.code()))
+    Button::new(format!("exit-choice-{}", exit.code()))
+        .outline()
+        .w_full()
+        .justify_start()
         // The row is a control, and its whole content is what it does: a reader
         // who cannot see it must not be left with the title alone.
-        .aria_label(format!("{}. {note}", exit.label(t)))
-        .flex()
-        .flex_col()
-        .justify_center()
-        .gap_1()
+        .accessibility_label(format!("{}. {note}", exit.label(t)))
         .h(px(CHOICE_HEIGHT))
         .px_3()
         .rounded_md()
@@ -422,22 +413,27 @@ pub(super) fn exit_choice(exit: Exit, running: usize, p: Palette, t: &Text) -> S
         .border_color(rgb(if stops { p.danger } else { p.dim }))
         .when(stops, |this| this.bg(rgb(p.danger_bg_soft)))
         .cursor_pointer()
-        .hover(|this| this.bg(rgb(p.hover)))
         .child(
             div()
                 .flex()
-                .items_center()
-                .gap_2()
-                .child(icons::action(icon).text_color(rgb(colour)))
+                .flex_col()
+                .gap_1()
                 .child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(if stops { p.danger_strong } else { p.text }))
-                        .child(exit.label(t)),
-                ),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(icons::action(icon).text_color(rgb(colour)))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(if stops { p.danger_strong } else { p.text }))
+                                .child(exit.label(t)),
+                        ),
+                )
+                .child(div().text_xs().text_color(rgb(p.muted)).child(note)),
         )
-        .child(div().text_xs().text_color(rgb(p.muted)).child(note))
 }
 
 /// The export card at the foot of the Settings page.

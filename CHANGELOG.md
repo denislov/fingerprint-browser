@@ -34,6 +34,19 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Fixed
 
+- Selected navigation items, choice chips, details tabs and log filters retain
+  their selected colours on hover and press, using the button's selected visual
+  state rather than only its accessibility toggle state.
+- Proxy and core lists now keep names and actions readable in narrow windows.
+  Below 1364 logical pixels, secondary metadata moves under the resource name;
+  wide windows retain the aligned columns. Layout regressions cover Chinese and
+  English at 960, 1200, 1364 and 1440 pixels, including opening each row menu.
+- Sidebar navigation, settings groups, shared choice chips and the three close
+  choices now use keyboard-accessible buttons. Appearance and language choices
+  also share a wrapping row instead of stretching into separate full-width rows.
+- The About menu opens the diagnostics/about settings group. Ctrl+F no longer
+  changes the underlying page or steals focus while a dialog is open.
+
 - A record the database refuses is now reported as what it actually is. Every
   constraint failure used to be reported as "id already exists", so a profile
   naming a core that was not stored was told its identifier was taken; the

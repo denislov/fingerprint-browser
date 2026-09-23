@@ -335,3 +335,163 @@ fn a_long_notice_still_leaves_its_dismiss_button_on_screen(cx: &mut TestAppConte
         "and the sentence is the part that gives, not the button: {message:?} against {button:?}"
     );
 }
+
+#[gpui_kit::test]
+fn settings_groups_are_keyboard_reachable(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    click(cx, "nav-Settings".into());
+    settle(cx);
+    let group = crate::settings::SettingGroup::Data;
+    assert!(
+        tab_to_row(cx, group.id().into()),
+        "settings groups must be Tab targets"
+    );
+    cx.update(|window, cx| window.press("enter", cx));
+    cx.simulate_event(gpui_kit::KeyUpEvent {
+        keystroke: gpui_kit::Keystroke::parse("enter").unwrap(),
+    });
+    settle(cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.state().settings_group()),
+        group
+    );
+}
+
+#[gpui_kit::test]
+fn resource_actions_fit_the_minimum_window(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = std::env::temp_dir().join(format!("fp-ui-resource-layout-{}", std::process::id()));
+    let (view, _runtime) = view_with_config(cx, &dir.join("config.json"));
+    let cx = window(cx, &view);
+    let proxy = seed_proxy(cx, &view, &"Long proxy name 名称 ".repeat(12));
+    let core = view.read_with(cx, |view, _| view.state().core_rows().unwrap()[0].core.id);
+    for lang in crate::text::Lang::ALL {
+        view.update(cx, |view, _| view.state_mut().set_language(lang).unwrap());
+        for width in [960., 1200., 1364., 1440.] {
+            cx.simulate_resize(size(px(width), px(680.)));
+            for (page, action, menu, name) in [
+                (
+                    "nav-Proxies",
+                    "test-proxy-0",
+                    "more-proxy-0",
+                    format!("proxy-name-{proxy}"),
+                ),
+                (
+                    "nav-Cores",
+                    "redetect-core-0",
+                    "more-core-0",
+                    format!("core-name-{core}"),
+                ),
+            ] {
+                click(cx, page.into());
+                settle(cx);
+                for id in [action, menu] {
+                    assert!(
+                        is_clickable(cx, id),
+                        "{id} must fit at {width}px in {lang:?}"
+                    );
+                }
+                cx.update(|window, _| {
+                    let bounds = window.find(name).bounds();
+                    assert!(
+                        bounds.size.width >= px(180.),
+                        "a resource name must remain readable"
+                    );
+                });
+                click(cx, menu.into());
+                settle(cx);
+                assert!(cx.update(|window, _| window.try_find("popup-menu").is_some()));
+                cx.update(|window, cx| window.press("escape", cx));
+                settle(cx);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[gpui_kit::test]
+fn about_opens_the_about_group(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    click(cx, "brand-more".into());
+    settle(cx);
+    cx.update(|window, cx| window.within("popup-menu").click(0usize, cx));
+    settle(cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.state().settings_group()),
+        crate::settings::SettingGroup::Diagnostics
+    );
+}
+
+#[gpui_kit::test]
+fn navigation_and_settings_choices_work_without_a_pointer(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    assert!(tab_to_row(cx, "nav-Settings".into()));
+    cx.update(|window, cx| window.press("enter", cx));
+    cx.simulate_event(gpui_kit::KeyUpEvent {
+        keystroke: gpui_kit::Keystroke::parse("enter").unwrap(),
+    });
+    settle(cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.state().page()),
+        Page::Settings
+    );
+    for id in [
+        "theme-dark",
+        "theme-light",
+        "language-en",
+        "exit-keep-running",
+    ] {
+        assert!(
+            tab_to_row(cx, id.into()),
+            "{id} must be reachable by keyboard"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn all_close_choices_are_keyboard_reachable(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.on_close_requested(window, cx);
+        });
+    });
+    settle(cx);
+    for exit in [
+        crate::exit::Exit::Background,
+        crate::exit::Exit::KeepRunning,
+        crate::exit::Exit::ExitAll,
+    ] {
+        assert!(
+            tab_to_row(cx, format!("exit-choice-{}", exit.code())),
+            "every close choice must be keyboard reachable"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn search_shortcut_does_not_steal_focus_from_a_dialog(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (view, _runtime) = view(cx);
+    let cx = window(cx, &view);
+    click(cx, "nav-Proxies".into());
+    click(cx, "new-proxy".into());
+    settle(cx);
+    cx.update(|window, cx| window.press("ctrl-f", cx));
+    settle(cx);
+    assert_eq!(
+        view.read_with(cx, |view, _| view.state().page()),
+        Page::Proxies
+    );
+    let filter = view.read_with(cx, |view, _| view.filter_input().unwrap());
+    assert!(!cx.update(|window, cx| filter.read(cx).focus_handle(cx).is_focused(window)));
+    assert!(cx.update(|window, cx| window.has_active_dialog(cx)));
+}

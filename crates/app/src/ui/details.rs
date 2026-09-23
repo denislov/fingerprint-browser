@@ -193,6 +193,7 @@ fn details_tabs(
             let active = candidate == tab;
             Button::new(candidate.id())
                 .label(candidate.label(t))
+                .selected(active)
                 .when(active, |button| button.secondary())
                 .when(!active, |button| button.ghost())
                 .disabled(selected.is_none())

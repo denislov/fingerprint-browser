@@ -13,8 +13,8 @@ use gpui_kit::component::Sizable as _;
 /// Sized for the longest thing each holds in either language: an IPv6 endpoint
 /// with a port, "not assigned" or a name and a count, the longest reading a test
 /// leaves behind, and the Test button beside its menu. The name takes what is
-/// left, which is what keeps a table readable in a narrow window instead of
-/// pushing the actions off the row.
+/// left. In narrow windows, endpoint and usage move under the name and the
+/// test column contracts, preserving space for both the name and actions.
 const COLUMN_ENDPOINT: f32 = 220.0;
 const COLUMN_USAGE: f32 = 150.0;
 const COLUMN_TEST: f32 = 260.0;
@@ -56,6 +56,7 @@ pub(super) fn proxies_header(cx: &mut Context<AppView>, t: &Text) -> Div {
 pub(super) fn proxies_body(
     rows: &[ProxyRow],
     tests: &std::collections::HashMap<ProxyId, ProxyTest>,
+    compact: bool,
     cx: &mut Context<AppView>,
     t: &'static Text,
 ) -> impl IntoElement {
@@ -66,7 +67,9 @@ pub(super) fn proxies_body(
         .flex_1()
         .min_h_0()
         .gap_2()
-        .when(!rows.is_empty(), |this| this.child(list_header(p, t)))
+        .when(!rows.is_empty(), |this| {
+            this.child(list_header(compact, p, t))
+        })
         .child(
             div()
                 .id("proxies-scroll")
@@ -110,7 +113,11 @@ pub(super) fn proxies_body(
                         .items_center()
                         .gap_4()
                         .px_4()
-                        .min_h(px(components::ROW_HEIGHT))
+                        .min_h(px(if compact {
+                            88.0
+                        } else {
+                            components::ROW_HEIGHT
+                        }))
                         .rounded(px(components::RADIUS_SURFACE))
                         .border_1()
                         .border_color(rgb(p.border))
@@ -118,16 +125,30 @@ pub(super) fn proxies_body(
                         .hover(|this| this.bg(rgb(p.hover)))
                         .child(
                             div()
+                                .id(format!("proxy-name-{id}"))
+                                .test_support()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(row.proxy.name.clone()),
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(row.proxy.name.clone()),
+                                )
+                                .when(compact, |this| {
+                                    this.child(endpoint_cell(row, true, p, t))
+                                        .child(usage_cell(row, true, p, t))
+                                }),
                         )
-                        .child(endpoint_cell(row, p, t))
-                        .child(usage_cell(row, p, t))
-                        .child(proxy_test_cell(test, id, cx, p, t))
+                        .when(!compact, |this| {
+                            this.child(endpoint_cell(row, false, p, t))
+                                .child(usage_cell(row, false, p, t))
+                        })
+                        .child(proxy_test_cell(test, id, compact, cx, p, t))
                         .child(
                             div()
                                 .w(px(COLUMN_ACTIONS))
@@ -164,7 +185,7 @@ pub(super) fn proxies_body(
 /// it names. The transparent border is what makes the two line up: a row draws a
 /// one-pixel border and the heading does not, and the pixel it would add is a
 /// pixel of the name column.
-pub(super) fn list_header(p: Palette, t: &Text) -> Div {
+pub(super) fn list_header(compact: bool, p: Palette, t: &Text) -> Div {
     div()
         .flex()
         .items_center()
@@ -181,29 +202,31 @@ pub(super) fn list_header(p: Palette, t: &Text) -> Div {
                 .test_support()
                 .flex_1()
                 .min_w_0()
-                .child(t.column_profile),
+                .child(t.proxy_name),
         )
-        .child(
-            div()
-                .id("column-endpoint")
-                .test_support()
-                .w(px(COLUMN_ENDPOINT))
-                .flex_shrink_0()
-                .child(t.column_endpoint),
-        )
-        .child(
-            div()
-                .id("column-usage")
-                .test_support()
-                .w(px(COLUMN_USAGE))
-                .flex_shrink_0()
-                .child(t.column_usage),
-        )
+        .when(!compact, |this| {
+            this.child(
+                div()
+                    .id("column-endpoint")
+                    .test_support()
+                    .w(px(COLUMN_ENDPOINT))
+                    .flex_shrink_0()
+                    .child(t.column_endpoint),
+            )
+            .child(
+                div()
+                    .id("column-usage")
+                    .test_support()
+                    .w(px(COLUMN_USAGE))
+                    .flex_shrink_0()
+                    .child(t.column_usage),
+            )
+        })
         .child(
             div()
                 .id("column-test")
                 .test_support()
-                .w(px(COLUMN_TEST))
+                .w(px(if compact { 220.0 } else { COLUMN_TEST }))
                 .flex_shrink_0()
                 .child(t.column_last_test),
         )
@@ -220,13 +243,13 @@ pub(super) fn list_header(p: Palette, t: &Text) -> Div {
 
 /// What the proxy dials. The endpoint carries no credentials, so it is shown
 /// whole in the tooltip; the column is where a long IPv6 address is truncated.
-fn endpoint_cell(row: &ProxyRow, p: Palette, t: &Text) -> impl IntoElement {
+fn endpoint_cell(row: &ProxyRow, compact: bool, p: Palette, t: &Text) -> impl IntoElement {
     let endpoint = row.endpoint();
     div()
         .id(format!("proxy-endpoint-{}", row.proxy.id))
         .test_support()
-        .w(px(COLUMN_ENDPOINT))
-        .flex_shrink_0()
+        .when(!compact, |this| this.w(px(COLUMN_ENDPOINT)).flex_shrink_0())
+        .min_w_0()
         .truncate()
         .text_xs()
         .text_color(rgb(p.muted))
@@ -235,14 +258,14 @@ fn endpoint_cell(row: &ProxyRow, p: Palette, t: &Text) -> impl IntoElement {
 }
 
 /// Who is using it, named rather than counted when there is room for one name.
-fn usage_cell(row: &ProxyRow, p: Palette, t: &Text) -> impl IntoElement {
+fn usage_cell(row: &ProxyRow, compact: bool, p: Palette, t: &Text) -> impl IntoElement {
     let used = row.is_used();
     let label = row.usage_label(t);
     div()
         .id(format!("proxy-usage-{}", row.proxy.id))
         .test_support()
-        .w(px(COLUMN_USAGE))
-        .flex_shrink_0()
+        .when(!compact, |this| this.w(px(COLUMN_USAGE)).flex_shrink_0())
+        .min_w_0()
         .truncate()
         .text_xs()
         .text_color(rgb(if used { p.success } else { p.muted }))
@@ -260,6 +283,7 @@ fn usage_cell(row: &ProxyRow, p: Palette, t: &Text) -> impl IntoElement {
 pub(super) fn proxy_test_cell(
     test: Option<&ProxyTest>,
     id: ProxyId,
+    compact: bool,
     cx: &mut Context<AppView>,
     p: Palette,
     t: &'static Text,
@@ -286,7 +310,7 @@ pub(super) fn proxy_test_cell(
         .test_support()
         .aria_label(aria)
         .tooltip(components::tooltip(hint))
-        .w(px(COLUMN_TEST))
+        .w(px(if compact { 220.0 } else { COLUMN_TEST }))
         .flex_shrink_0()
         .flex()
         .flex_col()

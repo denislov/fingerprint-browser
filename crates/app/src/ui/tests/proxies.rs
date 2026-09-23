@@ -646,6 +646,7 @@ fn the_proxy_rows_line_up_under_the_column_headings(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (view, _runtime) = view(cx);
     let cx = window(cx, &view);
+    cx.simulate_resize(size(px(1440.), px(900.)));
     let proxy_id = seed_proxy(cx, &view, "Office");
 
     cx.update(|window, cx| window.click("nav-Proxies", cx));

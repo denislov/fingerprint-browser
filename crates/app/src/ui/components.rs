@@ -26,6 +26,12 @@ pub const SIDEBAR: f32 = 200.0;
 /// The padding around a page's content.
 pub const PAGE_PADDING: f32 = 24.0;
 
+/// Below this viewport width, resource metadata moves below the name. The
+/// widest table needs 770px of fixed columns, 64px of gaps, 34px of row padding
+/// and borders, plus a readable name (200px), sidebar and page padding. Keep
+/// this independent of the profile details panel's docking breakpoint.
+pub const RESOURCE_TABLE_MIN: f32 = 1364.0;
+
 /// A page title's size.
 pub const TITLE: f32 = 22.0;
 
@@ -196,17 +202,13 @@ pub fn card_note(text: String, p: Palette) -> Div {
 
 /// A labelled row of controls inside a card.
 pub fn card_row(label: &str, p: Palette) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(p.muted))
-                .child(label.to_string()),
-        )
-        .child(div().flex().items_center().gap_2())
+    div().flex().flex_wrap().gap_2().child(
+        div()
+            .w_full()
+            .text_xs()
+            .text_color(rgb(p.muted))
+            .child(label.to_string()),
+    )
 }
 
 /// One chip of a small set of choices.
@@ -214,25 +216,24 @@ pub fn card_row(label: &str, p: Palette) -> Div {
 /// The chosen one is filled and lit; the others are outlined and quiet. Both are
 /// always on screen, which is the point: a set this small should not hide its
 /// alternatives behind a menu or a cycle.
-pub fn chip(id: String, label: &str, active: bool, p: Palette) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
+pub fn chip(id: String, label: &str, active: bool, p: Palette) -> Button {
+    // A choice is a control: use the library's persistent focus handle, keyboard
+    // activation and focus ring instead of a pointer-only div.
+    Button::new(id)
+        .label(label.to_string())
+        .toggled(active)
+        // `toggled` describes accessibility; `selected` also prevents the
+        // ordinary hover/pressed palette from replacing the selected colours.
+        .selected(active)
+        .outline()
         .h(px(CONTROL))
-        .px_3()
         .rounded(px(RADIUS_CONTROL))
-        .border_1()
-        .border_color(rgb(if active { p.accent } else { p.border }))
-        .text_sm()
         .when(active, |this| {
             this.bg(rgb(p.selected))
+                .border_color(rgb(p.accent))
                 .text_color(rgb(p.accent))
                 .font_weight(FontWeight::MEDIUM)
         })
-        .when(!active, |this| this.text_color(rgb(p.secondary)))
-        .cursor_pointer()
-        .child(label.to_string())
 }
 
 /// How a status reads: the five tints the window uses, and nothing else.
@@ -362,8 +363,8 @@ impl EmptyState {
 ///
 /// The label is not optional: a button whose only content is a drawing has no
 /// name unless one is given, and "the ⋯ one" is not a name a screen reader can
-/// say. The tooltip is the same string, so hovering and focusing say the same
-/// thing.
+/// say. The tooltip is the same string, so the hover text and accessible name
+/// agree. The library currently shows tooltips only on hover, not on focus.
 pub fn icon_button(
     id: impl Into<ElementId>,
     icon: IconName,

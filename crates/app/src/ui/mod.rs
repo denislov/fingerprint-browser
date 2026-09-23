@@ -29,6 +29,7 @@ use crossbeam_channel::{Receiver, Sender};
 use domain::{CoreId, ProfileId, ProxyId, RuntimeState};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::Root;
+use gpui_kit::component::Selectable as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::*;
 use gpui_kit::component::checkbox::Checkbox;
@@ -445,9 +446,8 @@ impl AppView {
     /// The page comes first: a shortcut that put the cursor in a field on a page
     /// that is not on screen would look like it had done nothing at all.
     pub(super) fn on_focus_profile_filter(&mut self, cx: &mut Context<Self>) {
-        if self.state.page() != Page::Profiles {
-            self.state.set_page(Page::Profiles);
-        }
+        // Defer both navigation and focus until the window can check whether a
+        // modal owns the keyboard. A global shortcut must not escape a dialog.
         self.focus_filter = true;
         cx.notify();
     }
@@ -547,6 +547,8 @@ impl Render for AppView {
         // cannot both fit. Measured on every frame, so resizing the window moves
         // the panel rather than requiring a restart.
         let docked = window.viewport_size().width.as_f32() >= DETAILS_DOCK_MIN;
+        let compact_resources =
+            window.viewport_size().width.as_f32() < components::RESOURCE_TABLE_MIN;
         // The overlay layers live above the view and are rendered by the view
         // itself: without these, a dialog can be opened and never appear.
         let dialogs = Root::render_dialog_layer(window, cx);
@@ -557,7 +559,8 @@ impl Render for AppView {
         let filter_input = self.ensure_filter_input(window, cx);
         // A shortcut asks for the field between frames; this is the first frame
         // that has one to give the keyboard to.
-        if std::mem::take(&mut self.focus_filter) {
+        if std::mem::take(&mut self.focus_filter) && !window.has_active_dialog(cx) {
+            self.state.set_page(Page::Profiles);
             window.focus(&filter_input.read(cx).focus_handle(cx), cx);
         }
         let export_input = self.ensure_export_input(window, cx);
@@ -671,10 +674,16 @@ impl Render for AppView {
                             })
                             .children(notice.map(|notice| notice_banner(notice, cx, t)))
                             .when(page == Page::Proxies, |this| {
-                                this.child(proxies_body(&proxy_rows, &proxy_tests, cx, t))
+                                this.child(proxies_body(
+                                    &proxy_rows,
+                                    &proxy_tests,
+                                    compact_resources,
+                                    cx,
+                                    t,
+                                ))
                             })
                             .when(page == Page::Cores, |this| {
-                                this.child(cores_body(&core_rows, cx, t))
+                                this.child(cores_body(&core_rows, compact_resources, cx, t))
                             })
                             .when(page == Page::Log, |this| {
                                 this.child(logs_body(
@@ -905,10 +914,14 @@ fn nav_item(candidate: Page, page: Page, cx: &mut Context<AppView>, t: &Text) ->
     } else {
         t.nav_soon(candidate.label(t))
     };
-    div()
-        .id(format!("nav-{}", candidate.id()))
-        .test_support()
-        .aria_label(label.clone())
+    Button::new(format!("nav-{}", candidate.id()))
+        .ghost()
+        .toggled(active)
+        .selected(active)
+        .disabled(!ready)
+        .w_full()
+        .justify_start()
+        .accessibility_label(label.clone())
         .flex()
         .items_center()
         .gap_2()
@@ -924,9 +937,7 @@ fn nav_item(candidate: Page, page: Page, cx: &mut Context<AppView>, t: &Text) ->
         // The icon follows the label's colour rather than carrying one of its
         // own: one blue icon per row would make the sidebar a colour chart.
         .when(!active && ready, |this| {
-            this.text_color(rgb(p.secondary))
-                .cursor_pointer()
-                .hover(|this| this.bg(rgb(p.hover)))
+            this.text_color(rgb(p.secondary)).cursor_pointer()
         })
         .when(!ready, |this| this.text_color(rgb(p.dim)))
         .child(icons::nav(nav_glyph(candidate)))
@@ -973,6 +984,9 @@ fn sidebar_footer(cx: &mut Context<AppView>, t: &'static Text) -> Div {
                                 move |_, _window, cx| {
                                     if let Some(view) = view.upgrade() {
                                         view.update(cx, |view, cx| {
+                                            view.state.set_settings_group(
+                                                crate::settings::SettingGroup::Diagnostics,
+                                            );
                                             view.on_page(Page::Settings, cx)
                                         });
                                     }

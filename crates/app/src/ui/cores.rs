@@ -11,7 +11,8 @@ use super::*;
 /// The name holds the path under it and takes what is left; the three beside it
 /// are sized for the longest value in either language - a Chromium version, a
 /// compatibility reading with its exclusion note, and the Re-detect button
-/// beside its menu.
+/// beside its menu. Narrow windows put version and usage below the name instead
+/// of squeezing the name away or pushing the controls beyond the window.
 const COLUMN_VERSION: f32 = 150.0;
 const COLUMN_COMPATIBILITY: f32 = 260.0;
 const COLUMN_USAGE: f32 = 140.0;
@@ -33,6 +34,7 @@ pub(super) fn cores_header(cx: &mut Context<AppView>, t: &Text) -> Div {
 
 pub(super) fn cores_body(
     rows: &[CoreRow],
+    compact: bool,
     cx: &mut Context<AppView>,
     t: &'static Text,
 ) -> impl IntoElement {
@@ -43,7 +45,9 @@ pub(super) fn cores_body(
         .flex_1()
         .min_h_0()
         .gap_2()
-        .when(!rows.is_empty(), |this| this.child(list_header(p, t)))
+        .when(!rows.is_empty(), |this| {
+            this.child(list_header(compact, p, t))
+        })
         .child(
             div()
                 .id("cores-scroll")
@@ -85,16 +89,28 @@ pub(super) fn cores_body(
                         .items_center()
                         .gap_4()
                         .px_4()
-                        .min_h(px(components::ROW_HEIGHT))
+                        .min_h(px(if compact {
+                            112.0
+                        } else {
+                            components::ROW_HEIGHT
+                        }))
                         .rounded(px(components::RADIUS_SURFACE))
                         .border_1()
                         .border_color(rgb(p.border))
                         .bg(rgb(p.panel))
                         .hover(|this| this.bg(rgb(p.hover)))
-                        .child(name_cell(row, index, cx, p, t))
-                        .child(version_cell(row, p, t))
+                        .child(
+                            name_cell(row, index, cx, p, t)
+                                .id(format!("core-name-{id}"))
+                                .test_support()
+                                .when(compact, |this| {
+                                    this.child(version_cell(row, p, t))
+                                        .child(usage_cell(row, p, t))
+                                }),
+                        )
+                        .when(!compact, |this| this.child(version_cell(row, p, t)))
                         .child(compatibility_cell(row, p, t))
-                        .child(usage_cell(row, p, t))
+                        .when(!compact, |this| this.child(usage_cell(row, p, t)))
                         .child(
                             div()
                                 .w(px(COLUMN_ACTIONS))
@@ -119,7 +135,7 @@ pub(super) fn cores_body(
 }
 
 /// The Cores page's column headings, laid out with the rows' own widths.
-pub(super) fn list_header(p: Palette, t: &Text) -> Div {
+pub(super) fn list_header(compact: bool, p: Palette, t: &Text) -> Div {
     div()
         .flex()
         .items_center()
@@ -138,14 +154,16 @@ pub(super) fn list_header(p: Palette, t: &Text) -> Div {
                 .min_w_0()
                 .child(t.core_name),
         )
-        .child(
-            div()
-                .id("column-version")
-                .test_support()
-                .w(px(COLUMN_VERSION))
-                .flex_shrink_0()
-                .child(t.column_version),
-        )
+        .when(!compact, |this| {
+            this.child(
+                div()
+                    .id("column-version")
+                    .test_support()
+                    .w(px(COLUMN_VERSION))
+                    .flex_shrink_0()
+                    .child(t.column_version),
+            )
+        })
         .child(
             div()
                 .id("column-compatibility")
@@ -154,14 +172,16 @@ pub(super) fn list_header(p: Palette, t: &Text) -> Div {
                 .flex_shrink_0()
                 .child(t.column_compatibility),
         )
-        .child(
-            div()
-                .id("column-core-usage")
-                .test_support()
-                .w(px(COLUMN_USAGE))
-                .flex_shrink_0()
-                .child(t.column_usage),
-        )
+        .when(!compact, |this| {
+            this.child(
+                div()
+                    .id("column-core-usage")
+                    .test_support()
+                    .w(px(COLUMN_USAGE))
+                    .flex_shrink_0()
+                    .child(t.column_usage),
+            )
+        })
         .child(
             div()
                 .id("column-core-actions")
@@ -198,9 +218,11 @@ fn name_cell(
             div()
                 .flex()
                 .items_center()
+                .flex_wrap()
                 .gap_2()
                 .child(
                     div()
+                        .min_w_0()
                         .truncate()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)

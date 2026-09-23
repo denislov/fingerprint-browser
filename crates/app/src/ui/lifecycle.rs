@@ -151,7 +151,6 @@ impl AppView {
                     let view = view.clone();
                     let remember = std::rc::Rc::clone(&remember);
                     exit_choice(exit, running, p, t)
-                        .test_support()
                         .on_click(move |_, window, cx| {
                             let ticked = remember.get();
                             if let Some(view) = view.upgrade() {

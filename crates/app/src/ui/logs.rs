@@ -144,6 +144,7 @@ pub(super) fn logs_header(
                     let active = candidate == filter;
                     Button::new(candidate.id())
                         .label(candidate.label(t))
+                        .selected(active)
                         .when(active, |button| button.primary())
                         .when(!active, |button| button.outline())
                         .on_click(
