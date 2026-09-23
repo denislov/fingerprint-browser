@@ -20,8 +20,9 @@ use crate::state::{
 };
 use crate::text::{Lang, Text};
 use crate::theme::{Palette, ThemeChoice, palette};
-use crate::tray::{Tray, TrayEvent};
+use crate::tray::{Tray, TrayEvent, TrayStarter};
 use crate::verifier::{FingerprintVerifier, VerificationReport};
+use crate::version;
 use crate::window_visibility;
 use application::{BrowserDataReport, Direction, RestoreMode};
 use crossbeam_channel::{Receiver, Sender};
@@ -34,7 +35,6 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogButtonProps, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::{Notification, NotificationType};
-use gpui_kit::component::theme::Theme;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use runtime::{Diagnosis, Fault, RuntimeEvent};
@@ -122,6 +122,10 @@ pub struct AppView {
     /// window open does not need one - and it is never removed, because the user
     /// who put the window away once may do it again.
     tray: Option<Tray>,
+    /// How that icon is started. [`crate::tray::Tray::start`] in the program; a
+    /// test hands in a desktop that refuses one, which is the case the window
+    /// has to survive.
+    tray_starter: TrayStarter,
     /// Whether the close hook has been registered on this window. The hook needs
     /// a `Window`, and this view is built before there is one, so the first frame
     /// is when it is installed - once.
@@ -143,6 +147,7 @@ impl AppView {
         tester: Arc<dyn ProxyTester>,
         opener: Arc<dyn DirectoryOpener>,
         copier: Arc<dyn BrowserDataCopier>,
+        tray_starter: TrayStarter,
     ) -> Self {
         // A reading takes seconds and blocks on the browser, so it runs on a
         // worker thread and reports back through this channel. Testing a proxy
@@ -185,10 +190,21 @@ impl AppView {
             events,
             window_closed: None,
             tray: None,
+            tray_starter,
             close_hook: false,
             exit_remember: false,
             filter_changed: None,
         }
+    }
+
+    /// Replaces the way this window starts its tray icon.
+    ///
+    /// For the one test that needs a desktop which refuses the icon: that is the
+    /// case where hiding the window would leave the user with no way back, and
+    /// the behaviour worth pinning is what the window does instead.
+    #[cfg(test)]
+    pub fn set_tray_starter(&mut self, starter: TrayStarter) {
+        self.tray_starter = starter;
     }
 
     /// Read-only access for tests and diagnostics.
@@ -357,8 +373,10 @@ impl AppView {
     }
 }
 
+pub(crate) mod components;
 mod cores;
 mod details;
+pub(crate) mod icons;
 mod lifecycle;
 mod logs;
 mod profiles;
@@ -372,6 +390,8 @@ use self::logs::{format_age, logs_body, logs_header};
 use self::profiles::{empty_hint, profile_list, profiles_header};
 use self::proxies::{proxies_body, proxies_header};
 use self::settings::{SettingsCards, SettingsExport, exit_choice, settings_body, settings_header};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -435,7 +455,6 @@ impl Render for AppView {
             .size_full()
             .bg(rgb(p.bg))
             .text_color(rgb(p.text))
-            .child(header(cx, t))
             .child(
                 div()
                     .flex()
@@ -468,7 +487,7 @@ impl Render for AppView {
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
-                            .p_6()
+                            .p(px(components::PAGE_PADDING))
                             .gap_4()
                             .child(match page {
                                 Page::Proxies => proxies_header(cx, t),
@@ -565,87 +584,198 @@ impl Render for AppView {
     }
 }
 
-fn header(cx: &mut Context<AppView>, t: &Text) -> Div {
+/// The pages that sit under the brand, in the order the sidebar lists them.
+///
+/// Settings is not one of them: it is about the program rather than about what
+/// the program manages, so it is pinned to the foot of the sidebar where a
+/// settings entry belongs.
+const WORK_PAGES: [Page; 4] = [Page::Profiles, Page::Proxies, Page::Cores, Page::Log];
+
+/// What a page looks like in the navigation.
+fn nav_glyph(page: Page) -> IconName {
+    match page {
+        Page::Profiles => icons::glyph::NAV_PROFILES,
+        Page::Proxies => icons::glyph::NAV_PROXIES,
+        Page::Cores => icons::glyph::NAV_CORES,
+        Page::Log => icons::glyph::NAV_LOG,
+        Page::Settings => icons::glyph::NAV_SETTINGS,
+    }
+}
+
+/// The window's navigation: the brand, the pages, and the way out.
+///
+/// The sidebar is the whole of the window's chrome. There is no second header
+/// above the page repeating the product name, and no exit button beside it: the
+/// window's own close control is the exit affordance, the brand's menu carries
+/// the low-frequency variants of it, and the page below gets the height that the
+/// removed header used to take.
+fn sidebar(page: Page, cx: &mut Context<AppView>, t: &'static Text) -> Div {
     let p = palette(cx);
+    // Built with a loop rather than a `map`: a navigation item borrows the
+    // context it listens on, and a closure that captured the context mutably
+    // could not hand one back.
+    let mut work = div().flex().flex_col().gap_1().flex_1().min_h_0().px_3();
+    for candidate in WORK_PAGES {
+        work = work.child(nav_item(candidate, page, cx, t));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .w(px(components::SIDEBAR))
+        .flex_shrink_0()
+        .border_r_1()
+        .border_color(rgb(p.border))
+        .bg(rgb(p.panel))
+        .child(brand())
+        .child(work)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .child(nav_item(Page::Settings, page, cx, t)),
+        )
+        .child(sidebar_footer(cx, t))
+}
+
+/// The product's mark and name, at the head of the sidebar.
+///
+/// The mark is the same SVG the packaging scripts turn into the window and tray
+/// icons, so the window cannot end up wearing two different logos.
+fn brand() -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_4()
+        .child(img(icons::BRAND).w(px(24.0)).h(px(24.0)).flex_shrink_0())
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(version::NAME),
+        )
+}
+
+/// One page in the navigation: an icon, the name, and the state of the choice.
+fn nav_item(candidate: Page, page: Page, cx: &mut Context<AppView>, t: &Text) -> impl IntoElement {
+    let p = palette(cx);
+    let active = candidate == page;
+    let ready = candidate.is_ready();
+    let label = if ready {
+        candidate.label(t).to_string()
+    } else {
+        t.nav_soon(candidate.label(t))
+    };
+    div()
+        .id(format!("nav-{}", candidate.id()))
+        .test_support()
+        .aria_label(label.clone())
+        .flex()
+        .items_center()
+        .gap_2()
+        .h(px(36.0))
+        .px_3()
+        .rounded(px(components::RADIUS_CONTROL))
+        .text_sm()
+        .when(active, |this| {
+            this.bg(rgb(p.selected))
+                .text_color(rgb(p.accent))
+                .font_weight(FontWeight::MEDIUM)
+        })
+        // The icon follows the label's colour rather than carrying one of its
+        // own: one blue icon per row would make the sidebar a colour chart.
+        .when(!active && ready, |this| {
+            this.text_color(rgb(p.secondary))
+                .cursor_pointer()
+                .hover(|this| this.bg(rgb(p.hover)))
+        })
+        .when(!ready, |this| this.text_color(rgb(p.dim)))
+        .child(icons::nav(nav_glyph(candidate)))
+        .child(label)
+        .when(ready, |this| {
+            this.on_click(cx.listener(move |this, _, _, cx| this.on_page(candidate, cx)))
+        })
+}
+
+/// The foot of the sidebar: the version, and the menu that is not worth a row.
+///
+/// What lives here is everything that used to be in the removed header and
+/// everything too rare to deserve a page: about, closing the window through the
+/// saved exit policy, and stopping everything.
+fn sidebar_footer(cx: &mut Context<AppView>, t: &'static Text) -> Div {
+    let p = palette(cx);
+    let view = cx.entity().downgrade();
+    let about = view.clone();
+    let close = view.clone();
+    let stop_all = view;
     div()
         .flex()
         .items_center()
         .justify_between()
-        .px_6()
-        .py_4()
-        .border_b_1()
-        .border_color(rgb(p.border))
-        .child(
-            div()
-                .text_lg()
-                .font_weight(FontWeight::BOLD)
-                .child("Fingerprint Browser v1"),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(p.dim))
-                        .child("Rust + GPUI Kit + Fingerprint-Chromium"),
-                )
-                .child(
-                    Button::new("quit")
-                        .label(t.quit)
-                        .ghost()
-                        .on_click(cx.listener(|this, _, window, cx| this.on_quit(window, cx))),
-                ),
-        )
-}
-
-const PAGES: [Page; 5] = [
-    Page::Profiles,
-    Page::Proxies,
-    Page::Cores,
-    Page::Log,
-    Page::Settings,
-];
-
-fn sidebar(page: Page, cx: &mut Context<AppView>, t: &Text) -> Div {
-    let p = palette(cx);
-    div()
-        .flex()
-        .flex_col()
         .gap_2()
-        .w(px(220.0))
-        .flex_shrink_0()
-        .border_r_1()
+        .px_3()
+        .py_3()
+        .border_t_1()
         .border_color(rgb(p.border))
-        .p_4()
-        .children(PAGES.map(|candidate| {
-            let active = candidate == page;
-            let label = if candidate.is_ready() {
-                candidate.label(t).to_string()
-            } else {
-                t.nav_soon(candidate.label(t))
-            };
+        .child(
             div()
-                .id(format!("nav-{}", candidate.id()))
-                .test_support()
-                .px_3()
-                .py_2()
-                .rounded_md()
-                .text_sm()
-                .when(active, |this| {
-                    this.bg(rgb(p.border)).font_weight(FontWeight::MEDIUM)
-                })
-                .when(!active && candidate.is_ready(), |this| {
-                    this.text_color(rgb(p.muted)).cursor_pointer()
-                })
-                .when(!candidate.is_ready(), |this| this.text_color(rgb(p.dim)))
-                .child(label)
-                .when(candidate.is_ready(), |this| {
-                    this.on_click(cx.listener(move |this, _, _, cx| this.on_page(candidate, cx)))
-                })
-        }))
+                .text_xs()
+                .text_color(rgb(p.dim))
+                .child(format!("v{}", version::VERSION)),
+        )
+        .child(
+            components::icon_button("brand-more", icons::glyph::MORE, t.menu_more).dropdown_menu(
+                move |menu, _window, _cx| {
+                    menu.item(
+                        PopupMenuItem::new(t.about_title)
+                            .icon(icons::action(icons::glyph::ABOUT))
+                            .on_click({
+                                let view = about.clone();
+                                move |_, _window, cx| {
+                                    if let Some(view) = view.upgrade() {
+                                        view.update(cx, |view, cx| {
+                                            view.on_page(Page::Settings, cx)
+                                        });
+                                    }
+                                }
+                            }),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(t.menu_close_window)
+                            .icon(icons::action(icons::glyph::CLOSE_WINDOW))
+                            .on_click({
+                                let view = close.clone();
+                                move |_, window, cx| {
+                                    if let Some(view) = view.upgrade() {
+                                        view.update(cx, |view, cx| view.on_quit(window, cx));
+                                    }
+                                }
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(t.menu_stop_all_and_quit)
+                            .icon(icons::action(icons::glyph::QUIT_ALL))
+                            .on_click({
+                                let view = stop_all.clone();
+                                move |_, window, cx| {
+                                    if let Some(view) = view.upgrade() {
+                                        view.update(cx, |view, cx| {
+                                            view.leave(Exit::ExitAll, window, cx)
+                                        });
+                                    }
+                                }
+                            }),
+                    )
+                },
+            ),
+        )
 }
 
 /// What the Profiles page's header needs to render its filter.

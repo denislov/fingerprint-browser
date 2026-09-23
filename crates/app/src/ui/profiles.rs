@@ -8,11 +8,11 @@
 //! The helper functions are `pub(super)` rather than private because the window's
 //! `render` is what calls them, and `render` lives in [`super`].
 
-use super::details::verification_badge;
+use super::components::{EmptyState, PageHeader, Tone, status_badge};
+use super::details::{can_verify, verification_badge};
 use super::*;
 
 pub(super) fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>, t: &Text) -> Div {
-    let p = palette(cx);
     // While a filter is on, the count is the useful sentence: it is how the user
     // finds out that the list is not the whole list. Without one, the header
     // goes back to explaining what a profile is. The accessible name spells out
@@ -28,41 +28,18 @@ pub(super) fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>
     } else {
         t.profiles_total(header.total)
     };
+    let p = palette(cx);
 
     div()
         .flex()
         .flex_col()
         .gap_3()
         .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_4()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_xl()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(t.nav_profiles),
-                        )
-                        .child(
-                            div()
-                                .id("profile-count")
-                                .test_support()
-                                .aria_label(announcement)
-                                .text_xs()
-                                .text_color(rgb(p.muted))
-                                .child(subtitle),
-                        ),
-                )
-                .child(
+            PageHeader::new(t.nav_profiles)
+                .summary("profile-count", subtitle, announcement)
+                .action(
                     Button::new("new-profile")
+                        .icon(icons::action(icons::glyph::NEW))
                         .label(t.new_profile)
                         .primary()
                         // A profile needs a core to launch, and the empty state
@@ -72,7 +49,8 @@ pub(super) fn profiles_header(header: &ProfilesHeader, cx: &mut Context<AppView>
                         .on_click(
                             cx.listener(|this, _, window, cx| this.on_new_profile(window, cx)),
                         ),
-                ),
+                )
+                .render(p),
         )
         .child(
             div().w(px(PROFILE_FILTER_WIDTH)).child(
@@ -93,59 +71,61 @@ pub(super) fn empty_hint(
     p: Palette,
     t: &Text,
 ) -> Option<impl IntoElement> {
-    // Two kinds of empty look the same in a list and mean different things:
-    // there are no profiles, or a filter is hiding the ones there are. Only the
-    // second can be undone from here, so only it offers to.
+    // Three kinds of empty look the same in a list and mean different things:
+    // there are no profiles, a filter is hiding the ones there are, and there is
+    // nothing to launch a profile with. Each says which it is and carries the one
+    // action that changes it.
     let filtering = total > 0 && visible == 0;
     if total > 0 && !filtering {
         return None;
     }
 
-    let message = if filtering {
-        t.empty_no_match(filter.trim(), total)
+    let state = if filtering {
+        EmptyState::new(
+            "empty-hint",
+            icons::glyph::EMPTY_SEARCH,
+            t.empty_search_title,
+            t.empty_no_match(filter.trim(), total),
+        )
+        .action(
+            Button::new("clear-filter")
+                .label(t.clear_filter)
+                .outline()
+                .on_click(cx.listener(|this, _, window, cx| this.on_clear_filter(window, cx))),
+        )
     } else if has_core {
-        t.empty_no_profiles.to_string()
+        EmptyState::new(
+            "empty-hint",
+            icons::glyph::EMPTY_PROFILES,
+            t.empty_profiles_title,
+            t.empty_no_profiles,
+        )
+        .action(
+            Button::new("empty-new-profile")
+                .icon(icons::action(icons::glyph::NEW))
+                .label(t.new_profile)
+                .primary()
+                .on_click(cx.listener(|this, _, window, cx| this.on_new_profile(window, cx))),
+        )
     } else {
-        t.no_core_found.to_string()
+        // The one empty state that cannot be acted on where it is read: the
+        // sentence names an environment variable and the page that matters is
+        // another one. So it carries the way there.
+        EmptyState::new(
+            "empty-hint",
+            icons::glyph::EMPTY_CORES,
+            t.empty_core_title,
+            t.no_core_found,
+        )
+        .action(
+            Button::new("empty-add-core")
+                .icon(icons::action(icons::glyph::NEW))
+                .label(t.add_browser_core)
+                .primary()
+                .on_click(cx.listener(|this, _, _, cx| this.on_page(Page::Cores, cx))),
+        )
     };
-
-    Some(
-        div()
-            .id("empty-hint")
-            .test_support()
-            .aria_label(message.clone())
-            .p_4()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(p.border))
-            .bg(rgb(p.panel))
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_4()
-            .child(div().text_xs().text_color(rgb(p.muted)).child(message))
-            .when(filtering, |this| {
-                this.child(
-                    Button::new("clear-filter").label(t.clear_filter).on_click(
-                        cx.listener(|this, _, window, cx| this.on_clear_filter(window, cx)),
-                    ),
-                )
-            })
-            // An empty list with no core to launch is the one empty state that
-            // cannot be acted on where it is read: the sentence names an
-            // environment variable and the page that matters is another one. So
-            // it carries the way there instead of leaving the reader to find it.
-            .when(!has_core && !filtering, |this| {
-                this.child(
-                    Button::new("empty-add-core")
-                        .label(t.add_browser_core)
-                        .primary()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.on_page(Page::Cores, cx);
-                        })),
-                )
-            }),
-    )
+    Some(state.render(p))
 }
 
 pub(super) fn profile_list(
@@ -154,7 +134,7 @@ pub(super) fn profile_list(
     verifications: &std::collections::HashMap<ProfileId, Verification>,
     cx: &mut Context<AppView>,
     p: Palette,
-    t: &Text,
+    t: &'static Text,
 ) -> Div {
     div()
         .flex()
@@ -173,10 +153,13 @@ pub(super) fn profile_list(
                 .gap_3()
                 .px_4()
                 .py_3()
-                .rounded_md()
+                .rounded(px(components::RADIUS_SURFACE))
                 .border_1()
-                .border_color(rgb(if is_selected { p.dim } else { p.border }))
-                .bg(rgb(if is_selected { p.border } else { p.panel }))
+                .border_color(rgb(if is_selected { p.accent } else { p.border }))
+                .bg(rgb(if is_selected { p.selected } else { p.panel }))
+                .when(!is_selected, |this| {
+                    this.hover(|this| this.bg(rgb(p.hover)))
+                })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.on_select(id, cx)))
                 .child(
@@ -184,28 +167,31 @@ pub(super) fn profile_list(
                         .flex()
                         .flex_col()
                         .gap_1()
+                        .min_w_0()
                         .child(
                             div()
+                                .truncate()
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(row.profile.name.clone()),
                         )
+                        // What the row is *for* comes before how it was made: the
+                        // core and the route are the answer to "which one is
+                        // this", and the seed is the detail behind it.
                         .child(
                             div()
+                                .truncate()
                                 .text_xs()
                                 .text_color(rgb(p.muted))
-                                .child(t.profile_seed_line(
-                                    row.profile.fingerprint.seed,
-                                    row.profile.fingerprint.brand,
-                                    row.profile.fingerprint.platform,
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(p.dim))
                                 .child(route_label(row, t)),
-                        ),
+                        )
+                        .child(div().truncate().text_xs().text_color(rgb(p.dim)).child(
+                            t.profile_seed_line(
+                                row.profile.fingerprint.seed,
+                                row.profile.fingerprint.brand,
+                                row.profile.fingerprint.platform,
+                            ),
+                        )),
                 )
                 .child(
                     div()
@@ -233,45 +219,154 @@ pub(super) fn profile_list(
                                         .child(t.warning_line(warning))
                                 }))
                                 .children(row.last_error().map(|error| {
+                                    // A mark as well as a colour: the summary
+                                    // is the one line in the row that says
+                                    // something is wrong, and it should read
+                                    // that way without relying on red.
                                     div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .max_w(px(WARNING_WIDTH))
                                         .text_xs()
                                         .text_color(rgb(p.danger_strong))
-                                        .child(error.to_string())
+                                        .child(icons::action(icons::glyph::FAILED))
+                                        .child(div().truncate().child(error.to_string()))
                                 })),
                         )
-                        .child(row_actions(row, cx, t)),
+                        .child(row_actions(row, verifications, cx, t)),
                 )
         }))
 }
 
-pub(super) fn row_actions(row: &ProfileRow, cx: &mut Context<AppView>, t: &Text) -> Div {
+/// The one action a row offers, and everything else behind its menu.
+///
+/// A row used to carry Start, Stop and Restart at once, two of them disabled at
+/// any moment, which made the list a wall of buttons that all had to be read to
+/// find the one that worked. The state decides which single action is real; the
+/// rest - edit, copy, open the data directory, verify, restart, delete - move
+/// into the menu beside it.
+///
+/// The action's *label* follows the state rather than the command: a start
+/// waiting on its proxy is called off, and a start that failed is retried, but
+/// both are the same command sent to the same place.
+pub(super) fn row_actions(
+    row: &ProfileRow,
+    verifications: &std::collections::HashMap<ProfileId, Verification>,
+    cx: &mut Context<AppView>,
+    t: &'static Text,
+) -> Div {
     let id = row.profile.id;
+    let state = row.state();
+    let failed = matches!(
+        state,
+        RuntimeState::Failed { .. } | RuntimeState::Crashed { .. }
+    );
+
+    let name = row.profile.name.clone();
+    let primary = if row.can_stop() {
+        let label = if state == RuntimeState::Starting {
+            t.cancel_start
+        } else if state == RuntimeState::Stopping {
+            t.state_stopping
+        } else {
+            t.stop
+        };
+        // Neutral rather than red: stopping is the ordinary way a browser is
+        // closed, and a column of red buttons reads as a page of failures.
+        Button::new(format!("stop-{id}"))
+            .icon(icons::action(icons::glyph::STOP))
+            .label(label)
+            .accessibility_label(t.row_action(label, &name))
+            .outline()
+            .disabled(state == RuntimeState::Stopping)
+            .on_click(cx.listener(move |this, _, _, cx| this.on_stop(id, cx)))
+    } else {
+        let label = if failed { t.retry } else { t.start };
+        // Quieter than the page's "New Profile": every stopped row has a start,
+        // and a column of filled blue buttons is a column that shouts.
+        Button::new(format!("start-{id}"))
+            .icon(icons::action(icons::glyph::START))
+            .label(label)
+            .accessibility_label(t.row_action(label, &name))
+            .secondary()
+            .disabled(!row.can_start())
+            .on_click(cx.listener(move |this, _, _, cx| this.on_start(id, cx)))
+    };
 
     div()
         .flex()
         .items_center()
         .gap_2()
-        .child(
-            Button::new(format!("start-{id}"))
-                .label(t.start)
-                .primary()
-                .disabled(!row.can_start())
-                .on_click(cx.listener(move |this, _, _, cx| this.on_start(id, cx))),
-        )
-        .child(
-            Button::new(format!("stop-{id}"))
-                .label(t.stop)
-                .danger()
-                .disabled(!row.can_stop())
-                .on_click(cx.listener(move |this, _, _, cx| this.on_stop(id, cx))),
-        )
-        .child(
-            Button::new(format!("restart-{id}"))
-                .label(t.restart)
-                .outline()
-                .disabled(!row.can_restart())
-                .on_click(cx.listener(move |this, _, _, cx| this.on_restart(id, cx))),
-        )
+        .child(primary)
+        .child(row_menu(row, verifications, cx, t))
+}
+
+/// The row's overflow menu: what a row can do that is not worth a button.
+///
+/// Every item is here because it is either rare or destructive. The ones the
+/// runtime would refuse are disabled here rather than after the click, so the
+/// menu says what is possible before it is asked.
+fn row_menu(
+    row: &ProfileRow,
+    verifications: &std::collections::HashMap<ProfileId, Verification>,
+    cx: &mut Context<AppView>,
+    t: &'static Text,
+) -> impl IntoElement {
+    let id = row.profile.id;
+    let name = row.profile.name.clone();
+    let view = cx.entity().downgrade();
+    let can_verify = can_verify(Some(row), verifications.get(&id));
+    let can_restart = row.can_restart();
+
+    components::icon_button(format!("more-{id}"), icons::glyph::MORE, t.row_more(&name))
+        .dropdown_menu(move |menu, _window, _cx| {
+            menu.item(components::menu_item(
+                &view,
+                t.edit,
+                icons::glyph::EDIT,
+                false,
+                move |view, window, cx| view.on_edit(id, window, cx),
+            ))
+            .item(components::menu_item(
+                &view,
+                t.duplicate,
+                icons::glyph::DUPLICATE,
+                false,
+                move |view, _window, cx| view.on_duplicate(id, cx),
+            ))
+            .item(components::menu_item(
+                &view,
+                t.open_data_dir,
+                icons::glyph::OPEN_DIR,
+                false,
+                move |view, _window, cx| view.on_open_data_dir(id, cx),
+            ))
+            .item(components::menu_item(
+                &view,
+                t.verify_fingerprint,
+                icons::glyph::VERIFY,
+                !can_verify,
+                move |view, _window, cx| view.on_verify(id, cx),
+            ))
+            .item(components::menu_item(
+                &view,
+                t.restart,
+                icons::glyph::RESTART,
+                !can_restart,
+                move |view, _window, cx| view.on_restart(id, cx),
+            ))
+            // Removing a profile is the one item here that cannot be undone
+            // from this window, so it is set apart from the five above it.
+            .separator()
+            .item(components::menu_item(
+                &view,
+                t.delete,
+                icons::glyph::DELETE,
+                false,
+                move |view, window, cx| view.on_delete(id, window, cx),
+            ))
+        })
 }
 
 pub(super) fn route_label(row: &ProfileRow, t: &Text) -> String {
@@ -281,29 +376,26 @@ pub(super) fn route_label(row: &ProfileRow, t: &Text) -> String {
     }
 }
 
+/// The profile's state, as the row shows it.
+///
+/// The tone is the state's, never the fingerprint's: a running browser with an
+/// unverified fingerprint is a running browser, and the verification badge
+/// beside it says the rest. A green row would otherwise claim a check that was
+/// never run.
 pub(super) fn state_badge(row: &ProfileRow, p: Palette, t: &Text) -> impl IntoElement {
-    let (background, foreground) = match row.state() {
-        RuntimeState::Running => (p.success_bg, p.success_strong),
-        RuntimeState::Starting | RuntimeState::Stopping => (p.warning_bg, p.warning),
-        RuntimeState::Stopped => (p.border, p.secondary),
-        RuntimeState::Failed { .. } | RuntimeState::Crashed { .. } => {
-            (p.danger_bg_soft, p.danger_strong)
-        }
+    let tone = match row.state() {
+        RuntimeState::Running => Tone::Success,
+        RuntimeState::Starting | RuntimeState::Stopping => Tone::Warning,
+        RuntimeState::Stopped => Tone::Neutral,
+        RuntimeState::Failed { .. } | RuntimeState::Crashed { .. } => Tone::Danger,
     };
-
-    div()
-        .id(format!("state-{}", row.profile.id))
-        .role(Role::Status)
-        .test_support()
-        .aria_label(row.state_label(t))
-        .px_2()
-        .py_1()
-        .rounded_full()
-        .bg(rgb(background))
-        .text_color(rgb(foreground))
-        .text_xs()
-        .font_weight(FontWeight::MEDIUM)
-        .child(row.state_label(t))
+    status_badge(
+        format!("state-{}", row.profile.id),
+        tone,
+        row.state_label(t),
+        row.state_label(t),
+        p,
+    )
 }
 
 impl AppView {

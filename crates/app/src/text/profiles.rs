@@ -55,6 +55,26 @@ impl Text {
         }
     }
 
+    /// The accessible name of one row's overflow menu.
+    ///
+    /// It names the row, because a list of menus all called "More" is a list
+    /// that says nothing when it is read aloud.
+    pub fn row_more(&self, name: &str) -> String {
+        match self.lang {
+            Lang::En => format!("More actions for \"{name}\""),
+            Lang::Zh => format!("「{name}」的更多操作"),
+        }
+    }
+
+    /// The accessible name of the row's one visible action, which names the row
+    /// for the same reason.
+    pub fn row_action(&self, action: &str, name: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{action} \"{name}\""),
+            Lang::Zh => format!("{action}「{name}」"),
+        }
+    }
+
     pub fn profile_meta_direct(&self, state: &str) -> String {
         match self.lang {
             Lang::En => format!("{state} · direct"),

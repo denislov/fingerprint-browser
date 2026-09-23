@@ -384,11 +384,11 @@ impl AppView {
     /// window into a mode that will not survive a restart would be the window
     /// claiming something the file does not hold. The refusal is in the banner.
     ///
-    /// One `Theme::change` moves both layers, because the window reads its own
-    /// colours back out of the component theme - see [`crate::theme`].
+    /// One [`crate::theme::apply`] moves both layers, because the window reads
+    /// its own colours back out of the component theme - see [`crate::theme`].
     pub(in crate::ui) fn on_choose_theme(&mut self, choice: ThemeChoice, cx: &mut Context<Self>) {
         if self.state.set_theme(choice).is_ok() {
-            Theme::change(choice.mode(), None, cx);
+            crate::theme::apply(choice, cx);
         }
         cx.notify();
     }

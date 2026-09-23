@@ -71,6 +71,15 @@ says nothing about, and the notes are that section rather than the whole file.
   the next start - or, for a destination inside a backup directory, by the next
   copy - and the profiles it was put back for are named in the window.
 
+- A desktop that will not take a tray icon no longer hides the window. "Keep
+  running" put the window away whether or not the icon had been created, and on a
+  desktop with no StatusNotifierItem host - a refusals path the code already
+  logged and then ignored - the window went with nothing left to bring it back: a
+  running program with no window, no icon and no way to reach it. The icon is now
+  started through an injected starter (`tray::TrayStarter`), a refusal keeps the
+  window on screen, and the banner names the desktop's own reason. The behaviour
+  is pinned by a test that hands the window a starter which always fails.
+
 ### Changed
 
 - Writing a configuration backup, importing one, restoring one and re-reading a
@@ -139,6 +148,43 @@ says nothing about, and the notes are that section rather than the whole file.
 - The tray's **Quit completely** stops everything the program started in one step,
   instead of opening the exit question. The item says what it does, and the
   question is still what closing the window asks.
+
+- The window's chrome is the sidebar, and the exit button above every page is
+  gone. The content area opened with a header of its own - the product name, a
+  hard-coded `v1`, the stack and a Quit button - under a title bar that already
+  named the real version, which cost a row of height on every page and offered a
+  second way to do what the window's own close control does. The brand and its
+  version now head the sidebar, the stack and the commit moved to an **About**
+  card on the Settings page, and the two rare ways out - closing through the
+  saved policy and stopping everything - sit in a menu behind the sidebar's `⋯`,
+  where they name what they do. The close control, the tray and the four
+  remembered answers are unchanged, and a test drives the menu's close through
+  the same decision the window's control uses.
+- Every page now shares one header, one control and one icon. Each page used to
+  draw its own title at its own size with its own spacing, and the profiles page
+  was the only one with a summary line. `crates/app/src/ui/components.rs` now
+  holds the baseline - page header, card, choice chip, status badge, empty state,
+  icon button and the measurements they are built from - and all five pages use
+  it, so a title is 22px, a control is 34px, a surface is one step rounder than a
+  button and an empty page has a mark, a reason and one action. The icons come
+  from one vocabulary in `crates/app/src/ui/icons.rs`: the same Lucide set the
+  widget library draws with, three sizes, one stroke weight, and a colour
+  inherited from the text beside it. The app's palette gained the interaction and
+  accent tokens that make selection, hover and focus mean the same thing as the
+  library's, `theme::apply` writes the accent into the component theme so a
+  primary button and a selected row are the same blue, and the contrast test now
+  holds supporting text to 4.5:1 rather than 3:1.
+- A profile row offers the one action its state can carry, and the rest are in a
+  menu. Start, Stop and Restart were all drawn on every row with two of them
+  disabled, so a list of twelve profiles was thirty-six buttons that all had to
+  be read to find the one that would work, and a stopped profile still wore a red
+  Stop. The row now shows Start (neutral, quieter than the page's New Profile),
+  Stop or Cancel start while a transition owns the profile, Stopping while it
+  stops, and Retry after a failure; Edit, Duplicate, Open data dir, Verify
+  fingerprint, Restart and Delete moved into the row's `⋯` menu, disabled where
+  the runtime would refuse them. The proxy and core rows do the same, keeping
+  their one repeated action (Test, Re-detect) and moving the once-per-object ones
+  into a menu.
 
 ## [0.1.0] - 2026-09-22
 

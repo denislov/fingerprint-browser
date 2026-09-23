@@ -324,59 +324,68 @@ fn main() {
         tracing::warn!("signal handlers could not be installed: {error}");
     }
 
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
-        // The appearance the user last chose, applied before the first frame so
-        // the window is never painted in the other palette and then corrected.
-        // The component library's own default is light; the window reads its
-        // colours back out of this same theme, so one call moves both layers.
-        let theme = app_state.theme();
-        gpui_kit::component::theme::Theme::change(theme.mode(), None, cx);
+    // The window's icons and brand mark, registered before the first frame: an
+    // asset source is read while painting, and a frame drawn before it is set
+    // would draw every icon as nothing.
+    gpui_kit::application()
+        .with_assets(ui::icons::AppAssets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            // The appearance the user last chose, applied before the first frame so
+            // the window is never painted in the other palette and then corrected.
+            // The component library's own default is light; this one call moves both
+            // layers - the mode and the accent family - which is why it is
+            // `theme::apply` rather than the library's `Theme::change`.
+            let appearance = app_state.theme();
+            theme::apply(appearance, cx);
 
-        let window_bounds = WindowBounds::centered(
-            Size {
-                width: px(1200.0),
-                height: px(680.0),
-            },
-            cx,
-        );
+            let window_bounds = WindowBounds::centered(
+                Size {
+                    width: px(1200.0),
+                    height: px(680.0),
+                },
+                cx,
+            );
 
-        cx.spawn(async move |cx| {
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(window_bounds),
-                    window_min_size: Some(Size {
-                        width: px(960.0),
-                        height: px(560.0),
-                    }),
-                    titlebar: Some(TitlebarOptions {
-                        // The version is in the title so a screenshot answers the
-                        // question a report would otherwise have to ask.
-                        title: Some(version::window_title().into()),
+            cx.spawn(async move |cx| {
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(window_bounds),
+                        window_min_size: Some(Size {
+                            width: px(960.0),
+                            height: px(560.0),
+                        }),
+                        titlebar: Some(TitlebarOptions {
+                            // The version is in the title so a screenshot answers the
+                            // question a report would otherwise have to ask.
+                            title: Some(version::window_title().into()),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let view = cx.new(|cx| {
-                        let mut view = AppView::new(
-                            app_state,
-                            event_rx,
-                            Arc::new(CdpFingerprintVerifier::default()),
-                            proxy_tester,
-                            Arc::new(open_dir::SystemDirectoryOpener),
-                            Arc::new(browser_data::DiskBrowserDataCopier),
-                        );
-                        view.boot(cx);
-                        view
-                    });
-                    cx.new(|cx| Root::new(view, window, cx))
-                },
-            )
-            .expect("failed to open window");
-        })
-        .detach();
-    });
+                    },
+                    |window, cx| {
+                        let view = cx.new(|cx| {
+                            let mut view = AppView::new(
+                                app_state,
+                                event_rx,
+                                Arc::new(CdpFingerprintVerifier::default()),
+                                proxy_tester,
+                                Arc::new(open_dir::SystemDirectoryOpener),
+                                Arc::new(browser_data::DiskBrowserDataCopier),
+                                // The desktop's own tray, started the first time
+                                // "keep running" puts the window away.
+                                tray::Tray::start,
+                            );
+                            view.boot(cx);
+                            view
+                        });
+                        cx.new(|cx| Root::new(view, window, cx))
+                    },
+                )
+                .expect("failed to open window");
+            })
+            .detach();
+        });
 
     shutdown(
         &channels.command_tx,

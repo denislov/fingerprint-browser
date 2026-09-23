@@ -3,44 +3,27 @@
 //! Deliberately spare: a core has a name, a path, a version and the profiles that
 //! launch with it, and the page is those four things rather than a dashboard.
 
+use super::components::{EmptyState, PageHeader};
 use super::*;
 
 pub(super) fn cores_header(cx: &mut Context<AppView>, t: &Text) -> Div {
     let p = palette(cx);
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(t.nav_cores),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(p.muted))
-                        .child(t.cores_intro),
-                ),
-        )
-        .child(
+    PageHeader::new(t.nav_cores)
+        .summary("cores-summary", t.cores_intro, t.cores_intro)
+        .action(
             Button::new("new-core")
+                .icon(icons::action(icons::glyph::NEW))
                 .label(t.add_core)
                 .primary()
                 .on_click(cx.listener(|this, _, window, cx| this.on_edit_core(None, window, cx))),
         )
+        .render(p)
 }
 
 pub(super) fn cores_body(
     rows: &[CoreRow],
     cx: &mut Context<AppView>,
-    t: &Text,
+    t: &'static Text,
 ) -> impl IntoElement {
     let p = palette(cx);
     div()
@@ -53,14 +36,22 @@ pub(super) fn cores_body(
         .overflow_y_scroll()
         .when(rows.is_empty(), |this| {
             this.child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .rounded_md()
-                    .bg(rgb(p.panel))
-                    .text_sm()
-                    .text_color(rgb(p.muted))
-                    .child(t.cores_empty),
+                EmptyState::new(
+                    "cores-empty",
+                    icons::glyph::EMPTY_CORES,
+                    t.empty_cores_title,
+                    t.cores_empty,
+                )
+                .action(
+                    Button::new("empty-new-core")
+                        .icon(icons::action(icons::glyph::NEW))
+                        .label(t.add_core)
+                        .primary()
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.on_edit_core(None, window, cx)),
+                        ),
+                )
+                .render(p),
             )
         })
         // Built inline: a helper returning a borrowed type cannot escape the
@@ -76,14 +67,17 @@ pub(super) fn cores_body(
                 .gap_4()
                 .px_4()
                 .py_3()
-                .rounded_md()
+                .rounded(px(components::RADIUS_SURFACE))
                 .border_1()
                 .border_color(rgb(p.border))
+                .bg(rgb(p.panel))
+                .hover(|this| this.bg(rgb(p.hover)))
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
+                        .min_w_0()
                         .child(
                             div()
                                 .flex()
@@ -143,6 +137,7 @@ pub(super) fn cores_body(
                         .gap_2()
                         .child(
                             Button::new(format!("redetect-core-{index}"))
+                                .icon(icons::action(icons::glyph::REDETECT))
                                 .label(t.redetect)
                                 .outline()
                                 .on_click(
@@ -151,24 +146,43 @@ pub(super) fn cores_body(
                                     }),
                                 ),
                         )
-                        .child(
-                            Button::new(format!("edit-core-{index}"))
-                                .label(t.edit)
-                                .outline()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.on_edit_core(Some(id), window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("delete-core-{index}"))
-                                .label(t.delete)
-                                .outline()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.on_delete_core(id, window, cx)
-                                })),
-                        ),
+                        .child(core_menu(row, index, cx, t)),
                 )
         }))
+}
+
+/// A core row's overflow menu: the two things done once per core.
+fn core_menu(
+    row: &CoreRow,
+    index: usize,
+    cx: &mut Context<AppView>,
+    t: &'static Text,
+) -> impl IntoElement {
+    let id = row.core.id;
+    let name = row.core.name.clone();
+    let view = cx.entity().downgrade();
+    components::icon_button(
+        format!("more-core-{index}"),
+        icons::glyph::MORE,
+        t.row_more(&name),
+    )
+    .dropdown_menu(move |menu, _window, _cx| {
+        menu.item(components::menu_item(
+            &view,
+            t.edit,
+            icons::glyph::EDIT,
+            false,
+            move |view, window, cx| view.on_edit_core(Some(id), window, cx),
+        ))
+        .separator()
+        .item(components::menu_item(
+            &view,
+            t.delete,
+            icons::glyph::DELETE,
+            false,
+            move |view, window, cx| view.on_delete_core(id, window, cx),
+        ))
+    })
 }
 
 impl AppView {

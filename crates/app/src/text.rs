@@ -159,7 +159,19 @@ catalog! {
         => "运行 fingerprint-browser --help 查看选项。";
 
     // ---- the shell ----
-    quit => "Quit" => "退出";
+    // The sidebar's overflow menu. "Stop everything and quit" rather than the
+    // shorter "Quit", because the menu is one click from a working window and
+    // the sentence has to say what it stops - the tray's own label says the
+    // same thing.
+    menu_more => "More" => "更多";
+    menu_close_window => "Close window…" => "关闭窗口…";
+    menu_stop_all_and_quit => "Stop everything and quit" => "停止全部并退出";
+
+    // ---- the About card, which is where the removed header's facts went ----
+    about_title => "About" => "关于";
+    about_body => "What this build is. The window's title bar names the version; a report needs the commit and the platform as well."
+        => "本次构建的信息。版本在窗口标题栏上；问题反馈还需要提交与平台。";
+    about_stack => "Built with" => "技术栈";
 
     nav_profiles => "Profiles" => "档案";
     nav_proxies => "Proxies" => "代理";
@@ -174,9 +186,23 @@ catalog! {
         => "按名称、种子、内核或代理筛选";
     profiles_filter_aria => "Filter profiles" => "筛选档案";
     new_profile => "New Profile" => "新建档案";
-    empty_no_profiles => "No profiles yet. Create one to start a browser."
-        => "还没有档案。新建一个即可启动浏览器。";
+    empty_no_profiles => "Create a profile to start a browser. Each one keeps its own fingerprint seed, data directory and browser process."
+        => "新建一个档案即可启动浏览器。每个档案拥有自己的指纹种子、数据目录和浏览器进程。";
+    // The three empty pages share a shape - a mark, a short state, a sentence and
+    // one action - so each needs the short state as well as the sentence.
+    empty_profiles_title => "No profiles yet" => "还没有档案";
+    empty_proxies_title => "No proxies yet" => "还没有代理";
+    empty_search_title => "No matches" => "没有匹配结果";
+    empty_cores_title => "No browser core yet" => "还没有浏览器内核";
+    empty_core_title => "No browser core yet" => "还没有浏览器内核";
     clear_filter => "Clear filter" => "清除筛选";
+
+    // The row's one action, which says what it will do to *this* state rather
+    // than naming the verb the runtime uses. A start waiting on its proxy is
+    // called off by the same command as a running profile's stop, and a start
+    // that failed is the same command as a first start.
+    cancel_start => "Cancel start" => "取消启动";
+    retry => "Retry" => "重试";
 
     log_level_info => "info" => "信息";
     log_level_warning => "warning" => "警告";
@@ -307,8 +333,8 @@ catalog! {
         => "把代理分配给档案，即可让它的流量走这条代理。";
     import_from_link => "Import from link" => "从链接导入";
     new_proxy => "New Proxy" => "新建代理";
-    proxies_empty => "No proxies yet. A profile with no proxy goes direct from this machine."
-        => "还没有代理。没有代理的档案将从本机直连。";
+    proxies_empty => "A profile with no proxy goes direct from this machine."
+        => "没有代理的档案将从本机直连。";
     test => "Test" => "测试";
     edit => "Edit" => "编辑";
     engine_running_profile => "through the engine a running profile is using"
@@ -320,8 +346,8 @@ catalog! {
     cores_intro => "Each core is a fingerprint-chromium binary; its detected version decides which switches a profile may claim."
         => "每个内核都是一个 fingerprint-chromium 可执行文件；检测到的版本决定档案可以声明哪些开关。";
     add_core => "Add Core" => "添加内核";
-    cores_empty => "No browser core yet. Add a fingerprint-chromium binary to launch profiles with it."
-        => "还没有浏览器内核。添加一个 fingerprint-chromium 可执行文件，即可用它启动档案。";
+    cores_empty => "Add a fingerprint-chromium binary to launch profiles with it."
+        => "添加一个 fingerprint-chromium 可执行文件，即可用它启动档案。";
     core_executable_missing => "executable missing" => "可执行文件缺失";
     core_no_version => "no detected version: no switches can be claimed"
         => "未检测到版本：无法声明任何开关";
@@ -480,8 +506,8 @@ catalog! {
     no_activity_log => "no activity log is being kept" => "没有保存活动日志";
     no_core_registered => "no browser core is registered yet; add one on the Browser Cores page before creating a profile"
         => "还没有注册浏览器内核；请先到「浏览器内核」页添加一个，然后再新建档案";
-    no_core_found => "No browser core yet. Add a fingerprint-chromium binary on the Browser Cores page, or point FP_BROWSER_CHROMIUM_BIN at one and restart."
-        => "还没有浏览器内核。请在「浏览器内核」页添加一个 fingerprint-chromium 可执行文件，或把 FP_BROWSER_CHROMIUM_BIN 指向它并重启。";
+    no_core_found => "Add a fingerprint-chromium binary on the Browser Cores page, or point FP_BROWSER_CHROMIUM_BIN at one and restart."
+        => "请在「浏览器内核」页添加一个 fingerprint-chromium 可执行文件，或把 FP_BROWSER_CHROMIUM_BIN 指向它并重启。";
     add_browser_core => "Add a browser core" => "添加浏览器内核";
 
     a_removed_profile => "a removed profile" => "已删除的档案";
@@ -683,6 +709,14 @@ mod tests {
                     .contains("FP_BROWSER_DATA_DIR")
             );
             assert!(t.empty_no_match("work", 3).contains("work"));
+            // A row's two accessible names both have to name the row they
+            // belong to, or a list of "More" buttons says nothing read aloud.
+            assert!(t.row_more("Work").contains("Work"));
+            assert!(t.row_action(t.start, "Work").contains(t.start));
+            assert!(t.row_action(t.start, "Work").contains("Work"));
+            // The desktop's own words travel inside this sentence, and the
+            // sentence still has to be a sentence in both languages.
+            assert!(t.no_tray_keeps_window("no host").contains("no host"));
         }
         // And the three effects are three different sentences, in both.
         for lang in Lang::ALL {

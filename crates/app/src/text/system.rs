@@ -26,6 +26,20 @@ impl Text {
         }
     }
 
+    /// The window stays on screen because the desktop would not take the tray
+    /// icon that is the only way back to a hidden one.
+    pub fn no_tray_keeps_window(&self, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "The window stays open: this desktop would not take a tray icon ({error}), \
+                 and without one there would be no way back to a hidden window."
+            ),
+            Lang::Zh => format!(
+                "窗口保持打开：当前桌面无法创建托盘图标（{error}），没有托盘就无法从隐藏状态恢复。"
+            ),
+        }
+    }
+
     /// Another copy of this program already holds the data directory.
     ///
     /// The pid and the build are what the holding run wrote about itself, and are

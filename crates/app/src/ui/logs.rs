@@ -3,6 +3,7 @@
 //! A log line is a time, a level, a profile and a sentence, and the page's job is
 //! to put those four in columns and let the reader narrow them down.
 
+use super::components::PageHeader;
 use super::*;
 
 pub(super) fn logs_header(
@@ -12,74 +13,75 @@ pub(super) fn logs_header(
     p: Palette,
     t: &Text,
 ) -> Div {
+    let status_line = match status {
+        Ok(path) => div()
+            .id("log-file-status")
+            .test_support()
+            .aria_label(t.log_written_to(path))
+            .text_xs()
+            .text_color(rgb(p.muted))
+            .child(t.log_written_to(path)),
+        // A log that cannot be written is a problem rather than a note: it is
+        // the one line on this page that is drawn in the failure colour.
+        Err(error) => div()
+            .id("log-file-status")
+            .test_support()
+            .aria_label(t.log_not_written(error))
+            .text_xs()
+            .text_color(rgb(p.danger))
+            .child(t.log_not_written(error)),
+    };
+
     div()
         .flex()
-        .items_center()
-        .justify_between()
-        .gap_4()
+        .flex_col()
+        .gap_3()
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .min_w_0()
-                .child(
+            PageHeader::new(t.nav_log)
+                .summary("log-summary", t.log_intro, t.log_intro)
+                .action(
                     div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(t.nav_log),
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new("copy-log")
+                                .icon(icons::action(icons::glyph::COPY))
+                                .label(t.copy)
+                                .outline()
+                                .on_click(cx.listener(|this, _, _, cx| this.on_copy_log(cx))),
+                        )
+                        .child(
+                            Button::new("clear-log")
+                                .icon(icons::action(icons::glyph::CLEAR))
+                                .label(t.clear)
+                                .outline()
+                                .on_click(cx.listener(|this, _, _, cx| this.on_clear_log(cx))),
+                        ),
                 )
-                .child(div().text_xs().text_color(rgb(p.muted)).child(t.log_intro))
-                .child(match status {
-                    Ok(path) => div()
-                        .id("log-file-status")
-                        .test_support()
-                        .aria_label(t.log_written_to(path))
-                        .text_xs()
-                        .text_color(rgb(p.dim))
-                        .child(t.log_written_to(path)),
-                    Err(error) => div()
-                        .id("log-file-status")
-                        .test_support()
-                        .aria_label(t.log_not_written(error))
-                        .text_xs()
-                        .text_color(rgb(p.danger))
-                        .child(t.log_not_written(error)),
-                }),
+                .render(p),
         )
+        .child(status_line)
+        // The filters are the page's own toolbar: they narrow what the list
+        // below shows, so they sit between the heading and the list rather than
+        // competing with the actions in the heading.
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .children(LogFilter::ALL.map(|candidate| {
-                            let active = candidate == filter;
-                            Button::new(candidate.id())
-                                .label(candidate.label(t))
-                                .when(active, |button| button.primary())
-                                .when(!active, |button| button.outline())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.on_set_log_filter(candidate, cx)
-                                }))
-                        })),
-                )
-                .child(
-                    Button::new("copy-log")
-                        .label(t.copy)
-                        .outline()
-                        .on_click(cx.listener(|this, _, _, cx| this.on_copy_log(cx))),
-                )
-                .child(
-                    Button::new("clear-log")
-                        .label(t.clear)
-                        .outline()
-                        .on_click(cx.listener(|this, _, _, cx| this.on_clear_log(cx))),
-                ),
+                .gap_1()
+                .children(LogFilter::ALL.map(|candidate| {
+                    let active = candidate == filter;
+                    Button::new(candidate.id())
+                        .label(candidate.label(t))
+                        .when(active, |button| button.primary())
+                        .when(!active, |button| button.outline())
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.on_set_log_filter(candidate, cx)
+                            }),
+                        )
+                })),
         )
 }
 

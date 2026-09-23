@@ -190,7 +190,12 @@ fn deleting_a_core_in_use_is_refused_in_the_window(cx: &mut TestAppContext) {
     settle(cx);
     cx.update(|window, cx| window.click("nav-Cores", cx));
     settle(cx);
-    cx.update(|window, cx| window.click("delete-core-0", cx));
+    // Deleting lives in the row's overflow menu now, so the test opens it the
+    // way a user does and picks the item by its place in the menu: edit, a
+    // separator, then delete.
+    cx.update(|window, cx| window.click("more-core-0", cx));
+    settle(cx);
+    cx.update(|window, cx| window.within("popup-menu").click(2usize, cx));
     settle(cx);
     cx.update(|window, cx| window.click("ok", cx));
     settle(cx);
@@ -257,6 +262,7 @@ fn starting_without_a_core_says_so_and_offers_the_way_there(cx: &mut TestAppCont
             Arc::new(FakeProxyTester::passing()),
             Arc::new(FakeOpener::working()),
             Arc::new(FakeBrowserDataCopier::passing()),
+            crate::tray::Tray::start,
         );
         view.boot(cx);
         view

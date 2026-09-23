@@ -71,18 +71,27 @@ impl AppView {
     /// The window is closed/hidden from view and the taskbar, and the program
     /// keeps running and managing the profiles. The tray icon is what says so
     /// and what brings the window back or exits completely.
-    pub(super) fn enter_background(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
-        // No banner: it would be painted into a window the user has just put
-        // away. The activity log is where this is recorded, because the log is
-        // what outlives the window.
+    pub(super) fn enter_background(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // No banner for the ordinary case: it would be painted into a window the
+        // user has just put away. The activity log is where that is recorded,
+        // because the log is what outlives the window.
         tracing::info!("{}", self.state.text().exit_in_background);
         if self.tray.is_none() {
-            // A desktop that will not take the icon is worth saying out loud and
-            // is not worth refusing: the window still hides, and the log is
-            // what says why there is no way back from the tray.
-            match Tray::start(self.state.text()) {
+            match (self.tray_starter)(self.state.text()) {
                 Ok(tray) => self.tray = Some(tray),
-                Err(error) => tracing::warn!("no tray icon: {error}"),
+                Err(error) => {
+                    // The tray icon is the only way back to a window that is not
+                    // on screen, so a desktop that refuses one is a desktop where
+                    // hiding the window would lose it: the user would be left
+                    // with a running program, no window, and no icon to click.
+                    // The window stays, and the banner - which can be read
+                    // precisely because the window is still there - says why.
+                    tracing::warn!("no tray icon: {error}");
+                    let message = self.state.text().no_tray_keeps_window(&error);
+                    self.state.push_notice(message, true);
+                    cx.notify();
+                    return;
+                }
             }
         }
         window_visibility::hide(window);

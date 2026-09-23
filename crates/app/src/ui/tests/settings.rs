@@ -157,9 +157,13 @@ fn profiles_can_be_created_started_and_stopped_from_the_window(cx: &mut TestAppC
     let (view, runtime) = view(cx);
     let cx = window(cx, &view);
 
+    // The chrome is the sidebar now. The exit button that used to sit in a
+    // header above every page is gone: the window's own close control and the
+    // tray answer a close, and the rare variants are behind the brand's menu -
+    // asserted below, so a shell with no way out cannot pass this test.
     assert!(
-        cx.update(|window, _| window.try_find("quit").is_some()),
-        "the header renders a quit affordance"
+        cx.update(|window, _| window.try_find("brand-more").is_some()),
+        "the sidebar carries the low-frequency menu"
     );
     assert_eq!(view.read_with(cx, |view, _| view.state().rows().len()), 0);
 
@@ -640,4 +644,82 @@ fn writing_a_diagnostics_report_from_the_settings_page_says_where_it_went(cx: &m
     // the fixture's data directory is shared with the rest of the suite.
     std::fs::remove_file(written).expect("clean up");
     let _ = std::fs::remove_dir(&folder);
+}
+
+/// The shell's exit affordance, where the removed header's button went.
+///
+/// Nothing here is a new exit *path*: the menu asks the same question the
+/// window's close control does, which is what stops the two from drifting into
+/// two different answers.
+#[gpui_kit::test]
+fn the_brand_menu_carries_the_ways_out(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    // A config file of this test's own: a close remembered by another test
+    // would answer the question this one asks.
+    let dir = std::env::temp_dir().join(format!("fp-ui-brand-menu-{}", std::process::id()));
+    let (view, _) = view_with_config(cx, &dir.join("config.json"));
+    let cx = window(cx, &view);
+
+    assert!(
+        cx.update(|window, _| window.try_find("quit").is_none()),
+        "the content area no longer repeats the window's close control"
+    );
+
+    cx.update(|window, cx| window.click("brand-more", cx));
+    assert!(
+        cx.update(|window, _| window.try_find("popup-menu").is_some()),
+        "the menu opens from the brand"
+    );
+
+    // Items are picked by their place in the menu: about, a separator, closing
+    // the window, then stopping everything.
+    cx.update(|window, cx| window.within("popup-menu").click(2usize, cx));
+    settle(cx);
+    assert!(
+        cx.update(|window, _| window.try_find("exit-choice-exit-all").is_some()),
+        "closing from the menu asks the question the window's control asks"
+    );
+}
+
+/// A desktop that will not take a tray icon keeps the window on screen.
+///
+/// Without the icon there is no way back to a hidden window, so "keep running"
+/// would leave a program the user can neither see nor reach. The close is still
+/// refused - the program does keep running - and the banner, which is readable
+/// precisely because the window stayed, says why.
+#[gpui_kit::test]
+fn a_desktop_without_a_tray_keeps_the_window(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = std::env::temp_dir().join(format!("fp-ui-no-tray-{}", std::process::id()));
+    let (view, _) = view_with_config(cx, &dir.join("config.json"));
+    let cx = window(cx, &view);
+    view.update(cx, |view, _| {
+        view.state_mut()
+            .set_exit_mode(ExitMode::Background)
+            .expect("store the answer");
+        view.set_tray_starter(|_| Err("no StatusNotifierItem host".to_string()));
+    });
+
+    let allowed =
+        cx.update(|window, cx| view.update(cx, |view, cx| view.on_close_requested(window, cx)));
+    assert!(
+        !allowed,
+        "the program keeps running, so the close is still refused"
+    );
+    view.update(cx, |view, _| {
+        assert!(
+            view.tray.is_none(),
+            "there is no icon, which is the whole problem"
+        );
+        let notice = view
+            .state()
+            .notice()
+            .expect("the refusal to hide is reported where it can be read");
+        assert!(notice.error, "it is a problem, not a note: {notice:?}");
+        assert!(
+            notice.message.contains("StatusNotifierItem"),
+            "the banner carries the desktop's own reason: {}",
+            notice.message
+        );
+    });
 }

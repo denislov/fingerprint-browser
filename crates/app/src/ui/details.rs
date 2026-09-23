@@ -5,6 +5,7 @@
 //! the core was given, the fingerprint verification, and the engine's own log - so
 //! it is the one place in the window that reads from three sources at once.
 
+use super::components::{Tone, status_badge};
 use super::logs::log_level_color;
 use super::*;
 
@@ -406,29 +407,30 @@ pub(super) fn verification_block(verification: Option<Verification>, p: Palette,
 
 /// A compact marker for the row: the user should not have to select a profile
 /// to know whether its fingerprint was confirmed.
+///
+/// "Running" is information rather than a warning: a check in progress is not
+/// something to fix. What the reader must not read into it is the row's own
+/// state - a green row is a running browser, and this badge is the only thing
+/// that speaks for the fingerprint.
 pub(super) fn verification_badge(
     verification: Option<&Verification>,
     p: Palette,
     t: &Text,
 ) -> Option<impl IntoElement> {
     let verification = verification?;
-    let (background, foreground) = match verification {
-        Verification::Confirmed(_) => (p.success_bg, p.success_strong),
-        Verification::Running => (p.border, p.secondary),
-        Verification::Disagreements(_) => (p.warning_bg, p.warning),
-        Verification::Unreadable(_) => (p.danger_bg_soft, p.danger_strong),
+    let tone = match verification {
+        Verification::Confirmed(_) => Tone::Success,
+        Verification::Running => Tone::Info,
+        Verification::Disagreements(_) => Tone::Warning,
+        Verification::Unreadable(_) => Tone::Danger,
     };
-    Some(
-        div()
-            .id(format!("verification-{}", verification.label(t)))
-            .px_2()
-            .py_1()
-            .rounded_full()
-            .bg(rgb(background))
-            .text_color(rgb(foreground))
-            .text_xs()
-            .child(verification.label(t)),
-    )
+    Some(status_badge(
+        format!("verification-{}", verification.label(t)),
+        tone,
+        verification.label(t),
+        verification.label(t),
+        p,
+    ))
 }
 
 pub(super) fn effective_args(row: &ProfileRow, p: Palette, t: &Text) -> Div {

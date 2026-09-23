@@ -336,7 +336,10 @@ fn deleting_a_proxy_in_use_is_refused_in_the_window(cx: &mut TestAppContext) {
 
     cx.update(|window, cx| window.click("nav-Proxies", cx));
     settle(cx);
-    cx.update(|window, cx| window.click("delete-proxy-0", cx));
+    // Deleting lives in the row's overflow menu now: edit, a separator, delete.
+    cx.update(|window, cx| window.click("more-proxy-0", cx));
+    settle(cx);
+    cx.update(|window, cx| window.within("popup-menu").click(2usize, cx));
     settle(cx);
     cx.update(|window, cx| window.click("ok", cx));
     settle(cx);

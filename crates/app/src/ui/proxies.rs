@@ -4,46 +4,32 @@
 //! drawing here is about showing a reading honestly - which stage of the path was
 //! measured, how long ago, and what it means when there is nothing to show.
 
+use super::components::{EmptyState, PageHeader};
 use super::*;
 
 pub(super) fn proxies_header(cx: &mut Context<AppView>, t: &Text) -> Div {
     let p = palette(cx);
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(t.nav_proxies),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(p.muted))
-                        .child(t.proxies_intro),
-                ),
-        )
-        .child(
+    PageHeader::new(t.nav_proxies)
+        .summary("proxies-summary", t.proxies_intro, t.proxies_intro)
+        .action(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
+                // Importing is the quieter of the two ways a proxy arrives, so
+                // it is the outline button beside the one filled action.
                 .child(
                     Button::new("import-proxy")
+                        .icon(icons::action(icons::glyph::IMPORT_LINK))
                         .label(t.import_from_link)
+                        .outline()
                         .on_click(
                             cx.listener(|this, _, window, cx| this.on_import_proxy(window, cx)),
                         ),
                 )
                 .child(
                     Button::new("new-proxy")
+                        .icon(icons::action(icons::glyph::NEW))
                         .label(t.new_proxy)
                         .primary()
                         .on_click(
@@ -51,13 +37,14 @@ pub(super) fn proxies_header(cx: &mut Context<AppView>, t: &Text) -> Div {
                         ),
                 ),
         )
+        .render(p)
 }
 
 pub(super) fn proxies_body(
     rows: &[ProxyRow],
     tests: &std::collections::HashMap<ProxyId, ProxyTest>,
     cx: &mut Context<AppView>,
-    t: &Text,
+    t: &'static Text,
 ) -> impl IntoElement {
     let p = palette(cx);
     div()
@@ -70,17 +57,25 @@ pub(super) fn proxies_body(
         .overflow_y_scroll()
         .when(rows.is_empty(), |this| {
             this.child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .rounded_md()
-                    .bg(rgb(p.panel))
-                    .text_sm()
-                    .text_color(rgb(p.muted))
-                    .child(t.proxies_empty),
+                EmptyState::new(
+                    "proxies-empty",
+                    icons::glyph::EMPTY_PROXIES,
+                    t.empty_proxies_title,
+                    t.proxies_empty,
+                )
+                .action(
+                    Button::new("empty-new-proxy")
+                        .icon(icons::action(icons::glyph::NEW))
+                        .label(t.new_proxy)
+                        .primary()
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.on_edit_proxy(None, window, cx)),
+                        ),
+                )
+                .render(p),
             )
         })
-        // The cards are built inline: a helper would have to return a type
+        // The rows are built inline: a helper would have to return a type
         // borrowing the context, which the closure cannot hand back.
         .children(rows.iter().enumerate().map(|(index, row)| {
             let id = row.proxy.id;
@@ -94,28 +89,34 @@ pub(super) fn proxies_body(
                 .gap_4()
                 .px_4()
                 .py_3()
-                .rounded_md()
+                .rounded(px(components::RADIUS_SURFACE))
                 .border_1()
                 .border_color(rgb(p.border))
+                .bg(rgb(p.panel))
+                .hover(|this| this.bg(rgb(p.hover)))
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
+                        .min_w_0()
                         .child(
                             div()
+                                .truncate()
                                 .text_sm()
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(row.proxy.name.clone()),
                         )
                         .child(
                             div()
+                                .truncate()
                                 .text_xs()
                                 .text_color(rgb(p.muted))
                                 .child(row.endpoint()),
                         )
                         .child(
                             div()
+                                .truncate()
                                 .text_xs()
                                 .text_color(rgb(if row.is_used() { p.success } else { p.muted }))
                                 .child(row.usage_label(t)),
@@ -125,10 +126,15 @@ pub(super) fn proxies_body(
                 .child(
                     div()
                         .flex()
+                        .flex_shrink_0()
                         .items_center()
                         .gap_2()
+                        // The one reading a user takes repeatedly keeps its
+                        // button; editing and deleting a proxy are things done
+                        // once, and belong in the menu beside it.
                         .child(
                             Button::new(format!("test-proxy-{index}"))
+                                .icon(icons::action(icons::glyph::TEST))
                                 .label(t.test)
                                 .outline()
                                 .disabled(test.is_some_and(ProxyTest::is_running))
@@ -136,24 +142,43 @@ pub(super) fn proxies_body(
                                     cx.listener(move |this, _, _, cx| this.on_test_proxy(id, cx)),
                                 ),
                         )
-                        .child(
-                            Button::new(format!("edit-proxy-{index}"))
-                                .label(t.edit)
-                                .outline()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.on_edit_proxy(Some(id), window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new(format!("delete-proxy-{index}"))
-                                .label(t.delete)
-                                .outline()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.on_delete_proxy(id, window, cx)
-                                })),
-                        ),
+                        .child(proxy_menu(row, index, cx, t)),
                 )
         }))
+}
+
+/// A proxy row's overflow menu: the two things a row is not worth a button for.
+fn proxy_menu(
+    row: &ProxyRow,
+    index: usize,
+    cx: &mut Context<AppView>,
+    t: &'static Text,
+) -> impl IntoElement {
+    let id = row.proxy.id;
+    let name = row.proxy.name.clone();
+    let view = cx.entity().downgrade();
+    components::icon_button(
+        format!("more-proxy-{index}"),
+        icons::glyph::MORE,
+        t.row_more(&name),
+    )
+    .dropdown_menu(move |menu, _window, _cx| {
+        menu.item(components::menu_item(
+            &view,
+            t.edit,
+            icons::glyph::EDIT,
+            false,
+            move |view, window, cx| view.on_edit_proxy(Some(id), window, cx),
+        ))
+        .separator()
+        .item(components::menu_item(
+            &view,
+            t.delete,
+            icons::glyph::DELETE,
+            false,
+            move |view, window, cx| view.on_delete_proxy(id, window, cx),
+        ))
+    })
 }
 
 /// The result of the last test of one proxy, or nothing when it has not run.

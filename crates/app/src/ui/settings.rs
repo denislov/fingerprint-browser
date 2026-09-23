@@ -6,6 +6,7 @@
 //! is for. The cards are separate functions so a change to one does not mean
 //! reading the other five.
 
+use super::components::PageHeader;
 use super::*;
 
 /// What a setting does, in one line, under its field.
@@ -21,22 +22,9 @@ pub(super) fn key_help(key: SettingKey, t: &Text) -> String {
 }
 
 pub(super) fn settings_header(p: Palette, t: &Text) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .text_xl()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(t.nav_settings),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(p.muted))
-                .child(t.settings_intro),
-        )
+    PageHeader::new(t.nav_settings)
+        .summary("settings-summary", t.settings_intro, t.settings_intro)
+        .render(p)
 }
 
 /// Everything the export card needs that is not already in [`AppState`].
@@ -93,6 +81,7 @@ pub(super) fn settings_body(
         browser_data_card(&cards.browser_data, cx, t).into_any_element();
     let diagnostics_card: AnyElement =
         diagnostics_card(&cards.diagnostics, cx, t).into_any_element();
+    let about_card: AnyElement = about_card(p, t).into_any_element();
     div()
         .id("settings-scroll")
         .flex()
@@ -195,6 +184,7 @@ pub(super) fn settings_body(
         .child(restore_card)
         .child(browser_data_card)
         .child(diagnostics_card)
+        .child(about_card)
 }
 
 /// The appearance card, first on the page.
@@ -214,10 +204,11 @@ pub(super) fn appearance_card(
     t: &Text,
 ) -> impl IntoElement {
     let p = palette(cx);
-    settings_card(p)
+    components::card(p)
         .id("appearance")
         .test_support()
-        .child(settings_card_heading(
+        .child(components::card_heading(
+            icons::glyph::APPEARANCE,
             t.interface_title,
             t.interface_body,
             p,
@@ -226,9 +217,9 @@ pub(super) fn appearance_card(
         // hides the alternative behind the label of the mode you are not looking
         // at, which is the one thing the reader cannot check against the window.
         .child(
-            settings_card_row(t.appearance_title, p).children(ThemeChoice::ALL.map(|option| {
+            components::card_row(t.appearance_title, p).children(ThemeChoice::ALL.map(|option| {
                 let active = option == choice;
-                chip(
+                components::chip(
                     format!("theme-{}", option.code()),
                     option.label(t),
                     active,
@@ -242,9 +233,9 @@ pub(super) fn appearance_card(
         // Language: each chip is labelled in its own language, so someone who
         // cannot read the one they are in can still find the way out of it.
         .child(
-            settings_card_row(t.language_title, p).children(Lang::ALL.map(|option| {
+            components::card_row(t.language_title, p).children(Lang::ALL.map(|option| {
                 let active = option == language;
-                chip(
+                components::chip(
                     format!("language-{}", option.code()),
                     option.label(),
                     active,
@@ -274,10 +265,11 @@ pub(super) fn exit_mode_card(
     t: &Text,
 ) -> impl IntoElement {
     let p = palette(cx);
-    settings_card(p)
+    components::card(p)
         .id("exit-mode")
         .test_support()
-        .child(settings_card_heading(
+        .child(components::card_heading(
+            icons::glyph::EXIT_BEHAVIOUR,
             t.exit_card_title,
             t.exit_card_body,
             p,
@@ -290,7 +282,7 @@ pub(super) fn exit_mode_card(
                 .gap_2()
                 .children(ExitMode::ALL.map(|option| {
                     let active = option == mode;
-                    chip(
+                    components::chip(
                         format!("exit-{}", option.code()),
                         option.label(t),
                         active,
@@ -343,74 +335,6 @@ pub(super) fn exit_choice(exit: &Exit, p: Palette, t: &Text) -> Stateful<Div> {
         .child(div().text_xs().text_color(rgb(p.muted)).child(exit.note(t)))
 }
 
-/// The frame the Settings cards share: a bordered column.
-pub(super) fn settings_card(p: Palette) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .px_4()
-        .py_4()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(p.border))
-}
-
-/// A card's title and the sentence under it.
-pub(super) fn settings_card_heading(title: &str, body: &str, p: Palette) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .child(title.to_string()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(p.muted))
-                .child(body.to_string()),
-        )
-}
-
-/// A labelled row of chips inside a card.
-pub(super) fn settings_card_row(label: &str, p: Palette) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(p.muted))
-                .child(label.to_string()),
-        )
-        .child(div().flex().items_center().gap_2())
-}
-
-/// One chip of a choice: the same control the editors use, for the same reason -
-/// the chosen one is filled, the others are not, and both are always on screen.
-pub(super) fn chip(id: String, label: &str, active: bool, p: Palette) -> Stateful<Div> {
-    div()
-        .id(id)
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(if active { p.dim } else { p.border }))
-        .text_xs()
-        .when(active, |this| {
-            this.bg(rgb(p.border))
-                .text_color(rgb(p.text))
-                .font_weight(FontWeight::MEDIUM)
-        })
-        .when(!active, |this| this.text_color(rgb(p.muted)))
-        .child(label.to_string())
-}
-
 /// The export card at the foot of the Settings page.
 ///
 /// The path is typed rather than picked from a native file dialog. A chooser
@@ -425,18 +349,24 @@ pub(super) fn export_card(
 ) -> impl IntoElement {
     let p = palette(cx);
     let view = cx.entity().downgrade();
-    settings_card(p)
+    components::card(p)
         .id("export-configuration")
         .test_support()
-        .child(settings_card_heading(t.export_title, t.export_body, p))
+        .child(components::card_heading(
+            icons::glyph::EXPORT,
+            t.export_title,
+            t.export_body,
+            p,
+        ))
         .child(
             path_row(&export.path, "export-path", t.export_path_label, p).child(
                 Button::new("export-run")
+                    .icon(icons::action(icons::glyph::EXPORT))
                     .label(t.export)
                     .on_click(cx.listener(|this, _, _, cx| this.on_export_configuration(cx))),
             ),
         )
-        .child(card_note(
+        .child(components::card_note(
             t.export_empty_writes(&export.destination.display().to_string()),
             p,
         ))
@@ -457,7 +387,10 @@ pub(super) fn export_card(
                             }
                         }),
                 )
-                .child(card_hint(t.export_credentials_note, p)),
+                .child(components::card_note(
+                    t.export_credentials_note.to_string(),
+                    p,
+                )),
         )
         // The one sentence on this page that is a warning rather than a
         // description: the file is about to hold passwords in the clear.
@@ -481,18 +414,24 @@ pub(super) fn import_card(
     t: &Text,
 ) -> impl IntoElement {
     let p = palette(cx);
-    settings_card(p)
+    components::card(p)
         .id("import-configuration")
         .test_support()
-        .child(settings_card_heading(t.import_title, t.import_body, p))
+        .child(components::card_heading(
+            icons::glyph::IMPORT_FILE,
+            t.import_title,
+            t.import_body,
+            p,
+        ))
         .child(
             path_row(input, "import-path", t.import_path_label, p).child(
                 Button::new("import-run")
+                    .icon(icons::action(icons::glyph::IMPORT_FILE))
                     .label(t.import)
                     .on_click(cx.listener(|this, _, _, cx| this.on_import_configuration(cx))),
             ),
         )
-        .child(card_note(t.import_note.to_string(), p))
+        .child(components::card_note(t.import_note.to_string(), p))
 }
 
 /// The restore card, under the import one.
@@ -508,18 +447,28 @@ pub(super) fn restore_card(
     t: &Text,
 ) -> impl IntoElement {
     let p = palette(cx);
-    settings_card(p)
+    components::card(p)
         .id("restore-configuration")
         .test_support()
-        .child(settings_card_heading(t.restore_title, t.restore_body, p))
+        .child(components::card_heading(
+            icons::glyph::RESTORE,
+            t.restore_title,
+            t.restore_body,
+            p,
+        ))
         .child(
             path_row(input, "restore-path", t.restore_path_label, p).child(
-                Button::new("restore-run").label(t.restore).on_click(
-                    cx.listener(|this, _, window, cx| this.on_restore_configuration(window, cx)),
-                ),
+                Button::new("restore-run")
+                    .icon(icons::action(icons::glyph::RESTORE))
+                    .label(t.restore)
+                    .on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.on_restore_configuration(window, cx)
+                        }),
+                    ),
             ),
         )
-        .child(card_note(t.restore_note.to_string(), p))
+        .child(components::card_note(t.restore_note.to_string(), p))
 }
 
 /// The browser-data card, below the configuration ones.
@@ -534,21 +483,28 @@ pub(super) fn browser_data_card(
     t: &Text,
 ) -> impl IntoElement {
     let p = palette(cx);
-    settings_card(p)
+    components::card(p)
         .id("browser-data")
         .test_support()
-        .child(settings_card_heading(
+        .child(components::card_heading(
+            icons::glyph::DATA,
             t.browser_data_title,
             t.browser_data_body,
             p,
         ))
         .child(
             path_row(input, "browser-data-path", t.browser_data_path_label, p)
-                .child(Button::new("browser-data-out").label(t.copy_out).on_click(
-                    cx.listener(|this, _, _, cx| this.on_browser_data(Direction::ToBackup, cx)),
-                ))
+                .child(
+                    Button::new("browser-data-out")
+                        .icon(icons::action(icons::glyph::EXPORT))
+                        .label(t.copy_out)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.on_browser_data(Direction::ToBackup, cx)
+                        })),
+                )
                 .child(
                     Button::new("browser-data-in")
+                        .icon(icons::action(icons::glyph::IMPORT_FILE))
                         .label(t.copy_in)
                         .outline()
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -556,7 +512,7 @@ pub(super) fn browser_data_card(
                         })),
                 ),
         )
-        .child(card_note(t.browser_data_note.to_string(), p))
+        .child(components::card_note(t.browser_data_note.to_string(), p))
 }
 
 /// The diagnostics card, last on the Settings page.
@@ -575,10 +531,11 @@ pub(super) fn diagnostics_card(
     t: &Text,
 ) -> impl IntoElement {
     let p = palette(cx);
-    settings_card(p)
+    components::card(p)
         .id("diagnostics")
         .test_support()
-        .child(settings_card_heading(
+        .child(components::card_heading(
+            icons::glyph::DIAGNOSTICS,
             t.diag_card_title,
             t.diag_card_body,
             p,
@@ -586,14 +543,59 @@ pub(super) fn diagnostics_card(
         .child(
             div().flex().items_center().gap_2().child(
                 Button::new("diagnostics-run")
+                    .icon(icons::action(icons::glyph::DIAGNOSTICS))
                     .label(t.diag_write)
                     .on_click(cx.listener(|this, _, _, cx| this.on_write_diagnostics(cx))),
             ),
         )
-        .child(card_note(
+        .child(components::card_note(
             t.diag_card_note(&destination.display().to_string()),
             p,
         ))
+}
+
+/// The About card: what this build is.
+///
+/// Last on the page, and the reason the window no longer has a header: the
+/// product's name, its version, the commit a report has to quote and the stack
+/// it was built from used to sit above every page, taking a row of height to say
+/// something a reader needs once.
+pub(super) fn about_card(p: Palette, t: &Text) -> impl IntoElement {
+    components::card(p)
+        .id("about")
+        .test_support()
+        .child(components::card_heading(
+            icons::glyph::ABOUT,
+            t.about_title,
+            t.about_body,
+            p,
+        ))
+        .child(about_row(t.diag_version, version::line(), p))
+        .child(about_row(t.diag_platform, version::platform(), p))
+        // Not translated: a stack is a list of names, and a translated product
+        // name is a worse bug than an untranslated one.
+        .child(about_row(
+            t.about_stack,
+            "Rust · GPUI Kit · Fingerprint-Chromium".to_string(),
+            p,
+        ))
+}
+
+/// One line of the About card: what it is, then what it is.
+fn about_row(label: &str, value: String, p: Palette) -> Div {
+    div()
+        .flex()
+        .items_baseline()
+        .gap_3()
+        .text_xs()
+        .child(
+            div()
+                .w(px(96.0))
+                .flex_shrink_0()
+                .text_color(rgb(p.muted))
+                .child(label.to_string()),
+        )
+        .child(div().text_color(rgb(p.text_soft)).child(value))
 }
 
 /// A card's path field with room for the buttons beside it.
@@ -609,19 +611,6 @@ pub(super) fn path_row(input: &Entity<InputState>, id: &str, label: &str, p: Pal
                 .aria_label(label.to_string()),
         ),
     )
-}
-
-/// The dim line under a card's controls: what would happen, or what did.
-pub(super) fn card_note(text: String, p: Palette) -> Div {
-    div().text_xs().text_color(rgb(p.dim)).child(text)
-}
-
-/// The muted sentence beside a checkbox, saying what the box does.
-pub(super) fn card_hint(text: &str, p: Palette) -> Div {
-    div()
-        .text_xs()
-        .text_color(rgb(p.muted))
-        .child(text.to_string())
 }
 
 mod actions;

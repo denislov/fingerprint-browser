@@ -42,6 +42,16 @@ pub enum TrayEvent {
     Quit,
 }
 
+/// How a window starts its tray icon.
+///
+/// A function pointer rather than a direct call to [`Tray::start`], for the same
+/// reason the verifier, the tester, the opener and the copier are injected: the
+/// interesting case is the desktop that refuses the icon, and the decision that
+/// hangs on it - whether the window may be hidden at all - has to be reachable
+/// from a test. A pointer rather than a trait object because there is no state to
+/// carry.
+pub type TrayStarter = fn(&'static Text) -> Result<Tray, String>;
+
 /// A live tray icon, and the requests it has collected.
 pub struct Tray {
     backend: Backend,
