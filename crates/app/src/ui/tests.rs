@@ -162,7 +162,7 @@ fn view_with_tester(
             tester.clone(),
             opener.clone(),
             copier.clone(),
-            crate::tray::Tray::start,
+            crate::tray::testing::fake_starter,
         );
         view.boot(cx);
         view

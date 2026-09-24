@@ -54,7 +54,13 @@ pub type TrayStarter = fn(&'static Text) -> Result<Tray, String>;
 
 /// A live tray icon, and the requests it has collected.
 pub struct Tray {
-    backend: Backend,
+    backend: TrayBackend,
+}
+
+enum TrayBackend {
+    Live(Backend),
+    #[cfg(test)]
+    Fake(crossbeam_channel::Receiver<TrayEvent>),
 }
 
 impl Tray {
@@ -66,13 +72,41 @@ impl Tray {
     /// caller decides; the error is the sentence.
     pub fn start(t: &'static Text) -> Result<Self, String> {
         Ok(Self {
-            backend: Backend::start(t)?,
+            backend: TrayBackend::Live(Backend::start(t)?),
         })
     }
 
     /// Takes everything the user has asked for since the last look.
     pub fn drain(&self) -> Vec<TrayEvent> {
-        self.backend.drain()
+        match &self.backend {
+            TrayBackend::Live(backend) => backend.drain(),
+            #[cfg(test)]
+            TrayBackend::Fake(events) => events.try_iter().collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// A starter that succeeds without touching the desktop or session bus.
+    pub fn fake_starter(_: &'static Text) -> Result<Tray, String> {
+        let (_sender, receiver) = crossbeam_channel::unbounded();
+        Ok(Tray {
+            backend: TrayBackend::Fake(receiver),
+        })
+    }
+
+    /// Creates a fake tray along with a sender to simulate tray events in tests.
+    pub fn fake_tray() -> (Tray, crossbeam_channel::Sender<TrayEvent>) {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        (
+            Tray {
+                backend: TrayBackend::Fake(receiver),
+            },
+            sender,
+        )
     }
 }
 
@@ -355,5 +389,15 @@ mod tests {
         assert_eq!(en.tray_quit, "Quit completely");
         assert_eq!(zh.tray_show, "打开窗口");
         assert_eq!(zh.tray_quit, "完全退出");
+    }
+
+    #[test]
+    fn fake_tray_starts_and_drains_events() {
+        let (tray, sender) = testing::fake_tray();
+        assert!(tray.drain().is_empty());
+        sender.send(TrayEvent::Show).unwrap();
+        sender.send(TrayEvent::Quit).unwrap();
+        assert_eq!(tray.drain(), vec![TrayEvent::Show, TrayEvent::Quit]);
+        assert!(tray.drain().is_empty());
     }
 }

@@ -359,7 +359,7 @@ impl AppView {
     pub(in crate::ui) fn on_choose_language(&mut self, language: Lang, cx: &mut Context<Self>) {
         let _ = self.state.set_language(language);
         if self.tray.is_some() {
-            match Tray::start(self.state.text()) {
+            match (self.tray_starter)(self.state.text()) {
                 Ok(tray) => self.tray = Some(tray),
                 Err(error) => tracing::warn!("no tray icon: {error}"),
             }

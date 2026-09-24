@@ -263,7 +263,7 @@ fn starting_without_a_core_says_so_and_offers_the_way_there(cx: &mut TestAppCont
             Arc::new(FakeProxyTester::passing()),
             Arc::new(FakeOpener::working()),
             Arc::new(FakeBrowserDataCopier::passing()),
-            crate::tray::Tray::start,
+            crate::tray::testing::fake_starter,
         );
         view.boot(cx);
         view
