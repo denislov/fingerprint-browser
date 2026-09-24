@@ -394,6 +394,17 @@ mod tests {
             pub fn closed(&self) -> Vec<String> {
                 self.closed.lock().expect("closed lock").clone()
             }
+
+            pub fn wait_closed(&self, timeout: Duration) -> Vec<String> {
+                let start = std::time::Instant::now();
+                loop {
+                    let closed = self.closed();
+                    if !closed.is_empty() || start.elapsed() >= timeout {
+                        return closed;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
 
         /// Starts a stub that answers each document-state question with the next
@@ -800,7 +811,11 @@ mod tests {
             "a settled page should not be waited out: {:?}",
             started.elapsed()
         );
-        assert_eq!(stub.closed().len(), 1, "a failed page is closed too");
+        assert_eq!(
+            stub.wait_closed(Duration::from_secs(1)).len(),
+            1,
+            "a failed page is closed too"
+        );
     }
 
     /// A page still on the empty document cannot say whether it is about to
@@ -836,6 +851,6 @@ mod tests {
             panic!("prose holds no address: {outcome:?}");
         };
         assert!(excerpt.contains("Too Many Requests"), "{excerpt}");
-        assert_eq!(stub.closed().len(), 1);
+        assert_eq!(stub.wait_closed(Duration::from_secs(1)).len(), 1);
     }
 }

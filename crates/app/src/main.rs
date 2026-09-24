@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 //! Fingerprint Browser — application bootstrap.
 //!
 //! Owns process-wide wiring only: storage, the runtime supervisor thread, the
@@ -61,6 +63,13 @@ const EVENT_CAPACITY: usize = 256;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 fn main() {
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::System::Console::AttachConsole(
+            windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+        );
+    }
+
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let invocation = cli::parse(&arguments);
 

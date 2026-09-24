@@ -127,13 +127,18 @@ fn read_pe_version_windows(executable: &Path, timeout: Duration) -> Option<Strin
         "(Get-Item -LiteralPath '{}').VersionInfo.ProductVersion",
         executable.display()
     );
-    let mut child = Command::new("powershell")
+    let mut command = Command::new("powershell");
+    command
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn().ok()?;
 
     let deadline = Instant::now() + timeout.min(Duration::from_secs(3));
     loop {
@@ -174,13 +179,18 @@ pub fn parse_major(banner: &str) -> Option<u32> {
 }
 
 fn read_banner(executable: &Path, timeout: Duration) -> Option<String> {
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn().ok()?;
 
     let deadline = Instant::now() + timeout;
     loop {
