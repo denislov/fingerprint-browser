@@ -189,7 +189,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "application",
  "crossbeam-channel",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "application"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "domain",
  "runtime",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "percent-encoding",
@@ -6268,7 +6268,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "crossbeam-channel",
@@ -7010,7 +7010,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "domain",
  "rusqlite",

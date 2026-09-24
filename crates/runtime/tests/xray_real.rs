@@ -52,6 +52,7 @@ fn authenticated_socks_and_http_upstreams_forward_payload() {
                     Err(e) => panic!("upstream accept: {e}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();

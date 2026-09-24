@@ -364,7 +364,7 @@ impl StartFailure {
 /// group and a job object rather than one process: two rules for ending one would
 /// be two chances to leave a renderer behind.
 pub(super) fn terminate_owned(
-    tree: &dyn ProcessTreeController,
+    _tree: &dyn ProcessTreeController,
     child: &mut crate::process::ManagedChild,
 ) {
     #[cfg(windows)]
@@ -373,7 +373,7 @@ pub(super) fn terminate_owned(
     }
     if matches!(child.try_wait(), Ok(None)) {
         #[cfg(unix)]
-        let _ = tree.terminate_tree(child.id());
+        let _ = _tree.terminate_tree(child.id());
         // A direct kill is a fallback if the platform tree controller fails.
         let _ = child.kill();
     }

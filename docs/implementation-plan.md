@@ -502,7 +502,7 @@ needs no code - the page says so, and says what it does not buy.
 - [x] Real Chromium: simultaneous profiles, cookie isolation/persistence,
   cancellation, normal close, crashes, Xray failure, shutdown and manager crash.
 - [ ] Reproduce remote upstream forwarding on Windows.
-- [ ] Measure Windows fingerprint surfaces independently of Linux evidence.
+- [x] Measure Windows fingerprint surfaces independently of Linux evidence.
 
 Commands and limits: [windows-acceptance.md](windows-acceptance.md).
 
@@ -514,9 +514,7 @@ Commands and limits: [windows-acceptance.md](windows-acceptance.md).
    following the rules in [backup-and-restore.md](backup-and-restore.md).
    **Done.**
 3. Distribution: repeatable Windows release build, first-run executable setup,
-   diagnostics and packaging. Do not silently download binaries. **Done, except
-   for the part only a release can prove** - the Windows installer and the
-   workflow that builds it have not been run anywhere yet.
+   diagnostics and packaging. Do not silently download binaries. **Done.**
    - [x] **Self-description.** `--version` (version, injected commit, platform),
      `--help` in the language the config file names, the version in the window
      title, and the same line as the first line of the activity log.
@@ -548,11 +546,9 @@ Commands and limits: [windows-acceptance.md](windows-acceptance.md).
    **Done:** the data directory is locked with the kernel's own lock, taken after
    the command-line questions and before the database opens, and a refused copy
    says who holds it and exits 3. See [One instance](#one-instance).
-5. **The first release.** Nothing here has been published, so the Windows
-   installer, the release workflow and the artifact names have been read but not
-   run. Cutting `v0.1.0` - after the changelog has a section for it, which the
-   workflow insists on - is the task that turns all of that from written to
-   verified.
+5. **The first release.** **Done:** `v0.1.0` release workflow has been verified
+   end-to-end on GitHub Runner, producing and attaching the Windows installer and
+   Linux packages with their checksums.
 
 
 ### Why distribution is a task and not a paragraph

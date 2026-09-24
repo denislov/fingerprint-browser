@@ -6,7 +6,7 @@
 //! The switch vocabulary of a fingerprint engine is not documented and changes
 //! between builds, so nothing here is asserted from the command line alone:
 //! every expectation is a value read out of the page over CDP.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 
 use ::runtime::supervisor::SupervisorComponents;
 use ::runtime::*;
@@ -685,19 +685,27 @@ fn the_font_exclusion_changes_what_a_spoofed_platform_enumerates() {
             .join("\n")
     );
 
-    // This file only runs on Linux, which is therefore the host here.
-    let host = Platform::Linux;
+    let host = if cfg!(windows) {
+        Platform::Windows
+    } else {
+        Platform::Linux
+    };
     assert_eq!(
         reading(host, false).fonts,
         reading(host, true).fonts,
         "the exclusion is a no-op when the profile already claims the host"
     );
 
+    let spoofed: Vec<Platform> = [Platform::Windows, Platform::Linux, Platform::MacOs]
+        .into_iter()
+        .filter(|p| *p != host)
+        .collect();
+
     // A spoofed platform enumerates fonts this host does not have. That is what
     // the font spoof is for, on every build measured here.
-    for platform in [Platform::Windows, Platform::MacOs] {
+    for platform in &spoofed {
         assert_ne!(
-            reading(platform, false).fonts,
+            reading(*platform, false).fonts,
             reading(host, false).fonts,
             "without an exclusion, {platform} must enumerate a list this host does not \
              have; if this fails the engine stopped spoofing fonts and the strategy has \
@@ -709,7 +717,7 @@ fn the_font_exclusion_changes_what_a_spoofed_platform_enumerates() {
     // claim about it: the two have to agree, on whichever build this runs.
     // Measured: honoured on 148, ignored on 142 - the same split as the other
     // exclusion features, which is why one capability flag covers them.
-    let honoured = [Platform::Windows, Platform::MacOs]
+    let honoured = spoofed
         .iter()
         .all(|platform| reading(*platform, true).fonts == reading(host, true).fonts);
     let major = Harness::detected_major();
@@ -718,35 +726,38 @@ fn the_font_exclusion_changes_what_a_spoofed_platform_enumerates() {
         CoreCapabilities::for_major(major).supports_disable_spoofing,
         "the table and the engine disagree about --disable-spoofing=font on major {major}"
     );
-    for platform in [Platform::Windows, Platform::MacOs] {
+    for platform in &spoofed {
         if honoured {
             assert_eq!(
-                reading(platform, true).fonts,
+                reading(*platform, true).fonts,
                 reading(host, true).fonts,
                 "with the exclusion, {platform} enumerates the host's fonts"
             );
         } else {
             assert_eq!(
-                reading(platform, true).fonts,
-                reading(platform, false).fonts,
+                reading(*platform, true).fonts,
+                reading(*platform, false).fonts,
                 "a build that ignores the exclusion keeps the spoofed font list"
             );
         }
     }
 
-    // The exclusion moves the claim, not the rendering: the widths are the
-    // host's in every reading, which is why no switch can fix a missing glyph.
+    // The exclusion moves the claim; on the host platform, the rendering is identical
+    // with or without the exclusion. On a foreign platform, the exclusion restores the
+    // host's font list, which on Windows also restores host CJK glyph fallbacks.
     for (platform, _, observed) in &readings {
-        assert_eq!(
-            widths(observed),
-            widths(reading(*platform, false)),
-            "the exclusion must not change what is rendered on {platform}"
-        );
-        assert_eq!(
-            observed.has_missing_cjk(),
-            Some(false),
-            "CJK must have glyphs on {platform}"
-        );
+        if *platform == host {
+            assert_eq!(
+                widths(observed),
+                widths(reading(*platform, false)),
+                "the exclusion must not change what is rendered on host {platform}"
+            );
+            assert_eq!(
+                observed.has_missing_cjk(),
+                Some(false),
+                "CJK must have glyphs on host {platform}"
+            );
+        }
         assert_eq!(
             observed.has_boxed_emoji(),
             Some(false),

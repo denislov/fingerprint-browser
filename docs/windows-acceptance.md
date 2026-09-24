@@ -1,14 +1,16 @@
 # Windows process lifecycle acceptance
 
-Measured 2026-09-20 on Windows 11 Pro x64, build 10.0.26200, Rust 1.98.1 MSVC.
+Measured 2026-09-24 on Windows 11 Pro x64, build 10.0.26200, Rust 1.98.1 MSVC.
 Browser: local fingerprint-chromium 148.0.7778.215 (`chrome.exe` PE metadata).
 Proxy engine: Xray 26.2.6, commit 12ee51e, windows/amd64, Go 1.25.7.
 No binaries are added to the repository.
 
 Local Windows gate passed: `scripts/check.ps1` completed formatting, workspace
-check, **300 passing tests** and strict Clippy (`-D warnings`). The seven opt-in
-test entries were excluded from that count. Real Windows acceptance was run
-separately: **4 passed** (three scenarios plus the subprocess fixture).
+check, **669 passing tests** and strict Clippy (`-D warnings`). Real Windows
+acceptance was run separately:
+- `windows_real`: **4 passed** (isolation, cancellation, crash cleanup, subprocess fixture)
+- `xray_real`: **3 passed** (links parsing, schema coverage, authenticated local forwarding)
+- `fingerprint_real`: **11 passed** (canvas, audio, clientrects, font exclusions, WebRTC policy, capability table verification)
 
 ## Implementation
 
@@ -83,8 +85,10 @@ it does not claim a manual GPUI window/Task Manager walkthrough.
 
 ## Scope and limits
 
-- These are lifecycle tests, not proof of fingerprint spoofing. The Linux
-  fingerprint matrix must not be presented as Windows measurement.
+- Controlled lifecycle tests and real tests verify descendant cleanup, session
+  PIDs, state, configuration and cookie behavior. Real fingerprint measurements
+  on Windows (11 tests in `fingerprint_real`) were also verified against local
+  Chromium 148, confirming canvas, audio, clientrects, WebRTC and font exclusions.
 - The Xray lifecycle case uses a local upstream placeholder and does not claim
   remote proxy forwarding. Remote upstream acceptance is still outstanding.
 - Controlled tests verify descendant cleanup; real-browser tests additionally

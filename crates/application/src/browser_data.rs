@@ -330,6 +330,41 @@ fn contains(outer: &Path, inner: &Path) -> bool {
     inner != outer && inner.starts_with(outer)
 }
 
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut components = path.components();
+    match components.next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::VerbatimDisk(disk) => {
+                let mut stripped = PathBuf::from(format!("{}:", disk as char));
+                for component in components {
+                    stripped.push(component.as_os_str());
+                }
+                stripped
+            }
+            Prefix::VerbatimUNC(server, share) => {
+                let mut stripped = PathBuf::from(format!(
+                    r"\\{}\{}",
+                    server.to_string_lossy(),
+                    share.to_string_lossy()
+                ));
+                for component in components {
+                    stripped.push(component.as_os_str());
+                }
+                stripped
+            }
+            _ => path,
+        },
+        _ => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
+}
+
 /// Resolves a path for comparison with another, existing or not.
 ///
 /// The deepest ancestor that exists is canonicalised - which is what resolves a
@@ -353,17 +388,17 @@ fn resolve(path: &Path) -> PathBuf {
     let mut current = absolute.as_path();
     loop {
         if let Ok(real) = std::fs::canonicalize(current) {
-            return normalize(&real.join(&missing));
+            return strip_verbatim_prefix(normalize(&real.join(&missing)));
         }
         let Some(name) = current.file_name() else {
             // A root, or a `..` with nothing to resolve it against: there is no
             // existing ancestor left, so the path can only be read as written.
-            return normalize(&absolute);
+            return strip_verbatim_prefix(normalize(&absolute));
         };
         missing = Path::new(name).join(&missing);
         match current.parent() {
             Some(parent) if !parent.as_os_str().is_empty() => current = parent,
-            _ => return normalize(&absolute),
+            _ => return strip_verbatim_prefix(normalize(&absolute)),
         }
     }
 }
@@ -457,11 +492,13 @@ fn recover(profile: &str, to: &Path) -> Result<bool, BrowserDataError> {
         }
         return Ok(false);
     }
+    let to_resolved = resolve(to);
     let record: CopyOwner = std::fs::read(&marker)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .filter(|record: &CopyOwner| {
-            record.destination == to && record.format == "fp-browser-copy-v1"
+            (record.destination == to || resolve(&record.destination) == to_resolved)
+                && record.format == "fp-browser-copy-v1"
         })
         .ok_or_else(|| BrowserDataError::Unowned {
             path: marker.clone(),
@@ -533,7 +570,7 @@ fn claim(profile: &str, to: &Path) -> Result<(), BrowserDataError> {
         let record = CopyOwner {
             format: "fp-browser-copy-v1".into(),
             operation: uuid::Uuid::new_v4(),
-            destination: to.to_path_buf(),
+            destination: resolve(to),
         };
         file.write_all(&serde_json::to_vec(&record)?)?;
         file.sync_all()

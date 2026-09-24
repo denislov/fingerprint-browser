@@ -11,6 +11,9 @@ section before its tag is cut - the release workflow refuses a tag the changelog
 says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-09-24
+
 ### Added
 
 - The window answers the keyboard. A profile row is a target now: Tab reaches it,
@@ -46,6 +49,15 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Fixed
 
+- Fixed Windows CI gate warnings in `crates/runtime/src/supervisor/ownership.rs`
+  where the `tree` parameter was unused under Windows compilation.
+- Fixed Windows extended UNC path prefix (`\\?\`) comparison mismatch during browser
+  data recovery in `crates/application/src/browser_data.rs`.
+- Fixed Winsock non-blocking socket mode inheritance on accepted sockets in real Xray
+  integration tests (`crates/runtime/tests/xray_real.rs`).
+- Enabled real fingerprint verification tests on Windows and adapted dynamic host
+  platform recognition and font fallback measurements in
+  `crates/runtime/tests/fingerprint_real.rs`.
 - Selected navigation items, choice chips, details tabs and log filters retain
   their selected colours on hover and press, using the button's selected visual
   state rather than only its accessibility toggle state.
@@ -438,5 +450,6 @@ says nothing about, and the notes are that section rather than the whole file.
   outside the data directory - which stopped being true when the config file
   moved in beside the database.
 
-[Unreleased]: https://github.com/denislov/fingerprint-browser/commits/master
+[Unreleased]: https://github.com/denislov/fingerprint-browser/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/denislov/fingerprint-browser/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denislov/fingerprint-browser/releases/tag/v0.1.0
