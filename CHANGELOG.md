@@ -31,6 +31,18 @@ says nothing about, and the notes are that section rather than the whole file.
   handle is kept per profile rather than made per frame: a handle made fresh each
   frame would drop the keyboard at every runtime poll, and the test for that is
   `the_keyboard_stays_on_its_row_when_the_runtime_reports`.
+- The Linux packaging also builds a Debian package.
+  `packaging/linux/package.sh` writes `fingerprint-browser_<version>_<arch>.deb`
+  beside the archive, out of the same staged files: the binary in `/usr/bin`, the
+  menu entry, the icon in its two themes, and the documentation under
+  `/usr/share/doc/fingerprint-browser` - the licence under policy's name for it,
+  and the changelog compressed and named `changelog.gz`. Its dependencies are
+  asked of `dpkg` rather than written down - they are the packages that carry the
+  libraries the binary asks the loader for - so the list cannot go stale the next
+  time a library moves between packages, and a machine without `dpkg-deb` says so
+  before the build rather than after it. The release workflow installs the
+  package with `dpkg --install`, runs the binary from `/usr/bin`, and removes it
+  again.
 
 ### Fixed
 

@@ -240,10 +240,10 @@ value won.
 
 For a build to give to someone else, [releases](docs/release.md) has the version
 policy, what `[profile.release]` does and why, how the icon is generated, and the
-two packaging scripts - a Windows installer and a Linux archive with an installer
-of its own - with the workflow that drives them. Nothing has been released yet:
-there is no published artifact, and the Windows half of that path has not been
-run anywhere.
+packaging scripts - a Windows installer, and for Linux an archive with an
+installer of its own beside a Debian package - with the workflow that drives
+them. Nothing has been released yet: there is no published artifact, and the
+Windows half of that path has not run anywhere.
 
 ## Validation
 
@@ -305,10 +305,10 @@ CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
   a refused copy cannot raise the window that already exists - it says which
   process holds the directory and stops.
 
-Next: the first release. The installer, the Linux archive and the workflow that
-builds them are written and the Linux side has been run; nothing has been
-published, so cutting `v0.1.0` is what turns the Windows installer and the
-workflow from read into run. Windows fingerprint acceptance - measuring the
+Next: the first release. The installer, the Linux archive, the Debian package
+and the workflow that builds them are written and the Linux side has been run;
+nothing has been published, so cutting `v0.1.0` is what turns the Windows
+installer and the workflow from read into run. Windows fingerprint acceptance - measuring the
 surfaces on Windows rather than inferring them from Linux evidence, and
 reproducing remote upstream forwarding there - is the remaining acceptance work
 and needs a Windows machine. See the

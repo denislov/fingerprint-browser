@@ -52,7 +52,7 @@ jobs:
           fi
 
   linux:
-    name: the Linux archive
+    name: the Linux artifacts
     needs: manifest
     runs-on: ubuntu-latest
     steps:
@@ -92,10 +92,39 @@ jobs:
           test -f "$scratch/home/.local/share/applications/fingerprint-browser.desktop"
           ( cd dist && sha256sum -c ./*.sha256 )
 
+      # The package, installed the way a user installs it. `dpkg --install` does
+      # not fetch anything and checks the dependencies against what is already
+      # here, so the two checks that matter are separate: every package the
+      # control file names exists in the distribution, and dpkg accepts the
+      # package itself - its control file, its maintainer scripts and the places
+      # it puts its files. The release of it afterwards is the last check: a
+      # package that cannot be removed is a package that should not be published.
+      - name: Install the package and run what it installed
+        run: |
+          set -eu
+          deb="$(ls dist/*.deb)"
+          dpkg-deb --info "$deb"
+          # One dependency per word, with any version constraint dropped: the
+          # question here is whether the distribution carries the package, not
+          # which versions of it would do.
+          for dependency in $(dpkg-deb -f "$deb" Depends | tr ',' '\n' | sed 's/(.*//'); do
+            dpkg -s "$dependency" > /dev/null
+            echo "in this distribution: $dependency"
+          done
+          sudo dpkg --install "$deb"
+          /usr/bin/fingerprint-browser --version
+          test -f /usr/share/applications/fingerprint-browser.desktop
+          test -f /usr/share/icons/hicolor/512x512/apps/fingerprint-browser.png
+          test -f /usr/share/doc/fingerprint-browser/copyright
+          sudo dpkg --remove fingerprint-browser
+          test ! -e /usr/bin/fingerprint-browser
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: dist/*.tar.gz*
+          path: |
+            dist/*.tar.gz*
+            dist/*.deb*
           if-no-files-found: error
 
   windows:

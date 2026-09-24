@@ -6,12 +6,13 @@ to identify a commit, the binary a user runs has to be built the same way twice,
 and nothing may be downloaded on the user's behalf.
 
 **Status: `0.1.0` is the first release.** The version policy, the release
-profile, the identity surfaces, the icons, the Linux archive and the Windows
-installer script all exist, and the release workflow that drives them is written.
-The changelog's `## [0.1.0]` section is what the tag publishes, and is the one
-thing the workflow checks before it will take a tag. What has been *run* is the
-Linux side, on Linux; the Windows installer and the workflow file have not run
-anywhere, and the last section says what that means.
+profile, the identity surfaces, the icons, the Linux archive, the Debian package
+and the Windows installer script all exist, and the release workflow that drives
+them is written. The changelog's `## [0.1.0]` section is what the tag publishes,
+and is the one thing the workflow checks before it will take a tag. What has been
+*run* is the Linux side, on Linux, the package included; the Windows installer
+and the workflow file have not run anywhere, and the last section says what that
+means.
 
 ## Versioning
 
@@ -52,7 +53,8 @@ anywhere, and the last section says what that means.
 | --- | --- | --- |
 | `fingerprint-browser` (release binary) | `cargo build --release -p app` | Running from a checkout or an unpacked archive |
 | Windows installer (`...-setup.exe`) | `packaging/windows/package.ps1` | The first install on Windows |
-| Linux archive (`.tar.gz`) | `packaging/linux/package.sh` | The first install on Linux |
+| Linux archive (`.tar.gz`) | `packaging/linux/package.sh` | The first install on Linux, wherever it is unpacked by hand |
+| Debian package (`..._amd64.deb`) | `packaging/linux/package.sh` | Installing on Debian, Ubuntu, and everything else `apt` serves |
 | `<artifact>.sha256` | both packaging scripts | Checking that the download arrived intact |
 | `CHANGELOG.md` section for the version | this repository | Finding out what changed, and the release notes |
 
@@ -95,27 +97,53 @@ It is deterministic: the same numbers produce the same bytes.
 ## Packaging
 
 Two scripts, one per platform, and both write into `dist/` - which is ignored by
-git, because an artifact is built rather than committed. Each produces one file
-plus a `<file>.sha256` beside it.
+git, because an artifact is built rather than committed. Every artifact has a
+`<file>.sha256` beside it.
 
 **Linux** - `packaging/linux/package.sh`:
 
 ```sh
 packaging/linux/package.sh
 # dist/fingerprint-browser-0.1.0-linux-x86_64.tar.gz
+# dist/fingerprint-browser_0.1.0_amd64.deb
 ```
 
-One directory inside the archive: the binary, `install.sh`, the `.desktop` entry
-and the icon, the README, the changelog, the licence and `docs/`. `install.sh`
-puts the binary under `~/.local/bin` (or `$PREFIX`), the icon where the icon theme
-looks, and the entry where the application menu looks, with the absolute path
-written into `Exec=` so the menu does not depend on the user's `PATH`. It needs
-no root, and it says so when `~/.local/bin` is not on `PATH` - which is a fact
-about the user's shell, not a reason to refuse.
+Two artifacts out of one staged set of files, because which files ship is not a
+question the two answer differently - only where they go is, and that is what a
+package manager is for. Neither carries a browser or an Xray, for the reason
+above.
+
+The **archive** holds one directory: the binary, `install.sh`, the `.desktop`
+entry and the icon, the README, the changelog, the licence and `docs/`.
+`install.sh` puts the binary under `~/.local/bin` (or `$PREFIX`), the icon where
+the icon theme looks, and the entry where the application menu looks, with the
+absolute path written into `Exec=` so the menu does not depend on the user's
+`PATH`. It needs no root, and it says so when `~/.local/bin` is not on `PATH` -
+which is a fact about the user's shell, not a reason to refuse.
+
+The **package** is a `.deb` built with `dpkg-deb`, which is Debian's own tool and
+the reason its dependency list can be asked rather than written down: the
+`Depends` line names the packages that carry the libraries the binary asks the
+loader for, taken from `objdump` and `dpkg -S` at package time. A list in the
+script would be a second copy of what the linker knows, and it would be wrong the
+first time a library moved between packages - which Debian does between releases.
+A machine without `dpkg-deb` is told to install `dpkg` (or to set
+`FP_SKIP_DEB=1` and build the archive alone) before the build starts, not after
+it.
+
+It installs what the archive holds into the places a Debian system looks: the
+binary in `/usr/bin`, the menu entry in `/usr/share/applications`, the icon in
+the icon theme at 512x512 and as a scalable one, and the documentation in
+`/usr/share/doc/fingerprint-browser` - with the licence under policy's name for
+it (`copyright`) and the changelog compressed and named as policy wants it
+(`changelog.gz`). Its maintainer scripts refresh the desktop and icon caches, and
+nothing in them is allowed to fail an install. The architecture is Debian's name
+for the machine (`amd64`, not `x86_64`), and a machine whose name it does not
+know is refused rather than packaged under a name `dpkg` will not install.
 
 The script reads the version with `scripts/version.sh` and compares it against
-what the binary itself reports, so an artifact cannot be named for a version the
-binary does not claim.
+what the binary itself reports, so neither artifact can be named for a version
+the binary does not claim.
 
 **Windows** - `packaging/windows/package.ps1`, over
 `packaging/windows/fingerprint-browser.iss`:
@@ -147,7 +175,7 @@ building the installer.
 | Job | What it does |
 | --- | --- |
 | `manifest` | Reads the version once (`scripts/version.sh`), refuses a tag that disagrees with it, and refuses a release the changelog says nothing about |
-| `linux` | Builds the archive, then unpacks it, installs it into a scratch home, runs `--version` from the installed path and verifies the checksum |
+| `linux` | Builds both artifacts, then unpacks the archive, installs it into a scratch home and runs `--version` from the installed path; reads the package's metadata, checks that every package it depends on exists in the distribution, installs it with `dpkg --install`, runs the binary from `/usr/bin`, and removes it again. Verifies every checksum |
 | `windows` | Installs Inno Setup (the runner image comes and goes on this), builds the installer, and has the packaging script check the resource section first |
 | `publish` | Only for a tag: downloads both artifacts and attaches them, with their checksums, to a release whose notes are the changelog's section for that version |
 
@@ -157,7 +185,11 @@ section for the version is refused rather than published with empty notes.
 
 **What has been verified where.** The Linux job's commands have been run on
 Linux, including the archive, the install into a scratch home, running the
-installed binary and the checksum check. The Windows side has been run too - by
+installed binary and the checksum check. The package has been built and checked
+there too - `dpkg-deb --info` and `--contents`, every dependency resolved against
+the distribution's own database, the tree extracted, the extracted binary run and
+the checksum verified - and installing it with `dpkg --install` is the runner's
+step, which has not run anywhere yet. The Windows side has been run too - by
 hand first, then by the `v0.1.0` tag - which makes the runner the first Windows
 machine this project has had: the gate (`scripts/check.ps1`, so the Windows-only
 halves compile and their tests pass) and the packaging script (the
