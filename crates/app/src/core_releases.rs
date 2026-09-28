@@ -51,13 +51,17 @@ const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a download may wait for the response headers before giving up.
 const DOWNLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long a download may go without reading a byte before giving up.
+/// How long the whole body of a download may take.
 ///
-/// Deliberately generous and deliberately not a whole-transfer deadline: a core
-/// is a hundred megabytes and a slow line is not a failure. What this catches is
-/// a connection that has stopped moving, which is the failure that would
-/// otherwise sit on the row forever.
-const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Deliberately generous: a core is a hundred megabytes and a slow line is not a
+/// failure. It is a whole-body budget and not the bound on a stalled connection
+/// this was written as - `timeout_recv_body` is the total time for the body, and
+/// its budget is not restarted by a read that arrives - so at two minutes a
+/// hundred megabytes needed a line better than a megabyte a second, and a reader
+/// below that was told a download had failed while it was still arriving. What
+/// this still catches is a transfer that has effectively stopped, which is the
+/// failure that would otherwise sit on the row forever.
+const DOWNLOAD_BODY_BUDGET: Duration = Duration::from_secs(30 * 60);
 
 /// The buffer one download is copied through.
 const COPY_BUFFER: usize = 64 * 1024;
@@ -84,7 +88,7 @@ pub const UNPACK_DIR: &str = "unpacked";
 /// The API refuses a request that carries no `User-Agent`, and one that says
 /// what it is makes this program's requests legible in whatever the reader has
 /// to look at if the repository ever wonders who is calling it.
-fn user_agent() -> String {
+pub(crate) fn user_agent() -> String {
     format!("{}/{}", crate::version::BRAND, crate::version::VERSION)
 }
 
@@ -343,7 +347,7 @@ impl HttpCoreDownloader {
             // never come.
             .timeout_connect(Some(DOWNLOAD_CONNECT_TIMEOUT))
             .timeout_recv_response(Some(DOWNLOAD_RESPONSE_TIMEOUT))
-            .timeout_recv_body(Some(DOWNLOAD_STALL_TIMEOUT))
+            .timeout_recv_body(Some(DOWNLOAD_BODY_BUDGET))
             .build()
             .into();
         Self { agent }
@@ -635,7 +639,7 @@ pub(crate) fn safe_file_name(name: &str) -> String {
 }
 
 /// The `.part` name a download is written under until it is complete.
-fn partial_path(file: &Path) -> PathBuf {
+pub(crate) fn partial_path(file: &Path) -> PathBuf {
     let mut name = file
         .file_name()
         .map(|name| name.to_os_string())
@@ -729,7 +733,7 @@ fn is_browser(path: &Path, platform: Platform) -> bool {
 /// Best effort: an archive that carried the bit keeps it, and one that did not
 /// is reported by the version probe that follows rather than here - which is
 /// where the reader can still be told which file to run by hand.
-fn make_runnable(path: &Path) {
+pub(crate) fn make_runnable(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
