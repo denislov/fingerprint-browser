@@ -509,8 +509,10 @@ Unusable(reason)               端点本身不可问（不是明文 HTTP）
 
 传表的方式沿用配色那条规则：**有上下文**的函数 `let t = text(cx)` 或 `self.state.text()`；
 **没有上下文**的按参数接收 `t: &Text`。对话框（`editor` / `proxy_editor` / `core_editor` /
-`proxy_import`）是独立实体，够不到 `AppState`，所以它们在打开时把表**带在身上**
+`proxy_import` / `core_downloads`）是独立实体，够不到 `AppState`，所以它们在打开时把表**带在身上**
 （`text: &'static Text`）——代价是一次切换不会重画已经打开的对话框，收益是不引入全局。
+`core_downloads` 另有一个理由：下载对话框的构建闭包在 `AppView` **正在被渲染时**被调用，
+从那里读 `AppView` 会被实体表拒绝，所以窗口把版本列表和下载进度推进这个实体，对话框只读它。
 
 **元素 id 不随语言变**。`Page::id()` 返回冻结的英文 slug（`Profiles` / `Proxies` /
 `Cores` / `Log` / `Settings`），`nav-{id}` 由此拼出；侧栏显示的名字仍来自表。用显示文本

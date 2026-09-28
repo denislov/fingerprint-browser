@@ -26,7 +26,15 @@ impl AppView {
                     let opened = view.drain_open_results();
                     let copied = view.drain_browser_data();
                     let maintained = view.drain_maintenance();
-                    if notified || reconcile || verified || tested || opened || copied || maintained
+                    let released = view.drain_releases(cx);
+                    if notified
+                        || reconcile
+                        || verified
+                        || tested
+                        || opened
+                        || copied
+                        || maintained
+                        || released
                     {
                         view.state.refresh_runtime();
                         cx.notify();
@@ -147,6 +155,36 @@ impl AppView {
         while let Ok((direction, outcome)) = self.browser_data.try_recv() {
             self.state.finish_browser_data(direction, outcome);
             received = true;
+        }
+        received
+    }
+
+    /// Collect what the release workers reported.
+    ///
+    /// A finished download is applied here rather than on the worker because
+    /// registering a core means the storage this window holds: the worker found
+    /// the binary, and this is where it becomes a row. The same reason
+    /// [`AppView::drain_maintenance`] applies a redetected core.
+    pub(super) fn drain_releases(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut received = false;
+        while let Ok(event) = self.releases.try_recv() {
+            match event {
+                ReleaseEvent::Listed(result) => self.state.finish_release_fetch(result),
+                ReleaseEvent::Progress {
+                    key,
+                    received: bytes,
+                    total,
+                } => self.state.update_download(&key, bytes, total),
+                ReleaseEvent::Downloaded { release, result } => {
+                    self.state.finish_core_download(&release, result);
+                }
+            }
+            received = true;
+        }
+        if received {
+            // The dialog draws its own copy of this, so the copy is brought up
+            // to date before anything is redrawn - see `AppView::sync_downloads`.
+            self.sync_downloads(cx);
         }
         received
     }

@@ -12,6 +12,44 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
 
+### Added
+
+- The Browser Cores page can fetch a core instead of only being told where one
+  is. **Download Core** opens a dialog listing what
+  `adryfish/fingerprint-chromium` has published, newest first: one row per
+  version, with the publication date and one button for each system that version
+  was built for - the one this window runs on filled in and named as such, the
+  other two beside it for a machine that is not this one. The asset offered is
+  chosen by what the release actually carries rather than by what the tag says:
+  the Linux `tar.xz` and the Windows portable `.zip` are preferred over the
+  AppImage and the installer, because those are the two this program can unpack
+  by itself.
+- Downloading is one click and runs on a worker: the file is streamed to a
+  `.part` name under `<data directory>/cores/<tag>`, renamed once it is complete,
+  unpacked beside it, and searched for the browser binary - by exact name, so
+  `chrome_sandbox`, `chrome-wrapper` and `chromedriver` are not mistaken for it,
+  and by the one directory a macOS bundle keeps its executable in. The binary is
+  then registered through the same probe the Add Core form uses, so a core's
+  major always comes from the version the binary reports and never from the
+  release tag. Progress is reported on the row it belongs to, one download runs
+  at a time, and a second click is refused with the name of the one already
+  running rather than queued behind it.
+- A download that did not produce a core is not reported as one. An installer or
+  a disk image is saved and the reader is told where it is and what to do with
+  it; an archive with no browser this program recognises is named by the
+  directory it was unpacked into; a binary that cannot be probed is named by its
+  path as well as by the probe's own reason. The cores folder is reachable from
+  the dialog, and is created when it does not exist yet.
+- The HTTP client is `ureq` - the one the runtime already uses - with `tar` and
+  `xz2` for the Linux archive and `zip` for the Windows one. Both unpackers
+  refuse to write outside the directory they were given, which is why a release
+  archive is unpacked with a library rather than by running the platform's `tar`.
+- Two opt-in acceptance tests cover what the fakes cannot:
+  `core_releases::tests::the_real_repository_answers_with_releases_this_can_read`
+  and `core_releases::tests::a_real_release_downloads_and_unpacks_into_a_browser`
+  dial GitHub and move a real core. Both are ignored by default; run them with
+  `--ignored` when the request shape, the parsing or the unpacking changes.
+
 ## [0.2.0] - 2026-09-24
 
 ### Added

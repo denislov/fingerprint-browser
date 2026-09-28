@@ -2,6 +2,7 @@ use crate::text::en;
 
 use super::AppView;
 use crate::browser_data::testing::FakeBrowserDataCopier;
+use crate::core_releases::testing::{FakeCatalog, FakeDownloader};
 use crate::exit::ExitMode;
 use crate::open_dir::testing::FakeOpener;
 use crate::proxy_tester::testing::FakeProxyTester;
@@ -107,6 +108,62 @@ fn view_with_tester(
     opener: Arc<FakeOpener>,
     log_file: Option<crate::log_file::LogFile>,
 ) -> Harness {
+    // A catalog that published nothing and a downloader that is never asked: a
+    // test about something else should not have to think about the download
+    // dialog, and a test that is about it says so through `view_with_downloads`.
+    view_with_releases(
+        cx,
+        verifier,
+        tester,
+        copier,
+        config,
+        opener,
+        log_file,
+        Arc::new(FakeCatalog::listing(Vec::new())),
+        Arc::new(FakeDownloader::unpacking("")),
+    )
+}
+
+/// The same view, with the published-core catalog and downloader a test drives.
+///
+/// The fakes are handed back to the test that built them rather than returned
+/// here: a test that wants to assert on what was asked for already holds the
+/// `Arc` it passed in.
+fn view_with_downloads(
+    cx: &mut TestAppContext,
+    catalog: Arc<FakeCatalog>,
+    downloader: Arc<FakeDownloader>,
+) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>) {
+    let (view, runtime, _, _, _) = view_with_releases(
+        cx,
+        Arc::new(FakeVerifier::passing()),
+        Arc::new(FakeProxyTester::passing()),
+        Arc::new(FakeBrowserDataCopier::passing()),
+        None,
+        Arc::new(FakeOpener::working()),
+        None,
+        catalog,
+        downloader,
+    );
+    (view, runtime)
+}
+
+/// Everything the harness builds, over the fakes the caller chose.
+///
+/// Nine arguments for the same reason [`AppView::new`] has nine: this is the
+/// window's own wiring, and a test that replaces one seam names that seam.
+#[allow(clippy::too_many_arguments)]
+fn view_with_releases(
+    cx: &mut TestAppContext,
+    verifier: Arc<FakeVerifier>,
+    tester: Arc<FakeProxyTester>,
+    copier: Arc<FakeBrowserDataCopier>,
+    config: Option<&std::path::Path>,
+    opener: Arc<FakeOpener>,
+    log_file: Option<crate::log_file::LogFile>,
+    catalog: Arc<FakeCatalog>,
+    downloader: Arc<FakeDownloader>,
+) -> Harness {
     let profile_repo: Arc<MemProfileRepository> = Arc::new(MemProfileRepository::new());
     let core_repo: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
     let proxy_repo: Arc<MemProxyRepository> = Arc::new(MemProxyRepository::new());
@@ -162,6 +219,8 @@ fn view_with_tester(
             tester.clone(),
             opener.clone(),
             copier.clone(),
+            catalog,
+            downloader,
             crate::tray::testing::fake_starter,
         );
         view.boot(cx);
@@ -304,10 +363,34 @@ fn wait_for_state<C: gpui_kit::AppContext>(
             view.drain_open_results();
             view.drain_browser_data();
             view.drain_maintenance();
+            view.drain_releases(cx);
             cx.notify();
         });
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Drives every background queue until the release list has arrived.
+///
+/// The list is fetched on a worker when the dialog is opened, so a test that
+/// wants to click a download button has to wait for the answer the same way a
+/// reader waits for the spinner to go.
+fn wait_for_releases<C: gpui_kit::AppContext>(cx: &mut C, view: &gpui_kit::Entity<AppView>) {
+    wait_for_state(cx, view, |state| {
+        !matches!(
+            state.releases(),
+            crate::state::ReleaseStatus::Unasked | crate::state::ReleaseStatus::Loading
+        )
+    });
+}
+
+/// Drives every background queue until the download has been applied.
+///
+/// The row being free again is the whole signal: a download that produced a core
+/// says so with a toast and no banner, so waiting on the banner would wait
+/// forever on the case that worked.
+fn wait_for_download<C: gpui_kit::AppContext>(cx: &mut C, view: &gpui_kit::Entity<AppView>) {
+    wait_for_state(cx, view, |state| state.download().is_none());
 }
 
 /// A running profile leaving by a proxy that has been tested.

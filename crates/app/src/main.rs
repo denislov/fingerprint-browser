@@ -10,6 +10,7 @@ mod browser_data;
 mod cli;
 mod core_detect;
 mod core_editor;
+mod core_releases;
 mod diagnostics;
 mod editor;
 mod exit;
@@ -41,6 +42,7 @@ use application::{
     CoreService, DefaultCoreService, DefaultProfileService, DefaultProxyService, ProfileService,
     ProxyService, RuntimeService,
 };
+use core_releases::{CoreDownloader, GithubReleaseCatalog, HttpCoreDownloader, ReleaseCatalog};
 use gpui_kit::component::Root;
 use gpui_kit::*;
 use proxy_tester::{ProxyTester, XrayProxyTester};
@@ -250,6 +252,13 @@ fn main() {
         settings.runtime_dir(),
     ));
 
+    // The two halves of downloading a core: what the repository has published,
+    // and turning one of its files into a directory with a browser in it. Both
+    // are injected into the window so a test can drive the whole flow - and so a
+    // machine with no network still opens the dialog and says what happened.
+    let release_catalog: Arc<dyn ReleaseCatalog> = Arc::new(GithubReleaseCatalog::new());
+    let core_downloader: Arc<dyn CoreDownloader> = Arc::new(HttpCoreDownloader::new());
+
     let mut app_state = AppState::new(
         Services {
             profiles: profile_service,
@@ -385,6 +394,8 @@ fn main() {
                                 proxy_tester,
                                 Arc::new(open_dir::SystemDirectoryOpener),
                                 Arc::new(browser_data::DiskBrowserDataCopier),
+                                release_catalog,
+                                core_downloader,
                                 // The desktop's own tray, started the first time
                                 // "keep running" puts the window away.
                                 tray::Tray::start,

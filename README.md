@@ -16,6 +16,14 @@ this repository does not bundle or fork them.
   and persistent state to be flushed.
 - Manage cores and re-detect versions. Unknown majors are refused; unsupported
   fingerprint claims produce warnings. Windows probes manifests and PE metadata.
+- Download a core from the **Download Core** dialog on the Browser Cores page. It
+  lists what `adryfish/fingerprint-chromium` has published, newest first - one row
+  per version, one button per system that version was built for, with this
+  system's marked and the others still reachable for another machine. A portable
+  build is fetched, unpacked under the data directory and registered through the
+  same version probe the Add Core form uses, so its major is read from the binary
+  rather than taken from the release tag; an installer or a disk image is saved
+  where it can be run. One download at a time, with progress on its own row.
 - Configure SOCKS5/HTTP in a form; import Shadowsocks, VMess, VLESS and Trojan
   links with supported transport/TLS settings. Unsupported link fields are refused.
   Referenced proxies/cores cannot be deleted.
@@ -84,12 +92,14 @@ this repository does not bundle or fork them.
 
 ## Getting started
 
-This program does not download a browser or a proxy engine; you supply both. A
-first run therefore has one step before anything can be launched: add a
-fingerprint-chromium binary on the **Browser Cores** page, or start the program
-with `FP_BROWSER_CHROMIUM_BIN` pointing at one. The empty profile list says so
-and carries the button that leads there. Xray is only needed for a profile that
-uses a proxy.
+This program does not ship a browser or a proxy engine; a fingerprint-chromium
+build and Xray are supplied separately. A first run therefore has one step before
+anything can be launched: add a fingerprint-chromium binary on the **Browser
+Cores** page - the **Download Core** button there fetches a published build for
+this system and registers it - or start the program with
+`FP_BROWSER_CHROMIUM_BIN` pointing at one. The empty profile list says so and
+carries the button that leads there. Xray is only needed for a profile that uses
+a proxy.
 
 The whole walk - what the window says at each step, where the files go, and what
 to look at when something is wrong - is in [first run](docs/first-run.md).

@@ -151,6 +151,11 @@ pub mod glyph {
     pub const IMPORT_LINK: IconName = IconName::Download;
     pub const EXPORT: IconName = IconName::Upload;
     pub const IMPORT_FILE: IconName = IconName::Download;
+    /// Fetching a published core. The same drawing as importing a file, and
+    /// named separately because the two are different acts on different things;
+    /// whoever redraws one should get to decide about the other.
+    pub const DOWNLOAD_CORE: IconName = IconName::Download;
+    pub const REFRESH: IconName = IconName::RefreshCw;
     pub const RESTORE: IconName = IconName::Archive;
     pub const COPY: IconName = IconName::Copy;
     pub const CLEAR: IconName = IconName::Trash;

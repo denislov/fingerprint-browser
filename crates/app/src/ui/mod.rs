@@ -6,6 +6,7 @@
 
 use crate::browser_data::BrowserDataCopier;
 use crate::core_editor::CoreEditor;
+use crate::core_releases::{CoreDownloader, ReleaseCatalog, ReleaseEvent};
 use crate::editor::{ProfileEdit, ProfileEditor};
 use crate::exit::{Exit, ExitMode};
 use crate::maintenance;
@@ -16,7 +17,7 @@ use crate::proxy_tester::ProxyTester;
 use crate::settings::{SettingGroup, SettingKey};
 use crate::state::{
     AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Opening, Page, ProfileRow,
-    ProxyRow, ProxyTest, StartGate, Toast, ToastKind, Verification,
+    ProxyRow, ProxyTest, ReleaseDownload, ReleaseStatus, StartGate, Toast, ToastKind, Verification,
 };
 use crate::text::{Lang, Text};
 use crate::theme::{Palette, ThemeChoice, palette};
@@ -69,6 +70,12 @@ pub struct AppView {
     proxy_import: Option<Entity<ProxyImport>>,
     /// The browser-core editor behind the open dialog, if any.
     core_editor: Option<Entity<CoreEditor>>,
+    /// The Download Core dialog's body, while one is open.
+    ///
+    /// A second entity rather than reads of this view from the dialog's own
+    /// closure, which would be reading this view while it is being drawn; see
+    /// [`CoreDownloads`].
+    downloads: Option<Entity<CoreDownloads>>,
     /// The settings value field behind the open dialog, if any.
     setting_editor: Option<Entity<InputState>>,
     /// Which setting that field belongs to.
@@ -100,6 +107,16 @@ pub struct AppView {
     /// Copies browser data. Injected so a test never writes hundreds of
     /// megabytes, and never touches a disk.
     copier: Arc<dyn BrowserDataCopier>,
+    /// The browser cores published on GitHub. Injected for the same reason the
+    /// four above are: a test of the download dialog must not dial GitHub, and a
+    /// window that has no network has to be able to open the dialog and say so.
+    catalog: Arc<dyn ReleaseCatalog>,
+    /// Fetches and unpacks a published core. Injected for the same reason.
+    downloader: Arc<dyn CoreDownloader>,
+    /// What the release workers reported: a list, a progress report, or a
+    /// finished download.
+    releases: Receiver<ReleaseEvent>,
+    releases_tx: Sender<ReleaseEvent>,
     verifications: Receiver<(
         crate::verifier::VerificationJob,
         Result<VerificationReport, String>,
@@ -188,6 +205,14 @@ pub struct AppView {
 }
 
 impl AppView {
+    /// Every dependency the window has, in the order the program passes them.
+    ///
+    /// Nine arguments because the window is where the program's wiring meets the
+    /// object that draws it: each one is a seam a test replaces - a verifier, a
+    /// proxy tester, an opener, a copier, a release catalog and a downloader -
+    /// and bundling them into a struct would move the same nine names one call
+    /// deeper without making any of them clearer.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: AppState,
         events: Receiver<RuntimeEvent>,
@@ -195,6 +220,8 @@ impl AppView {
         tester: Arc<dyn ProxyTester>,
         opener: Arc<dyn DirectoryOpener>,
         copier: Arc<dyn BrowserDataCopier>,
+        catalog: Arc<dyn ReleaseCatalog>,
+        downloader: Arc<dyn CoreDownloader>,
         tray_starter: TrayStarter,
     ) -> Self {
         // A reading takes seconds and blocks on the browser, so it runs on a
@@ -208,11 +235,16 @@ impl AppView {
         let (open_tx, open_results) = crossbeam_channel::unbounded();
         let (browser_data_tx, browser_data) = crossbeam_channel::unbounded();
         let (maintenance_tx, maintenance) = crossbeam_channel::unbounded();
+        // The release list is one request and a download is a hundred megabytes,
+        // neither of which the thread that draws the window may wait for, so
+        // both report here the same way.
+        let (releases_tx, releases) = crossbeam_channel::unbounded();
         Self {
             editor: None,
             proxy_editor: None,
             proxy_import: None,
             core_editor: None,
+            downloads: None,
             setting_editor: None,
             setting_key: None,
             filter_input: None,
@@ -224,6 +256,10 @@ impl AppView {
             tester,
             opener,
             copier,
+            catalog,
+            downloader,
+            releases,
+            releases_tx,
             verifications,
             verification_tx,
             proxy_tests,
@@ -498,7 +534,7 @@ mod proxies;
 mod settings;
 mod workers;
 
-use self::cores::{cores_body, cores_header};
+use self::cores::{CoreDownloads, cores_body, cores_header};
 use self::details::details_panel;
 use self::logs::{format_age, logs_body, logs_header};
 use self::profiles::{ProfileRows, empty_hint, list_header, profile_list, profiles_header};

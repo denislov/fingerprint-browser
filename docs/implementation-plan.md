@@ -566,11 +566,20 @@ deliberately not "add an installer": each piece has a rule behind it.
   anything when the window will not open - which is exactly when someone needs to
   ask. Hence `--version`, `--help` and `--diagnostics`, and hence the rule that
   `--version` reads nothing and `--help` writes nothing.
-- **Nothing is downloaded for the user.** Chromium and Xray are the user's, and
-  the program never fetches them. That decision is what makes the first run
-  something to explain rather than something to automate; the empty state points
-  at the core page and names `FP_BROWSER_CHROMIUM_BIN` instead of offering to
-  install a browser.
+- **Nothing is installed for the user.** Chromium and Xray are the user's, and
+  the program does not decide which of them runs. That decision is what makes the
+  first run something to explain rather than something to automate; the empty
+  state points at the core page and names `FP_BROWSER_CHROMIUM_BIN` instead of
+  offering to install a browser.
+
+  *Amended.* A core can now be fetched, because the choice stayed the user's. The
+  Download Core dialog lists what `adryfish/fingerprint-chromium` published and
+  the reader picks the version and the system, so what arrives is a binary that
+  was named rather than one the program decided on; it is registered through the
+  same version probe as any binary the user points at, so its major is read from
+  the file and not from the release tag. What the rule above forbids is a program
+  that picks a browser for you and installs it. Xray is still never fetched:
+  there is no published build to offer a choice between.
 - **A report must be safe to send.** The proxy credentials are in the database,
   so the report measures it and does not read it, and the summary says what is in
   the file before anyone shares it.
@@ -578,7 +587,7 @@ deliberately not "add an installer": each piece has a rule behind it.
 **Done means:** on a clean Windows machine, from an artifact this repository
 produced, a user can install it, see which build they have, be told what to
 supply when there is no browser core, and produce one file to attach to a report
-- and none of it required a download the program made by itself.
+- and none of it required the program to decide anything on their behalf.
 
 
 ### Why profile search stays a single-profile feature

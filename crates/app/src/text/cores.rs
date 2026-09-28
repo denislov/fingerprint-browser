@@ -222,4 +222,116 @@ impl Text {
             ),
         }
     }
+
+    /// Where the offered cores come from, naming the repository rather than
+    /// spelling it out at the call site.
+    pub fn core_download_source(&self, repository: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Builds published on github.com/{repository}."),
+            Lang::Zh => format!("构建发布于 github.com/{repository}。"),
+        }
+    }
+
+    /// Why the list of published cores could not be read.
+    ///
+    /// The framework is this window's and is translated; the account inside it
+    /// is the network's or GitHub's own, and is not rewritten.
+    pub fn core_download_failed(&self, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not read the published browser cores: {error}"),
+            Lang::Zh => format!("无法读取已发布的浏览器内核：{error}"),
+        }
+    }
+
+    /// A download starting, named by the version and the system it is for.
+    pub fn core_release_downloading(&self, tag: &str, platform: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Downloading fingerprint-chromium {tag} for {platform}"),
+            Lang::Zh => format!("正在下载 {platform} 版 fingerprint-chromium {tag}"),
+        }
+    }
+
+    /// How far a download has got, as two sizes the caller has already written.
+    pub fn core_release_progress(&self, received: &str, total: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{received} of {total}"),
+            Lang::Zh => format!("已下载 {received}，共 {total}"),
+        }
+    }
+
+    /// The download itself did not finish.
+    pub fn core_release_request_failed(&self, asset: &str, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not download {asset}: {error}"),
+            Lang::Zh => format!("无法下载 {asset}：{error}"),
+        }
+    }
+
+    /// The file could not be written, or moved into place.
+    pub fn core_release_disk_failed(&self, path: &str, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("could not write {path}: {error}"),
+            Lang::Zh => format!("无法写入 {path}：{error}"),
+        }
+    }
+
+    /// The archive did not unpack.
+    pub fn core_release_unpack_failed(&self, asset: &str, error: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{asset} downloaded but did not unpack: {error}"),
+            Lang::Zh => format!("{asset} 已下载，但解压失败：{error}"),
+        }
+    }
+
+    /// The archive unpacked and no browser was found in it.
+    ///
+    /// The directory is named because that is the one thing the reader can still
+    /// do something with: the files are on disk, and the binary may be one this
+    /// program does not know the name of.
+    pub fn core_release_no_binary(&self, tag: &str, directory: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "fingerprint-chromium {tag} was unpacked to {directory}, but no browser binary was found in it; add the core by picking the binary yourself"
+            ),
+            Lang::Zh => format!(
+                "fingerprint-chromium {tag} 已解压到 {directory}，但没有找到浏览器可执行文件；请手动选择该文件添加内核"
+            ),
+        }
+    }
+
+    /// The download is a file to run, not a core: an installer or a disk image.
+    pub fn core_release_saved(&self, path: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "saved to {path}; this build installs rather than being a core - run it, then add the browser it installs"
+            ),
+            Lang::Zh => format!(
+                "已保存到 {path}；这个构建是安装程序而不是内核——请先运行它，再添加它安装出来的浏览器"
+            ),
+        }
+    }
+
+    /// Refusing a second download while one is running.
+    pub fn core_release_busy(&self, asset: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{asset} is already downloading; wait for it to finish"),
+            Lang::Zh => format!("{asset} 正在下载中，请等待它完成"),
+        }
+    }
+
+    /// A downloaded browser that cannot be registered as a core.
+    ///
+    /// The path is named as well as the reason, because the file is on disk and
+    /// the reader's next move - run it, pick another binary, set the version by
+    /// hand - depends on which file it is.
+    pub fn core_release_unusable(&self, tag: &str, path: &str, reason: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "fingerprint-chromium {tag} was downloaded to {path}, but it cannot be registered as a core: {reason}"
+            ),
+            Lang::Zh => {
+                format!("fingerprint-chromium {tag} 已下载到 {path}，但无法注册为内核：{reason}")
+            }
+        }
+    }
 }

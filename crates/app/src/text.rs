@@ -407,6 +407,33 @@ catalog! {
     core_path_copy => "Copy path" => "复制路径";
     core_open_location => "Open location" => "打开所在位置";
 
+    // ---- downloading a core ----
+    //
+    // The dialog behind the button beside "Add Core": one row per published
+    // version, and one button per system that version was built for. The words
+    // for the three kinds of file are here rather than in the crate that reads
+    // the names, because "portable build" is a description a reader chooses
+    // between and not the name of the file.
+    download_core => "Download Core" => "下载内核";
+    core_download_title => "Download a browser core" => "下载浏览器内核";
+    core_download_intro => "Every build published for fingerprint-chromium, newest first. The build for this system is marked, and any version can be downloaded."
+        => "fingerprint-chromium 已发布的全部构建，最新的在最前。本机对应的构建会标记出来，任何版本都可以下载。";
+    core_download_refresh => "Refresh list" => "刷新列表";
+    core_download_loading => "Reading the release list from GitHub…"
+        => "正在从 GitHub 读取版本列表……";
+    core_download_empty => "No releases were listed." => "没有列出任何版本。";
+    core_download_column_version => "Version" => "版本";
+    core_download_column_published => "Published" => "发布日期";
+    core_download_column_builds => "Builds" => "构建";
+    core_download_this_system => "this system" => "本机";
+    core_download_prerelease => "pre-release" => "预发布";
+    core_download_portable => "portable build" => "便携版";
+    core_download_installer => "installer" => "安装程序";
+    core_download_disk_image => "disk image" => "磁盘映像";
+    core_download_close => "Close" => "关闭";
+    core_download_open_folder => "Open cores folder" => "打开内核目录";
+    core_download_working => "Working…" => "处理中……";
+
     // ---- the backup cards on the Settings page ----
     export_title => "Export configuration" => "导出配置";
     export_body => "Writes cores, proxies and profiles to a JSON file, for another machine or for keeping. Browser data is not included: it is far larger, and a copy belongs beside the profile it came from."

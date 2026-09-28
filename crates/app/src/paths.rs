@@ -118,6 +118,14 @@ pub fn data_dir_or_fallback(host: &Host) -> PathBuf {
 /// where.
 pub const EXPORT_DIR: &str = "exports";
 
+/// Where downloaded browser cores are put: `<data dir>/cores/<release>`.
+///
+/// Under the data directory rather than beside the program, because a core is
+/// data the user collected: an upgrade of this program must not take a download
+/// with it, and a portable install must keep its cores where its own directory
+/// is writable.
+pub const CORES_DIR: &str = "cores";
+
 /// Where a configuration export writes with no path typed:
 /// `<data dir>/exports/fp-browser-config-<stamp>.json`.
 ///

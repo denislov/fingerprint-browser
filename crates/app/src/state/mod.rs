@@ -19,6 +19,7 @@ mod configuration;
 mod cores;
 mod profiles;
 mod proxies;
+mod releases;
 use crate::proxy_tester::ProxyTestJob;
 use crate::settings::{SettingGroup, SettingKey, SettingRow, Settings};
 use crate::text::{Lang, Text, text};
@@ -33,6 +34,7 @@ use domain::{
     BrowserCore, BrowserProfile, CoreId, ProfileId, ProxyId, ProxyOutbound, ProxyProfile,
     RuntimeState,
 };
+pub use releases::{ReleaseDownload, ReleaseStatus};
 use runtime::{Diagnosis, Discrepancy, Fault, RuntimeComponent, RuntimeEvent, RuntimeSnapshot};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -316,6 +318,17 @@ pub struct AppState {
     /// synchronous caller reaches in a row, and the one the view reaches through
     /// [`AppState::finish_maintenance`].
     maintenance: Option<maintenance::Kind>,
+    /// What the Download Core dialog is showing.
+    ///
+    /// Here rather than on the view because the dialog is rebuilt from a closure
+    /// on every frame and reads this through the state, exactly as the rows on
+    /// the other pages are read.
+    releases: ReleaseStatus,
+    /// The core download in flight, if any.
+    ///
+    /// One, and only one: see [`AppState::begin_core_download`], which refuses a
+    /// second rather than queueing it.
+    download: Option<ReleaseDownload>,
 }
 
 /// A start that is waiting for its proxy to answer.
@@ -467,6 +480,8 @@ impl AppState {
             pending_starts: BTreeMap::new(),
             queued_starts: HashMap::new(),
             maintenance: None,
+            releases: ReleaseStatus::Unasked,
+            download: None,
         }
     }
 

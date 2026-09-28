@@ -263,6 +263,10 @@ fn starting_without_a_core_says_so_and_offers_the_way_there(cx: &mut TestAppCont
             Arc::new(FakeProxyTester::passing()),
             Arc::new(FakeOpener::working()),
             Arc::new(FakeBrowserDataCopier::passing()),
+            Arc::new(crate::core_releases::testing::FakeCatalog::listing(
+                Vec::new(),
+            )),
+            Arc::new(crate::core_releases::testing::FakeDownloader::unpacking("")),
             crate::tray::testing::fake_starter,
         );
         view.boot(cx);
@@ -529,5 +533,267 @@ fn the_core_rows_line_up_under_the_column_headings(cx: &mut TestAppContext) {
             window.find("more-core-0").bounds().right(),
             "the actions column",
         );
+    });
+}
+
+// ---- the Download Core dialog ----
+//
+// The catalog and the downloader are fakes, so nothing here dials anything. What
+// these tests are about is the part of the feature the reader sees: what the
+// dialog lists, what a click asks for, and what the window says afterwards.
+
+/// A published release, with one asset per system.
+fn published(tag: &str) -> crate::core_releases::CoreRelease {
+    crate::core_releases::testing::release(tag)
+}
+
+/// Opens the Download Core dialog from the Cores page.
+fn open_downloads(cx: &mut gpui_kit::VisualTestContext) {
+    cx.update(|window, cx| window.click("nav-Cores", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("download-core", cx));
+    settle(cx);
+}
+
+/// The dialog lists what the repository published: one row per version, and one
+/// button per system that version was built for.
+#[gpui_kit::test]
+fn the_download_dialog_lists_the_published_versions(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let catalog = Arc::new(FakeCatalog::listing(vec![
+        published("148.0.7778.215"),
+        published("144.0.7559.132"),
+    ]));
+    let downloader = Arc::new(FakeDownloader::unpacking("Chromium 148.0.7778.215"));
+    let (view, _runtime) = view_with_downloads(cx, catalog.clone(), downloader);
+    let cx = window(cx, &view);
+
+    open_downloads(cx);
+    wait_for_releases(cx, &view);
+    settle(cx);
+
+    assert_eq!(
+        catalog.calls(),
+        1,
+        "opening the dialog asks for the list once"
+    );
+    for tag in ["148.0.7778.215", "144.0.7559.132"] {
+        assert!(
+            cx.update(|window, _| window.try_find(format!("release-{tag}")).is_some()),
+            "the row for {tag} is listed"
+        );
+    }
+    // "One click, by operating system": every system the release covers has its
+    // own button, and the one this build runs on is among them.
+    for platform in crate::core_releases::Platform::ALL {
+        assert!(
+            cx.update(|window, _| window
+                .try_find(format!("download-148.0.7778.215-{}", platform.id()))
+                .is_some()),
+            "there is a {} button",
+            platform.id()
+        );
+    }
+}
+
+/// Clicking the button for this system downloads that asset, unpacks it, and
+/// registers the browser it found - with the version the binary reports.
+#[gpui_kit::test]
+fn downloading_the_build_for_this_system_registers_it(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let catalog = Arc::new(FakeCatalog::listing(vec![published("148.0.7778.215")]));
+    let downloader = Arc::new(FakeDownloader::unpacking("Chromium 148.0.7778.215"));
+    let (view, _runtime) = view_with_downloads(cx, catalog, downloader.clone());
+    let cx = window(cx, &view);
+
+    open_downloads(cx);
+    wait_for_releases(cx, &view);
+    settle(cx);
+
+    let platform = crate::core_releases::Platform::host();
+    cx.update(|window, cx| window.click(format!("download-148.0.7778.215-{}", platform.id()), cx));
+    wait_for_download(cx, &view);
+    settle(cx);
+
+    let jobs = downloader.jobs();
+    assert_eq!(jobs.len(), 1, "one click asks for one file");
+    assert_eq!(jobs[0].0, "148.0.7778.215");
+    assert!(
+        jobs[0].1.contains(platform.id()),
+        "the asset asked for is this system's: {}",
+        jobs[0].1
+    );
+    assert_eq!(
+        downloader.progress(),
+        vec![(1024, 1024)],
+        "the download reported how far it had got"
+    );
+
+    let rows = view.read_with(cx, |view, _| view.state().core_rows().expect("rows"));
+    let registered = rows
+        .iter()
+        .find(|row| row.core.major == 148)
+        .expect("the downloaded browser is registered");
+    assert_eq!(
+        registered.core.version, "Chromium 148.0.7778.215",
+        "the version comes from the binary, not from the tag"
+    );
+    assert!(registered.present);
+    assert!(
+        view.read_with(cx, |view, _| view.state().download().is_none()),
+        "the row is no longer busy"
+    );
+}
+
+/// A list that could not be read is said in the dialog and in the banner, and
+/// nothing pretends to be a row.
+#[gpui_kit::test]
+fn a_fetch_that_failed_is_shown_in_the_dialog(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let catalog = Arc::new(FakeCatalog::failing("API rate limit exceeded"));
+    let downloader = Arc::new(FakeDownloader::unpacking("Chromium 148.0.7778.215"));
+    let (view, _runtime) = view_with_downloads(cx, catalog, downloader);
+    let cx = window(cx, &view);
+
+    open_downloads(cx);
+    wait_for_releases(cx, &view);
+    settle(cx);
+
+    assert!(
+        cx.update(|window, _| window.try_find("core-download-failed").is_some()),
+        "the dialog says why"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find("core-download-scroll").is_none()),
+        "a failed fetch is not an empty list of rows"
+    );
+    let notice = view
+        .read_with(cx, |view, _| view.state().notice().cloned())
+        .expect("the banner says so too");
+    assert!(notice.error);
+    assert!(
+        notice.message.contains("API rate limit"),
+        "{}",
+        notice.message
+    );
+}
+
+/// Refresh asks the repository again, and the dialog is rebuilt from the new
+/// answer.
+#[gpui_kit::test]
+fn refreshing_the_list_asks_the_repository_again(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let catalog = Arc::new(FakeCatalog::listing(vec![published("148.0.7778.215")]));
+    let downloader = Arc::new(FakeDownloader::unpacking("Chromium 148.0.7778.215"));
+    let (view, _runtime) = view_with_downloads(cx, catalog.clone(), downloader);
+    let cx = window(cx, &view);
+
+    open_downloads(cx);
+    wait_for_releases(cx, &view);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("core-download-refresh", cx));
+    wait_for_releases(cx, &view);
+    settle(cx);
+
+    assert_eq!(catalog.calls(), 2, "the button is a second request");
+}
+
+/// A download that failed leaves no core behind and says what happened.
+#[gpui_kit::test]
+fn a_failed_download_is_reported_without_registering_anything(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let catalog = Arc::new(FakeCatalog::listing(vec![published("148.0.7778.215")]));
+    let downloader = Arc::new(FakeDownloader::refusing("the connection was reset"));
+    let (view, _runtime) = view_with_downloads(cx, catalog, downloader);
+    let cx = window(cx, &view);
+
+    open_downloads(cx);
+    wait_for_releases(cx, &view);
+    settle(cx);
+    let before = view.read_with(cx, |view, _| view.state().core_rows().expect("rows").len());
+
+    let platform = crate::core_releases::Platform::host();
+    cx.update(|window, cx| window.click(format!("download-148.0.7778.215-{}", platform.id()), cx));
+    wait_for_download(cx, &view);
+    settle(cx);
+
+    let notice = view
+        .read_with(cx, |view, _| view.state().notice().cloned())
+        .expect("the failure is shown");
+    assert!(notice.error);
+    assert!(
+        notice.message.contains("connection was reset"),
+        "{}",
+        notice.message
+    );
+    assert_eq!(
+        view.read_with(cx, |view, _| view.state().core_rows().expect("rows").len()),
+        before,
+        "nothing was registered"
+    );
+}
+
+/// The Download Core dialog's columns line up with their headings, and the three
+/// platform buttons stay inside the dialog without running into each other.
+///
+/// A row is four columns and three buttons wide, in the narrowest window this
+/// program allows: a layout that is only checked by eye is one that breaks the
+/// next time a label is translated into something longer.
+#[gpui_kit::test]
+fn the_download_rows_line_up_under_the_column_headings(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let catalog = Arc::new(FakeCatalog::listing(vec![published("148.0.7778.215")]));
+    let downloader = Arc::new(FakeDownloader::unpacking("Chromium 148.0.7778.215"));
+    let (view, _runtime) = view_with_downloads(cx, catalog, downloader);
+    let cx = window(cx, &view);
+    cx.simulate_resize(size(px(1200.), px(820.)));
+
+    open_downloads(cx);
+    wait_for_releases(cx, &view);
+    settle(cx);
+
+    let tag = "148.0.7778.215";
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_aligned(
+            window.find("column-release").bounds().left(),
+            window
+                .find(format!("release-version-{tag}"))
+                .bounds()
+                .left(),
+            "the version column",
+        );
+        assert_aligned(
+            window.find("column-published").bounds().left(),
+            window
+                .find(format!("release-published-{tag}"))
+                .bounds()
+                .left(),
+            "the published column",
+        );
+
+        // The buttons sit in the row, in the order the systems are listed, and
+        // none of them overlaps the next.
+        let row = window.find(format!("release-{tag}")).bounds();
+        let mut previous: Option<gpui_kit::Pixels> = None;
+        for platform in crate::core_releases::Platform::ALL {
+            let bounds = window
+                .find(format!("download-{tag}-{}", platform.id()))
+                .bounds();
+            assert!(
+                bounds.right() <= row.right(),
+                "the {} button runs past the row",
+                platform.id()
+            );
+            if let Some(previous) = previous {
+                assert!(
+                    bounds.left() >= previous,
+                    "the {} button overlaps the one before it",
+                    platform.id()
+                );
+            }
+            previous = Some(bounds.right());
+        }
     });
 }

@@ -12,19 +12,25 @@ The test that walks it end to end is
 in `crates/app/src/ui.rs`. Each step is also covered on its own; what the walk
 pins is the handover between them.
 
-## What the program needs, and what it never does
+## What the program needs, and where it comes from
 
-Two external executables, and the program supplies neither:
+Two external executables, and the program ships neither:
 
 | Needed for | What it is | Where it comes from |
 | --- | --- | --- |
-| Every profile | A fingerprint-chromium (or Chromium) binary - a *core* | The user, on the Browser Cores page, or discovered at startup |
+| Every profile | A fingerprint-chromium (or Chromium) binary - a *core* | **Download Core** on the Browser Cores page, the user's own binary, or discovery at startup |
 | A profile with a proxy | An Xray binary | The user, on the Settings page, or the default `bin/xray` |
 
-It never downloads either one, at first run or at any other time, and there is no
-"install a browser for me" button. That is a rule rather than an omission: this
-program exists to control exactly which binary runs and with which switches, and
-a binary it fetched itself is one the user did not choose. See
+Xray is never fetched: there is no published build this program could offer a
+choice between, and where it comes from is the user's business. A core can be,
+and the rule that mattered is kept rather than bent: the choice is still the
+user's. The dialog lists what `adryfish/fingerprint-chromium` published, and the
+reader picks the version and the system, so what is fetched is a binary that was
+named rather than one the program decided on. What was ruled out is a program
+that picks a browser for you and installs it - not one that fetches the browser
+you asked for. What arrives is registered through the same version probe as any
+binary the user points at, so the major a profile may rely on is read from the
+file rather than taken from the release tag. See
 [the plan](implementation-plan.md#why-distribution-is-a-task-and-not-a-paragraph).
 
 ## The walk
@@ -39,18 +45,24 @@ Both routes are named because both work, and the sentence carries the button tha
 takes the first one. `New Profile` is disabled: a profile with no core cannot
 launch, and a form that refuses on save is a worse way to learn that.
 
-**2. Add a browser core.** Either:
+**2. Add a browser core.** Any of:
 
-- press **Add a browser core** in the empty state, then **Add Core** on the
-  Browser Cores page, or
+- press **Add a browser core** in the empty state, then **Download Core** on the
+  Browser Cores page, which lists every published release with its date and one
+  button per system. The build for this system is filled in and named as such; a
+  portable one is fetched, unpacked under the data directory and registered, and
+  a download that failed is reported instead of being registered.
+- press **Add Core** on the Browser Cores page and point the form at a binary of
+  your own, or
 - start the program with `FP_BROWSER_CHROMIUM_BIN` pointing at the binary, which
   is registered at startup and appears in the same list.
 
-The form asks for the executable and reads its version out of it. A binary that
-answers nothing to `--version` is refused rather than listed with a guess, and
-the refusal names `FP_BROWSER_CHROMIUM_MAJOR` as the way to record it anyway. The
-page also lists every core's detected major, because a binary's version decides
-which switches a profile may claim.
+The form asks for the executable and reads its version out of it - and so does a
+downloaded core, which is why both kinds end up in the same list with the same
+reading. A binary that answers nothing to `--version` is refused rather than
+listed with a guess, and the refusal names `FP_BROWSER_CHROMIUM_MAJOR` as the way
+to record it anyway. The page also lists every core's detected major, because a
+binary's version decides which switches a profile may claim.
 
 **3. Create a profile.** **New Profile** opens the form: a name, the core it
 launches on, and a fingerprint seed. The seed is generated for a new profile and
