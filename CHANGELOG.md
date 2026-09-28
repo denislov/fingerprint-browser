@@ -12,6 +12,8 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-29
+
 ### Added
 
 - The Browser Cores page can fetch a core instead of only being told where one
@@ -519,6 +521,7 @@ says nothing about, and the notes are that section rather than the whole file.
   outside the data directory - which stopped being true when the config file
   moved in beside the database.
 
-[Unreleased]: https://github.com/denislov/fingerprint-browser/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/denislov/fingerprint-browser/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/denislov/fingerprint-browser/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/denislov/fingerprint-browser/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denislov/fingerprint-browser/releases/tag/v0.1.0
