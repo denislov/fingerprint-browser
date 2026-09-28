@@ -11,6 +11,9 @@ use crate::state::Verification;
 use crate::state::testing::{FakeRuntime, core};
 use crate::theme::{Palette, ThemeChoice, palette};
 use crate::verifier::testing::FakeVerifier;
+use crate::xray_releases::testing::{
+    FakeCatalog as FakeXrayCatalog, FakeDownloader as FakeXrayDownloader,
+};
 use application::Direction;
 use application::{DefaultProfileService, DefaultProxyService, ProxyService, RuntimeService};
 use domain::{CoreId, ProfileId, ProxyId, RuntimeState};
@@ -121,6 +124,8 @@ fn view_with_tester(
         log_file,
         Arc::new(FakeCatalog::listing(Vec::new())),
         Arc::new(FakeDownloader::unpacking("")),
+        Arc::new(FakeXrayCatalog::listing(Vec::new())),
+        Arc::new(FakeXrayDownloader::unpacking("")),
     )
 }
 
@@ -144,13 +149,42 @@ fn view_with_downloads(
         None,
         catalog,
         downloader,
+        Arc::new(FakeXrayCatalog::listing(Vec::new())),
+        Arc::new(FakeXrayDownloader::unpacking("")),
+    );
+    (view, runtime)
+}
+
+/// The same view, with the published-engine catalog and downloader a test drives.
+///
+/// `config` is there because this feature *writes*: a download stores the engine
+/// path in the configuration, and a test that asserted on a fresh installation
+/// would otherwise be reading whatever the last run left in the shared file.
+fn view_with_engines(
+    cx: &mut TestAppContext,
+    config: Option<&std::path::Path>,
+    xray_catalog: Arc<FakeXrayCatalog>,
+    xray_downloader: Arc<FakeXrayDownloader>,
+) -> (gpui_kit::Entity<AppView>, Arc<FakeRuntime>) {
+    let (view, runtime, _, _, _) = view_with_releases(
+        cx,
+        Arc::new(FakeVerifier::passing()),
+        Arc::new(FakeProxyTester::passing()),
+        Arc::new(FakeBrowserDataCopier::passing()),
+        config,
+        Arc::new(FakeOpener::working()),
+        None,
+        Arc::new(FakeCatalog::listing(Vec::new())),
+        Arc::new(FakeDownloader::unpacking("")),
+        xray_catalog,
+        xray_downloader,
     );
     (view, runtime)
 }
 
 /// Everything the harness builds, over the fakes the caller chose.
 ///
-/// Nine arguments for the same reason [`AppView::new`] has nine: this is the
+/// Eleven arguments for the same reason [`AppView::new`] has eleven: this is the
 /// window's own wiring, and a test that replaces one seam names that seam.
 #[allow(clippy::too_many_arguments)]
 fn view_with_releases(
@@ -163,6 +197,8 @@ fn view_with_releases(
     log_file: Option<crate::log_file::LogFile>,
     catalog: Arc<FakeCatalog>,
     downloader: Arc<FakeDownloader>,
+    xray_catalog: Arc<FakeXrayCatalog>,
+    xray_downloader: Arc<FakeXrayDownloader>,
 ) -> Harness {
     let profile_repo: Arc<MemProfileRepository> = Arc::new(MemProfileRepository::new());
     let core_repo: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
@@ -221,6 +257,8 @@ fn view_with_releases(
             copier.clone(),
             catalog,
             downloader,
+            xray_catalog,
+            xray_downloader,
             crate::tray::testing::fake_starter,
         );
         view.boot(cx);
@@ -364,6 +402,7 @@ fn wait_for_state<C: gpui_kit::AppContext>(
             view.drain_browser_data();
             view.drain_maintenance();
             view.drain_releases(cx);
+            view.drain_xray_releases(cx);
             cx.notify();
         });
         std::thread::sleep(Duration::from_millis(10));
@@ -391,6 +430,24 @@ fn wait_for_releases<C: gpui_kit::AppContext>(cx: &mut C, view: &gpui_kit::Entit
 /// forever on the case that worked.
 fn wait_for_download<C: gpui_kit::AppContext>(cx: &mut C, view: &gpui_kit::Entity<AppView>) {
     wait_for_state(cx, view, |state| state.download().is_none());
+}
+
+/// Drives every background queue until the engine list has arrived.
+///
+/// The same wait as [`wait_for_releases`] for the same reason: the list is
+/// fetched on a worker when the dialog is opened.
+fn wait_for_xray_releases<C: gpui_kit::AppContext>(cx: &mut C, view: &gpui_kit::Entity<AppView>) {
+    wait_for_state(cx, view, |state| {
+        !matches!(
+            state.xray_releases(),
+            crate::state::XrayReleaseStatus::Unasked | crate::state::XrayReleaseStatus::Loading
+        )
+    });
+}
+
+/// Drives every background queue until the engine download has been applied.
+fn wait_for_xray_download<C: gpui_kit::AppContext>(cx: &mut C, view: &gpui_kit::Entity<AppView>) {
+    wait_for_state(cx, view, |state| state.xray_download().is_none());
 }
 
 /// A running profile leaving by a proxy that has been tested.
@@ -721,9 +778,10 @@ fn scroll_settings_to(cx: &mut gpui_kit::VisualTestContext, target: &str) {
 /// All four groups at once: the helper asks whether each is on screen, and the
 /// ones in the groups that are not open simply are not there. A card added to a
 /// group without being added here costs the helper an aim, not a wrong answer.
-const SETTINGS_CARDS: [&str; 8] = [
+const SETTINGS_CARDS: [&str; 9] = [
     "appearance",
     "exit-mode",
+    "xray-engine",
     "export-configuration",
     "import-configuration",
     "restore-configuration",
@@ -839,3 +897,4 @@ mod profiles;
 mod proxies;
 mod settings;
 mod verification;
+mod xray;

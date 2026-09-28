@@ -27,6 +27,7 @@ impl AppView {
                     let copied = view.drain_browser_data();
                     let maintained = view.drain_maintenance();
                     let released = view.drain_releases(cx);
+                    let engines = view.drain_xray_releases(cx);
                     if notified
                         || reconcile
                         || verified
@@ -35,6 +36,7 @@ impl AppView {
                         || copied
                         || maintained
                         || released
+                        || engines
                     {
                         view.state.refresh_runtime();
                         cx.notify();
@@ -185,6 +187,33 @@ impl AppView {
             // The dialog draws its own copy of this, so the copy is brought up
             // to date before anything is redrawn - see `AppView::sync_downloads`.
             self.sync_downloads(cx);
+        }
+        received
+    }
+
+    /// Collect what the engine workers reported.
+    ///
+    /// The same shape as [`AppView::drain_releases`], for the same reason: the
+    /// engine's answer becomes a setting this window holds, and a worker has no
+    /// access to the configuration.
+    pub(super) fn drain_xray_releases(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut received = false;
+        while let Ok(event) = self.xray.try_recv() {
+            match event {
+                XrayReleaseEvent::Listed(result) => self.state.finish_xray_release_fetch(result),
+                XrayReleaseEvent::Progress {
+                    key,
+                    received: bytes,
+                    total,
+                } => self.state.update_xray_download(&key, bytes, total),
+                XrayReleaseEvent::Downloaded { release, result } => {
+                    self.state.finish_xray_download(&release, result);
+                }
+            }
+            received = true;
+        }
+        if received {
+            self.sync_xray_downloads(cx);
         }
         received
     }

@@ -434,6 +434,35 @@ catalog! {
     core_download_open_folder => "Open cores folder" => "打开内核目录";
     core_download_working => "Working…" => "处理中……";
 
+    // ---- the Xray card on the Settings page, and its download dialog ----
+    //
+    // A second download, and deliberately not a second copy of the words above:
+    // what a reader needs told here is that the build is for *this* machine.
+    // Xray's file names carry the architecture (the core dialog's do not), and a
+    // 32-bit engine on a 64-bit machine is a launch that fails for a reason
+    // nobody would guess - so the dialog offers one build and says which.
+    xray_card_title => "Xray engine" => "Xray 引擎";
+    xray_card_body => "A profile that uses a proxy starts Xray itself, so the engine has to be there before the browser is; a profile with no proxy needs nothing. This program ships no engine of its own. Downloading one here puts it under the data directory and points the setting above at it; the build is taken from the project that publishes it, and only the executable and its licence are unpacked."
+        => "使用代理的档案会自己启动 Xray，因此必须在浏览器之前就位；不使用代理的档案不需要它。本程序自身不附带引擎。在这里下载会把引擎放进数据目录，并把上面的设置指向它；构建取自上游项目，且只解压可执行文件与许可证。";
+    download_xray => "Download Xray" => "下载 Xray";
+    xray_download_title => "Download an Xray engine" => "下载 Xray 引擎";
+    xray_download_intro => "Every build published for Xray-core, newest first. The archive names its architecture, so this dialog offers the build for this machine rather than a choice between machines it cannot see."
+        => "Xray-core 已发布的全部构建，最新的在最前。压缩包文件名里带架构，因此这里只提供本机对应的构建，而不是让人去猜另一台机器的架构。";
+    xray_download_loading => "Reading the release list from GitHub…"
+        => "正在从 GitHub 读取版本列表……";
+    xray_download_empty => "No releases were listed." => "没有列出任何版本。";
+    xray_download_column_version => "Version" => "版本";
+    xray_download_column_published => "Published" => "发布日期";
+    xray_download_column_build => "Build for this system" => "本机构建";
+    xray_download_no_build => "no build for this system" => "没有本机对应的构建";
+    xray_download_prerelease => "pre-release" => "预发布";
+    xray_download_close => "Close" => "关闭";
+    xray_download_refresh => "Refresh list" => "刷新列表";
+    xray_download_open_folder => "Open engines folder" => "打开引擎目录";
+    xray_download_working => "Working…" => "处理中……";
+    xray_download_restart_note => "A downloaded engine is written to the Xray executable setting and read at the start of the next run."
+        => "下载的引擎会写入 Xray 可执行文件设置，并在下次启动时读取。";
+
     // ---- the backup cards on the Settings page ----
     export_title => "Export configuration" => "导出配置";
     export_body => "Writes cores, proxies and profiles to a JSON file, for another machine or for keeping. Browser data is not included: it is far larger, and a copy belongs beside the profile it came from."
@@ -491,6 +520,13 @@ catalog! {
     diag_activity_log => "Activity log" => "日志文件";
     diag_activity_log_rotated => "Rotated activity log" => "轮转的日志文件";
     diag_instance_lock => "Instance lock" => "实例锁";
+    diag_engine => "Xray engine" => "Xray 引擎";
+    diag_engine_source => "Repository" => "仓库";
+    diag_engine_release => "Release" => "发布版本";
+    diag_engine_asset => "File" => "文件";
+    diag_engine_url => "Downloaded from" => "下载地址";
+    diag_engine_sha256 => "Archive SHA-256" => "压缩包 SHA-256";
+    diag_engine_digest => "Upstream digest" => "上游摘要";
     diag_log => "The end of the activity log" => "日志的末尾";
     diag_log_empty => "nothing has been written to this log yet" => "这个日志里还没有任何内容";
     diag_missing => "missing" => "缺失";
@@ -691,6 +727,7 @@ mod profiles;
 mod proxies;
 mod settings;
 mod system;
+mod xray;
 
 #[cfg(test)]
 mod tests {

@@ -13,6 +13,7 @@ them should have to be asked for.
 | Build | The version, the commit the binary was built from, `os arch (profile)` and the time the report was written |
 | Settings in force | Every row of the Settings page: the value in force, where it came from (environment, config file, default), and any stored value the environment is overriding |
 | Files | For each of the data directory, the config file, the database, the instance lock, both activity logs, the runtime directory, the browser-data directory and the Xray executable: whether it is there, and - where it is - its size or entry count and its permission bits |
+| Xray engine | Present only when the engine in force was fetched by this program: the repository, the release, the file, where it was downloaded from, the archive's SHA-256, and upstream's `.dgst` URL to check that hash against - read out of the record the download left beside the binary, which is why it survives the run that made it |
 | The end of the activity log | The last 40 lines of `logs/activity.log`, oldest first, with how many lines the file holds |
 
 ## What it deliberately leaves out
@@ -28,6 +29,10 @@ them should have to be asked for.
   table of variables that could disagree with the first.
 - **It is not a log of the run.** The activity log is the app's own account and
   is included; `tracing` output goes to stderr and is not.
+- **It does not guess where an engine came from.** The Xray section is read out of
+  the record a download wrote, so an engine the reader supplied has no section at
+  all - a source line nobody recorded would be a claim about a binary, which is
+  the one thing a report must not contain.
 
 The one thing worth knowing before sharing a report is the log tail: it names
 profiles and, after a proxy test, the address traffic left from. `diag_intro`

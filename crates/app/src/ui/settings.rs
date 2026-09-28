@@ -107,6 +107,8 @@ pub(super) struct SettingsCards {
     pub(super) diagnostics: PathBuf,
     pub(super) theme: ThemeChoice,
     pub(super) language: Lang,
+    /// The Xray engine's own card, which lives with the settings it writes.
+    pub(super) xray: super::xray::XrayCard,
     pub(super) exit_mode: ExitMode,
     /// Which of the four groups the page is showing.
     pub(super) group: SettingGroup,
@@ -137,7 +139,12 @@ pub(super) fn settings_body(
             surfaces.push(appearance_card(cards.theme, cards.language, cx, t).into_any_element());
             surfaces.push(exit_mode_card(cards.exit_mode, cx, t).into_any_element());
         }
-        SettingGroup::Runtime => {}
+        SettingGroup::Runtime => {
+            // The engine card sits under the Xray executable row it writes: the
+            // row says which path is in force, and this says what is at it and
+            // offers the one way to put something there.
+            surfaces.push(super::xray::xray_card(cards.xray, cx, p, t).into_any_element());
+        }
         SettingGroup::Data => {
             surfaces.push(export_card(&cards.export, cx, t).into_any_element());
             surfaces.push(import_card(&cards.import, cx, t).into_any_element());

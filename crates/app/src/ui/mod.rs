@@ -18,6 +18,7 @@ use crate::settings::{SettingGroup, SettingKey};
 use crate::state::{
     AppState, CoreRow, DetailsTab, LogFilter, LogLevel, LogRow, Opening, Page, ProfileRow,
     ProxyRow, ProxyTest, ReleaseDownload, ReleaseStatus, StartGate, Toast, ToastKind, Verification,
+    XrayDownload, XrayReleaseStatus,
 };
 use crate::text::{Lang, Text};
 use crate::theme::{Palette, ThemeChoice, palette};
@@ -25,6 +26,7 @@ use crate::tray::{Tray, TrayEvent, TrayStarter};
 use crate::verifier::{FingerprintVerifier, VerificationReport};
 use crate::version;
 use crate::window_visibility;
+use crate::xray_releases::{ReleaseEvent as XrayReleaseEvent, XrayCatalog, XrayDownloader};
 use application::{BrowserDataReport, Direction, RestoreMode};
 use crossbeam_channel::{Receiver, Sender};
 use domain::{CoreId, ProfileId, ProxyId, RuntimeState};
@@ -76,6 +78,12 @@ pub struct AppView {
     /// closure, which would be reading this view while it is being drawn; see
     /// [`CoreDownloads`].
     downloads: Option<Entity<CoreDownloads>>,
+    /// The Download Xray dialog's body, while one is open.
+    ///
+    /// A second entity for the reason above, and a second dialog rather than a
+    /// second list in the one above: the two hold releases of different projects
+    /// with different asset names.
+    xray_downloads: Option<Entity<XrayDownloads>>,
     /// The settings value field behind the open dialog, if any.
     setting_editor: Option<Entity<InputState>>,
     /// Which setting that field belongs to.
@@ -113,10 +121,21 @@ pub struct AppView {
     catalog: Arc<dyn ReleaseCatalog>,
     /// Fetches and unpacks a published core. Injected for the same reason.
     downloader: Arc<dyn CoreDownloader>,
+    /// The Xray builds published on GitHub, and the fetcher for one of them.
+    ///
+    /// Two more injections of the same kind: a test of this dialog must not dial
+    /// GitHub either, and a window with no network has to be able to open it and
+    /// say so.
+    xray_catalog: Arc<dyn XrayCatalog>,
+    xray_downloader: Arc<dyn XrayDownloader>,
     /// What the release workers reported: a list, a progress report, or a
     /// finished download.
     releases: Receiver<ReleaseEvent>,
     releases_tx: Sender<ReleaseEvent>,
+    /// What the engine workers reported: a list, a progress report, or a
+    /// finished download.
+    xray: Receiver<XrayReleaseEvent>,
+    xray_tx: Sender<XrayReleaseEvent>,
     verifications: Receiver<(
         crate::verifier::VerificationJob,
         Result<VerificationReport, String>,
@@ -207,11 +226,12 @@ pub struct AppView {
 impl AppView {
     /// Every dependency the window has, in the order the program passes them.
     ///
-    /// Nine arguments because the window is where the program's wiring meets the
-    /// object that draws it: each one is a seam a test replaces - a verifier, a
-    /// proxy tester, an opener, a copier, a release catalog and a downloader -
-    /// and bundling them into a struct would move the same nine names one call
-    /// deeper without making any of them clearer.
+    /// Eleven arguments because the window is where the program's wiring meets
+    /// the object that draws it: each one is a seam a test replaces - a verifier,
+    /// a proxy tester, an opener, a copier, a release catalog and a downloader
+    /// for the cores, and the same two for the engines - and bundling them into a
+    /// struct would move the same eleven names one call deeper without making any
+    /// of them clearer.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: AppState,
@@ -222,6 +242,8 @@ impl AppView {
         copier: Arc<dyn BrowserDataCopier>,
         catalog: Arc<dyn ReleaseCatalog>,
         downloader: Arc<dyn CoreDownloader>,
+        xray_catalog: Arc<dyn XrayCatalog>,
+        xray_downloader: Arc<dyn XrayDownloader>,
         tray_starter: TrayStarter,
     ) -> Self {
         // A reading takes seconds and blocks on the browser, so it runs on a
@@ -239,12 +261,16 @@ impl AppView {
         // neither of which the thread that draws the window may wait for, so
         // both report here the same way.
         let (releases_tx, releases) = crossbeam_channel::unbounded();
+        // The engine's list and download are the same two requests against a
+        // different repository, so they get their own pair for the same reason.
+        let (xray_tx, xray) = crossbeam_channel::unbounded();
         Self {
             editor: None,
             proxy_editor: None,
             proxy_import: None,
             core_editor: None,
             downloads: None,
+            xray_downloads: None,
             setting_editor: None,
             setting_key: None,
             filter_input: None,
@@ -258,8 +284,12 @@ impl AppView {
             copier,
             catalog,
             downloader,
+            xray_catalog,
+            xray_downloader,
             releases,
             releases_tx,
+            xray,
+            xray_tx,
             verifications,
             verification_tx,
             proxy_tests,
@@ -533,6 +563,7 @@ mod profiles;
 mod proxies;
 mod settings;
 mod workers;
+mod xray;
 
 use self::cores::{CoreDownloads, cores_body, cores_header};
 use self::details::details_panel;
@@ -542,6 +573,7 @@ use self::proxies::{proxies_body, proxies_header};
 use self::settings::{
     SettingsCards, SettingsExport, exit_choice, settings_body, settings_groups, settings_header,
 };
+use self::xray::{XrayCard, XrayDownloads};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ThemeStyled as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -761,6 +793,15 @@ impl Render for AppView {
                                         diagnostics: diagnostics_destination.clone(),
                                         theme: self.state.theme(),
                                         language: self.state.language(),
+                                        xray: XrayCard {
+                                            present: self.state.xray_engine_present(),
+                                            tag: self.state.downloaded_xray_tag(),
+                                            path: self
+                                                .state
+                                                .xray_executable()
+                                                .display()
+                                                .to_string(),
+                                        },
                                         exit_mode: self.state.exit_mode(),
                                         group: settings_group,
                                     },

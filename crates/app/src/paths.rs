@@ -126,6 +126,21 @@ pub const EXPORT_DIR: &str = "exports";
 /// is writable.
 pub const CORES_DIR: &str = "cores";
 
+/// Where a downloaded Xray engine is put: `<data dir>/xray-releases/<release>`.
+///
+/// Beside the cores and under the data directory for the same reasons - it is
+/// data the user collected, and an upgrade must not take it away - plus one of
+/// its own: an engine is not registered anywhere, it is a path in the
+/// configuration, so the tree it sits in is the only thing that tells a report
+/// this window put it there rather than the reader.
+///
+/// Not plain `xray`, which is the file name a reader is most likely to have used
+/// themselves: `<data dir>/xray` is a plausible engine path to point the row at,
+/// and a directory cannot be made where a file of that name already is. The
+/// download would fail with a message about a directory rather than about the
+/// file that is in its way.
+pub const XRAY_DIR: &str = "xray-releases";
+
 /// Where a configuration export writes with no path typed:
 /// `<data dir>/exports/fp-browser-config-<stamp>.json`.
 ///

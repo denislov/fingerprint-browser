@@ -37,6 +37,7 @@ mod ui;
 mod verifier;
 mod version;
 mod window_visibility;
+mod xray_releases;
 
 use application::{
     CoreService, DefaultCoreService, DefaultProfileService, DefaultProxyService, ProfileService,
@@ -59,6 +60,7 @@ use storage::{
 };
 use ui::AppView;
 use verifier::CdpFingerprintVerifier;
+use xray_releases::{GithubXrayCatalog, HttpXrayDownloader, XrayCatalog, XrayDownloader};
 
 const EVENT_CAPACITY: usize = 256;
 /// How long shutdown waits for the supervisor to reclaim children.
@@ -259,6 +261,13 @@ fn main() {
     let release_catalog: Arc<dyn ReleaseCatalog> = Arc::new(GithubReleaseCatalog::new());
     let core_downloader: Arc<dyn CoreDownloader> = Arc::new(HttpCoreDownloader::new());
 
+    // The same two halves for the engine a profile with a proxy starts. A
+    // separate pair rather than one parameterised by repository: the releases
+    // name their architectures, carry data this program does not unpack, and
+    // what arrives is a setting rather than a registered core.
+    let xray_catalog: Arc<dyn XrayCatalog> = Arc::new(GithubXrayCatalog::new());
+    let xray_downloader: Arc<dyn XrayDownloader> = Arc::new(HttpXrayDownloader::new());
+
     let mut app_state = AppState::new(
         Services {
             profiles: profile_service,
@@ -396,6 +405,8 @@ fn main() {
                                 Arc::new(browser_data::DiskBrowserDataCopier),
                                 release_catalog,
                                 core_downloader,
+                                xray_catalog,
+                                xray_downloader,
                                 // The desktop's own tray, started the first time
                                 // "keep running" puts the window away.
                                 tray::Tray::start,

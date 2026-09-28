@@ -578,8 +578,19 @@ deliberately not "add an installer": each piece has a rule behind it.
   was named rather than one the program decided on; it is registered through the
   same version probe as any binary the user points at, so its major is read from
   the file and not from the release tag. What the rule above forbids is a program
-  that picks a browser for you and installs it. Xray is still never fetched:
-  there is no published build to offer a choice between.
+  that picks a browser for you and installs it.
+
+  *Amended again.* Xray is fetched the same way, and by the same rule. The
+  earlier text here said there was no published build to offer a choice between,
+  which was simply wrong: `XTLS/Xray-core` publishes a prebuilt archive per
+  system and architecture on its releases page. What is offered is that one -
+  only for the machine this window is running on, because the architecture is in
+  the file name and the wrong archive is not a choice but a mistake, and with
+  the platform and architecture written on the button. Only the engine and
+  upstream's licence are unpacked; the geo data in the same archive is not, and
+  the archive's SHA-256 and upstream's `.dgst` URL are recorded beside the binary
+  so a report can say where it came from. Still nothing is downloaded at first
+  run, and still nothing is downloaded that the reader did not name.
 - **A report must be safe to send.** The proxy credentials are in the database,
   so the report measures it and does not read it, and the summary says what is in
   the file before anyone shares it.

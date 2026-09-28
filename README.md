@@ -24,6 +24,14 @@ this repository does not bundle or fork them.
   same version probe the Add Core form uses, so its major is read from the binary
   rather than taken from the release tag; an installer or a disk image is saved
   where it can be run. One download at a time, with progress on its own row.
+- Download Xray from the card under the **Xray executable** row on the Settings
+  page, the way a core is downloaded from the Browser Cores page and under the
+  same rule - nothing happens without a click. It lists what `XTLS/Xray-core` has
+  published and offers the build for this machine, named by platform and
+  architecture; the engine and upstream's licence are unpacked under the data
+  directory, the path is written into the setting, and the change takes effect at
+  the next start. The card then says which release is at the path, so one that
+  has been deleted does not look installed.
 - Configure SOCKS5/HTTP in a form; import Shadowsocks, VMess, VLESS and Trojan
   links with supported transport/TLS settings. Unsupported link fields are refused.
   Referenced proxies/cores cannot be deleted.
@@ -99,7 +107,7 @@ Cores** page - the **Download Core** button there fetches a published build for
 this system and registers it - or start the program with
 `FP_BROWSER_CHROMIUM_BIN` pointing at one. The empty profile list says so and
 carries the button that leads there. Xray is only needed for a profile that uses
-a proxy.
+a proxy, and is fetched from the Settings page the same way.
 
 The whole walk - what the window says at each step, where the files go, and what
 to look at when something is wrong - is in [first run](docs/first-run.md).

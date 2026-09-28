@@ -186,6 +186,9 @@ pub mod glyph {
     pub const EXIT_BEHAVIOUR: IconName = IconName::Close;
     pub const DATA: IconName = IconName::Database;
     pub const DIAGNOSTICS: IconName = IconName::Stethoscope;
+    /// The Xray engine card. The proxies page's own icon, because that is what
+    /// the engine is for: it is not a second kind of core.
+    pub const XRAY: IconName = IconName::Network;
 
     // ---- empty pages ----
     pub const EMPTY_PROFILES: IconName = IconName::Box;

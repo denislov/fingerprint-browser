@@ -442,6 +442,16 @@ impl Settings {
         &self.xray_executable
     }
 
+    /// Whether the engine path in force came from the environment.
+    ///
+    /// Asked by the one caller that must not report a download as in force when
+    /// something outranks it: a path written to the configuration while
+    /// `FP_BROWSER_XRAY_BIN` is set is a path no run will read, and the row's own
+    /// "shadowed" note is the page's answer for a reader who went looking.
+    pub fn xray_from_env(&self) -> bool {
+        self.env.xray_executable.is_some()
+    }
+
     /// The config file this run read, and the one it writes to.
     ///
     /// Exposed because a report has to name the file it is talking about, and

@@ -267,6 +267,10 @@ fn starting_without_a_core_says_so_and_offers_the_way_there(cx: &mut TestAppCont
                 Vec::new(),
             )),
             Arc::new(crate::core_releases::testing::FakeDownloader::unpacking("")),
+            Arc::new(crate::xray_releases::testing::FakeCatalog::listing(
+                Vec::new(),
+            )),
+            Arc::new(crate::xray_releases::testing::FakeDownloader::unpacking("")),
             crate::tray::testing::fake_starter,
         );
         view.boot(cx);

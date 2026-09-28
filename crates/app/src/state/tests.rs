@@ -32,6 +32,27 @@ fn fixture_with_config(config: &std::path::Path) -> Fixture {
     fixture_full(config, None, None, None)
 }
 
+/// The same fixture, with the engine path supplied by the environment.
+///
+/// The one arrangement [`AppState::finish_xray_download`] has to tell apart from
+/// a plain success: a path written to the configuration while
+/// `FP_BROWSER_XRAY_BIN` is set is a path no run will read. `Settings` reads its
+/// environment once, at load, so the fixture is rebuilt rather than adjusted.
+fn fixture_with_env_xray(path: &std::path::Path) -> Fixture {
+    let mut fixture = fixture_with_config(
+        &std::env::temp_dir()
+            .join("fp-app-xray-env-fixture")
+            .join("config.json"),
+    );
+    let (settings, _) = Settings::load(crate::settings::Environment {
+        config: Some(fixture.state.settings.config_path().display().to_string()),
+        xray_executable: Some(path.display().to_string()),
+        ..crate::settings::Environment::default()
+    });
+    fixture.state.settings = settings;
+    fixture
+}
+
 /// The same fixture, with its data directory somewhere the test can name.
 ///
 /// An import re-points a profile's browser data at the local default under
@@ -332,3 +353,4 @@ mod proxies;
 mod releases;
 mod settings;
 mod verification;
+mod xray_releases;

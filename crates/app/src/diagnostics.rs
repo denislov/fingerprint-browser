@@ -66,15 +66,18 @@ impl Report {
 
 /// Everything the report says about this installation.
 pub fn collect(settings: &Settings, at: SystemTime, t: &Text) -> Report {
+    let mut sections = vec![
+        build_section(at, t),
+        settings_section(settings, t),
+        files_section(settings, t),
+    ];
+    // Between the files and the log: it is about a file, and it is not one.
+    sections.extend(engine_section(settings, t));
+    sections.push(log_section(settings, t));
     Report {
         title: t.diag_title.to_string(),
         intro: t.diag_intro.to_string(),
-        sections: vec![
-            build_section(at, t),
-            settings_section(settings, t),
-            files_section(settings, t),
-            log_section(settings, t),
-        ],
+        sections,
     }
 }
 
@@ -177,6 +180,44 @@ fn files_section(settings: &Settings, t: &Text) -> Section {
     }
 }
 
+/// Where the engine in force came from, when this program put it there.
+///
+/// Read out of the record a download left beside the binary rather than
+/// remembered: it is a file, so it says the same thing to whoever reads the
+/// report weeks later as it did to whoever pressed the button. An engine the
+/// reader supplied themselves has no such file, and the section is left out
+/// rather than filled with a guess about a build nobody recorded.
+fn engine_section(settings: &Settings, t: &Text) -> Option<Section> {
+    let path = settings
+        .xray_executable()
+        .parent()?
+        .join(crate::xray_releases::PROVENANCE_FILE);
+    let body = fs::read_to_string(path).ok()?;
+    let lines: Vec<String> = body
+        .lines()
+        .filter_map(|entry| entry.split_once(' '))
+        .filter_map(|(key, value)| {
+            let label = match key {
+                "repository" => t.diag_engine_source,
+                "release" => t.diag_engine_release,
+                "asset" => t.diag_engine_asset,
+                "url" => t.diag_engine_url,
+                "sha256" => t.diag_engine_sha256,
+                "digest" => t.diag_engine_digest,
+                // A record from a later version can say more than this one
+                // knows how to label; the line is dropped rather than printed
+                // under a key nobody translated.
+                _ => return None,
+            };
+            Some(line(label, value))
+        })
+        .collect();
+    (!lines.is_empty()).then(|| Section {
+        title: t.diag_engine.to_string(),
+        body: lines,
+    })
+}
+
 fn log_section(settings: &Settings, t: &Text) -> Section {
     let path = settings
         .data_dir()
@@ -267,6 +308,14 @@ mod tests {
 
     impl Fixture {
         fn new(name: &str) -> Self {
+            Self::with_engine(name, |_| None)
+        }
+
+        /// The same installation, with an engine path in its configuration.
+        ///
+        /// The path is built from the directory the fixture made, so a record
+        /// beside the binary is a record this report can find.
+        fn with_engine(name: &str, engine: impl FnOnce(&Path) -> Option<PathBuf>) -> Self {
             let dir =
                 std::env::temp_dir().join(format!("fp-diagnostics-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
@@ -274,6 +323,7 @@ mod tests {
             let (settings, notice) = Settings::load(Environment {
                 data_dir: Some(dir.to_string_lossy().to_string()),
                 config: Some(dir.join("config.json").to_string_lossy().to_string()),
+                xray_executable: engine(&dir).map(|path| path.to_string_lossy().to_string()),
                 ..Environment::default()
             });
             assert!(notice.is_none(), "a fresh installation has nothing to say");
@@ -350,6 +400,56 @@ mod tests {
                 "{expected} is missing:\n{report}"
             );
         }
+    }
+
+    /// Where a downloaded engine came from is in the report, out of the record
+    /// the download left beside it: which upstream release, which file, and the
+    /// hash that says the file is that one.
+    #[test]
+    fn a_report_says_where_a_downloaded_engine_came_from() {
+        let fixture = Fixture::with_engine("engine-record", |dir| {
+            Some(dir.join("xray").join("v26.3.27").join("xray"))
+        });
+        fixture.write(
+            "xray/v26.3.27/PROVENANCE.txt",
+            b"repository XTLS/Xray-core\nrelease v26.3.27\nasset Xray-linux-64.zip\n\
+              url https://example.invalid/Xray-linux-64.zip\nsha256 abc123\n\
+              digest https://example.invalid/Xray-linux-64.zip.dgst\n",
+        );
+
+        let report = fixture.render();
+
+        for expected in [
+            en().diag_engine,
+            "XTLS/Xray-core",
+            "v26.3.27",
+            "Xray-linux-64.zip",
+            "abc123",
+        ] {
+            assert!(
+                report.contains(expected),
+                "{expected} is missing:\n{report}"
+            );
+        }
+    }
+
+    /// An engine the reader put there themselves has no record, and the report
+    /// invents none: a source line nobody recorded would be a guess about a
+    /// binary, which is the one thing a diagnostic must not contain.
+    #[test]
+    fn a_hand_supplied_engine_has_no_source_section() {
+        let fixture = Fixture::with_engine("engine-hand", |dir| Some(dir.join("their-own-xray")));
+
+        let report = fixture.render();
+
+        assert!(
+            !report.contains(en().diag_engine),
+            "there is nothing recorded to say:\n{report}"
+        );
+        assert!(
+            report.contains("their-own-xray"),
+            "the path itself is still reported, in the files section:\n{report}"
+        );
     }
 
     /// The question the report exists to answer: is the file actually there.

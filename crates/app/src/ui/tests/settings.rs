@@ -553,6 +553,10 @@ fn the_sidebar_switches_to_the_settings_page(cx: &mut TestAppContext) {
         cx.update(|window, _| window.try_find("setting-chromium-bin").is_some()),
         "the runtime group holds the read-only rows too"
     );
+    assert!(
+        cx.update(|window, _| window.try_find("xray-engine").is_some()),
+        "and the card that says whether there is an engine at the path, beside the path"
+    );
 }
 
 #[gpui_kit::test]

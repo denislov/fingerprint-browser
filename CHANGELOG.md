@@ -49,6 +49,37 @@ says nothing about, and the notes are that section rather than the whole file.
   and `core_releases::tests::a_real_release_downloads_and_unpacks_into_a_browser`
   dial GitHub and move a real core. Both are ignored by default; run them with
   `--ignored` when the request shape, the parsing or the unpacking changes.
+- The Settings page can fetch Xray too, from a card under the **Xray executable**
+  row - the same door the core page opens, and open the same way: always, because
+  the reader decides which engine to run, and never without a click. It lists what
+  `XTLS/Xray-core`
+  has published, newest first, and offers the build for the machine this window
+  is running on - only that one, because the architecture is in the archive's
+  file name and the wrong archive is not a choice but a mistake, and the button
+  says which platform and architecture it is about to fetch. A release that
+  published nothing for this machine says so where the button would be.
+- What a download unpacks is the engine and upstream's licence, under
+  `<data directory>/xray-releases/<tag>`, and nothing else: the geo data that
+  travels in the same archive is left out, and no entry is allowed to write
+  outside the directory it was given. The path is written into the **Xray executable**
+  setting, which takes effect at the next start as that setting always does; when
+  `FP_BROWSER_XRAY_BIN` is set the download says so instead of claiming an engine
+  is installed, because the variable outranks the file it just wrote. Where the
+  binary came from is recorded beside it - repository, release, file, URL, the
+  archive's SHA-256 and upstream's `.dgst` URL for it - and the diagnostics report
+  carries that record when there is one, and says nothing when the engine is one
+  the reader supplied.
+
+### Fixed
+
+- A download that is still arriving is no longer reported as failed on a slow
+  line. The HTTP client's body timeout is a budget for the whole body - its clock
+  is not restarted by a read that arrives - and both downloaders had set it to two
+  minutes believing it bounded a stalled connection. That made a hundred-megabyte
+  core need a line better than a megabyte a second, and the twenty-megabyte engine
+  archive better than 170 KB/s, which is the failure a reader on a slower line got
+  instead of their browser. Both now use one budget, generous enough that only a
+  transfer which has effectively stopped trips it.
 
 ## [0.2.0] - 2026-09-24
 

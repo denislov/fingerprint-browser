@@ -58,7 +58,10 @@ them has been verified end-to-end on GitHub Actions runners. The changelog's
 Deliberately **not** in a release: Chromium, Xray, and any installer that offers
 to fetch them. They are the user's binaries; see
 [the plan](implementation-plan.md#why-distribution-is-a-task-and-not-a-paragraph).
-The program never downloads an executable, at first run or any other time.
+Nothing is fetched at first run, and nothing is fetched without a click: both
+engines are downloaded from the page that needs them, one release row per
+version, the build for this machine named as such, and the file unpacked only
+once the reader has asked for that one.
 
 ## The build
 

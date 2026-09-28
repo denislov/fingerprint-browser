@@ -19,18 +19,19 @@ Two external executables, and the program ships neither:
 | Needed for | What it is | Where it comes from |
 | --- | --- | --- |
 | Every profile | A fingerprint-chromium (or Chromium) binary - a *core* | **Download Core** on the Browser Cores page, the user's own binary, or discovery at startup |
-| A profile with a proxy | An Xray binary | The user, on the Settings page, or the default `bin/xray` |
+| A profile with a proxy | An Xray binary | **Download Xray** on the Settings page, the user's own binary, or the default `bin/xray` |
 
-Xray is never fetched: there is no published build this program could offer a
-choice between, and where it comes from is the user's business. A core can be,
-and the rule that mattered is kept rather than bent: the choice is still the
-user's. The dialog lists what `adryfish/fingerprint-chromium` published, and the
-reader picks the version and the system, so what is fetched is a binary that was
-named rather than one the program decided on. What was ruled out is a program
-that picks a browser for you and installs it - not one that fetches the browser
-you asked for. What arrives is registered through the same version probe as any
-binary the user points at, so the major a profile may rely on is read from the
-file rather than taken from the release tag. See
+Neither is bundled, and neither is fetched at first run. Both can be fetched by
+name, and the rule that mattered is kept rather than bent: the choice is still
+the user's. The dialogs list what upstream published, and the reader picks the
+version - and, for Xray, is shown which architecture the build they are about to
+take was made for, because an engine archive names it in the file and the wrong
+one does not run at all. So what is fetched is a binary that was named rather
+than one the program decided on. What was ruled out is a program that picks a
+browser for you and installs it; nothing here is unpacked until a button is
+pressed, and a core that arrives is registered through the same version probe as
+any binary the user points at, so the major a profile may rely on is read from
+the file rather than taken from the release tag. See
 [the plan](implementation-plan.md#why-distribution-is-a-task-and-not-a-paragraph).
 
 ## The walk
@@ -71,9 +72,14 @@ second profile has to look like the first one.
 
 **4. Supply Xray, if the profile uses a proxy.** A profile with no proxy goes
 direct and needs nothing else. For a proxied one the program starts Xray itself,
-so the binary has to be there: set the **Xray executable** row on the Settings
-page, or `FP_BROWSER_XRAY_BIN`, or leave the default `bin/xray` next to the
-program. It is read at the start of a run, so a change takes effect at the next
+so the binary has to be there: press **Download Xray** on the Settings page's
+Runtime group, which lists what `XTLS/Xray-core` published and offers the build
+for this machine with its architecture on the button - or set the **Xray
+executable** row by hand, or `FP_BROWSER_XRAY_BIN`, or leave the default
+`bin/xray` next to the program. What a download unpacks is the engine and
+upstream's licence; the routing data that comes in the same archive is left out.
+The card under the row says which release the path holds, so an engine that was
+deleted is visible rather than silently missing. It is read at the start of a run, so a change takes effect at the next
 start and the row says so. If it is missing, the launch fails closed - the
 browser is not started to go direct instead, which is the failure this program
 exists to prevent.

@@ -20,6 +20,7 @@ mod cores;
 mod profiles;
 mod proxies;
 mod releases;
+mod xray_releases;
 use crate::proxy_tester::ProxyTestJob;
 use crate::settings::{SettingGroup, SettingKey, SettingRow, Settings};
 use crate::text::{Lang, Text, text};
@@ -41,6 +42,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use storage::ConfigurationRepository;
+pub use xray_releases::{XrayDownload, XrayReleaseStatus};
 
 /// A user-facing message shown in the window banner.
 ///
@@ -329,6 +331,14 @@ pub struct AppState {
     /// One, and only one: see [`AppState::begin_core_download`], which refuses a
     /// second rather than queueing it.
     download: Option<ReleaseDownload>,
+    /// What the Download Xray dialog is showing.
+    ///
+    /// A second list rather than a second use of the one above: the two hold
+    /// different releases of different projects, and a reader opening one dialog
+    /// must not be shown the other's rows.
+    xray_releases: XrayReleaseStatus,
+    /// The engine download in flight, if any. One, for the same reason as above.
+    xray_download: Option<XrayDownload>,
 }
 
 /// A start that is waiting for its proxy to answer.
@@ -482,6 +492,8 @@ impl AppState {
             maintenance: None,
             releases: ReleaseStatus::Unasked,
             download: None,
+            xray_releases: XrayReleaseStatus::Unasked,
+            xray_download: None,
         }
     }
 

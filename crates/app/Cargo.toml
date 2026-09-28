@@ -47,6 +47,13 @@ tar = "0.4"
 xz2 = { version = "0.1", features = ["static"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
+# One hash, for the provenance line a downloaded Xray engine is recorded with.
+# Upstream publishes a `.dgst` beside every archive, and the comparison a reader
+# can make against it needs a local number to compare; this crate is the whole of
+# that job here. The 0.10 line rather than the newest, because the workspace lock
+# already resolves it and a second copy of a hash crate buys nothing.
+sha2 = "0.10"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
