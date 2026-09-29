@@ -153,3 +153,29 @@ pub(super) fn resolve_echo_url(stored: &Stored, env: &Environment) -> String {
         .or_else(|| stored.echo_url.clone())
         .unwrap_or_else(|| runtime::DEFAULT_ECHO_URL.to_string())
 }
+
+/// The words a switch may be spelled with, in either language's conventions.
+///
+/// `None` is a word this build does not know, which is not a value: a stored
+/// name with no meaning here falls back to the default rather than failing the
+/// parse, the way the appearance and the language do. That also makes a typo in
+/// the variable leave the stored setting alone instead of clearing it.
+pub(super) fn switch_on(word: &str) -> Option<bool> {
+    match word.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => Some(true),
+        "off" | "false" | "no" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether the engine dials the profile's proxy through this machine's.
+///
+/// The environment first, then the file: a variable set for this run has said
+/// something about *this* run, which outranks what was stored - and it is the
+/// only way to turn the switch on for a machine whose proxy is somewhere this
+/// program does not read.
+pub(super) fn resolve_use_system_proxy(stored: &Stored, env: &Environment) -> bool {
+    env.use_system_proxy()
+        .or_else(|| stored.system_proxy.as_deref().and_then(switch_on))
+        .unwrap_or(false)
+}

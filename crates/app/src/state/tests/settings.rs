@@ -198,3 +198,125 @@ fn the_page_can_be_switched() {
         "every page in the sidebar is built now"
     );
 }
+
+/// The switch is stored, and what the window says about it is what this machine
+/// turned out to have rather than a claim that something happened.
+#[test]
+fn turning_the_system_proxy_on_stores_it_and_reports_this_machine() {
+    let dir = std::env::temp_dir().join(format!("fp-app-system-proxy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let mut fixture = fixture_with_config(&dir.join("config.json"));
+
+    fixture
+        .state
+        .set_use_system_proxy(true)
+        .expect("the switch is stored");
+
+    let row = fixture
+        .state
+        .setting_rows()
+        .into_iter()
+        .find(|row| row.key == SettingKey::UseSystemProxy)
+        .expect("a row for the switch");
+    assert_eq!(row.switch, Some(true));
+    assert_eq!(row.value, "On");
+    assert_eq!(row.source, crate::settings::Source::ConfigFile);
+    assert_eq!(row.env, None);
+    let toast = fixture.state.toasts().last().expect("a toast");
+    assert_eq!(toast.kind, ToastKind::Success);
+    // Which of the three answers this machine gives is the machine's business,
+    // and the test runs on whatever machine it is given. What is this test's
+    // business is that the sentence is one of them: "saved" on its own would be
+    // a window claiming the switch had started doing something.
+    let t = en();
+    assert!(
+        toast.message == t.system_proxy_enabled_none
+            || toast.message == t.system_proxy_enabled_automatic
+            || toast.message.contains("next start"),
+        "the sentence reports what the machine has: {}",
+        toast.message
+    );
+    assert!(
+        fixture.state.notice().is_none(),
+        "a switch that was stored is not a banner"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The three answers about a machine are three sentences, and the two that mean
+/// "nothing will change" are not the same sentence.
+#[test]
+fn the_system_proxy_message_says_which_of_the_three_answers_it_reports() {
+    use runtime::system_proxy::{Protocol, Reading, SystemProxy};
+
+    for t in [en(), text(Lang::Zh)] {
+        let found = crate::state::system_proxy_message(
+            t,
+            Reading::Found(SystemProxy {
+                protocol: Protocol::Http,
+                host: "proxy.example".into(),
+                port: 3128,
+                username: None,
+                password: None,
+            }),
+        );
+        assert!(found.contains("proxy.example:3128"), "{found}");
+        assert!(found.contains("HTTP"), "{found}");
+
+        let none = crate::state::system_proxy_message(t, Reading::None);
+        let automatic = crate::state::system_proxy_message(t, Reading::Automatic);
+        assert!(!none.is_empty() && !automatic.is_empty());
+        assert_ne!(
+            none, automatic,
+            "no proxy and a proxy chosen by a script are different answers"
+        );
+        assert_ne!(found, none);
+        assert_ne!(found, automatic);
+    }
+}
+
+/// A variable that decides the switch refuses the click instead of storing a
+/// value that would move back under the reader's hand.
+#[test]
+fn a_click_is_refused_while_the_environment_decides_the_system_proxy() {
+    let dir = std::env::temp_dir().join(format!("fp-app-system-proxy-env-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let config = dir.join("config.json");
+    let mut fixture = fixture_with_config(&config);
+    // `Settings` reads its environment once, at load, so the fixture is rebuilt
+    // rather than adjusted - the same way the Xray path's variable is tested.
+    let (settings, _) = Settings::load(crate::settings::Environment {
+        config: Some(fixture.state.settings.config_path().display().to_string()),
+        system_proxy: Some("on".to_string()),
+        ..crate::settings::Environment::default()
+    });
+    fixture.state.settings = settings;
+
+    let error = fixture
+        .state
+        .set_use_system_proxy(false)
+        .expect_err("the variable decides it");
+
+    assert!(
+        error.to_string().contains("FP_BROWSER_SYSTEM_PROXY"),
+        "{error}"
+    );
+    let notice = fixture.state.notice().expect("a banner, not a toast");
+    assert!(notice.error);
+    assert!(
+        notice.message.contains("FP_BROWSER_SYSTEM_PROXY"),
+        "{notice:?}"
+    );
+    assert!(
+        !config.exists()
+            || !std::fs::read_to_string(&config)
+                .unwrap()
+                .contains("system_proxy"),
+        "nothing was written for a click that could not take effect"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

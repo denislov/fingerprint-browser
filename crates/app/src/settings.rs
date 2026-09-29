@@ -42,6 +42,8 @@ pub const CHROMIUM_MAJOR_ENV: &str = "FP_BROWSER_CHROMIUM_MAJOR";
 pub const CONFIG_ENV: &str = "FP_BROWSER_CONFIG";
 /// The address endpoint the proxy diagnostic asks.
 pub const ECHO_URL_ENV: &str = "FP_BROWSER_ECHO_URL";
+/// Whether the engine dials the profile's proxy through this machine's.
+pub const SYSTEM_PROXY_ENV: &str = "FP_BROWSER_SYSTEM_PROXY";
 
 /// A message for the window banner: the text and whether it is an error.
 pub type Notice = (String, bool);
@@ -59,6 +61,7 @@ fn default_xray() -> PathBuf {
 pub enum SettingKey {
     DataDir,
     XrayExecutable,
+    UseSystemProxy,
     EchoUrl,
     ChromiumBin,
     ChromiumMajor,
@@ -69,9 +72,10 @@ pub enum SettingKey {
 impl SettingKey {
     /// Every key, in the order the page shows them.
     #[cfg(test)]
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::DataDir,
         Self::XrayExecutable,
+        Self::UseSystemProxy,
         Self::EchoUrl,
         Self::ChromiumBin,
         Self::ChromiumMajor,
@@ -84,6 +88,7 @@ impl SettingKey {
         match self {
             Self::DataDir => "data-dir",
             Self::XrayExecutable => "xray-executable",
+            Self::UseSystemProxy => "system-proxy",
             Self::EchoUrl => "echo-url",
             Self::ChromiumBin => "chromium-bin",
             Self::ChromiumMajor => "chromium-major",
@@ -96,6 +101,7 @@ impl SettingKey {
         match self {
             Self::DataDir => t.setting_data_dir,
             Self::XrayExecutable => t.setting_xray_executable,
+            Self::UseSystemProxy => t.setting_system_proxy,
             Self::EchoUrl => t.setting_echo_url,
             Self::ChromiumBin => t.setting_chromium_bin,
             Self::ChromiumMajor => t.setting_chromium_major,
@@ -104,7 +110,11 @@ impl SettingKey {
         }
     }
 
-    /// Whether the window may change it.
+    /// Whether the window may change it by typing a value.
+    ///
+    /// A switch is not one of these. It is drawn as the one control it is, and
+    /// this answers for the dialog that takes a typed value - both the button a
+    /// row offers and the value [`Settings::set`] accepts.
     pub fn editable(self) -> bool {
         matches!(self, Self::XrayExecutable | Self::EchoUrl)
     }
@@ -119,6 +129,10 @@ impl SettingKey {
         match self {
             Self::DataDir => Effect::NextStart,
             Self::XrayExecutable => Effect::NextStart,
+            // The engine is handed the switch when the program starts, the same
+            // way it is handed the executable: a profile started now would
+            // otherwise dial through a proxy the reader has just turned off.
+            Self::UseSystemProxy => Effect::NextStart,
             Self::RuntimeDir => Effect::Derived,
             _ => Effect::Now,
         }
@@ -183,6 +197,7 @@ impl SettingGroup {
     pub fn of(key: SettingKey) -> Self {
         match key {
             SettingKey::XrayExecutable
+            | SettingKey::UseSystemProxy
             | SettingKey::EchoUrl
             | SettingKey::ChromiumBin
             | SettingKey::ChromiumMajor => Self::Runtime,
@@ -239,6 +254,10 @@ impl Source {
 pub struct SettingRow {
     pub key: SettingKey,
     pub value: String,
+    /// The state of a row that is drawn as a switch, so the control and the
+    /// words beside it come from the same place. `None` is a row that is a value
+    /// rather than a state.
+    pub switch: Option<bool>,
     pub source: Source,
     /// The environment variable behind the value, when one decided it.
     pub env: Option<&'static str>,
@@ -288,7 +307,21 @@ struct Stored {
     /// means the expanded sidebar, which is also what a file written before the
     /// rail existed means.
     sidebar: Option<String>,
+    /// Whether the engine dials through this machine's proxy, the same way.
+    /// Absent means off, which is also what a file written before the switch
+    /// existed means.
+    system_proxy: Option<String>,
 }
+
+/// The name the switch being on is stored under.
+///
+/// A name rather than a flag in the file, the way the sidebar and the appearance
+/// are: a stored value this build does not know falls back to off instead of
+/// failing the parse, and a parse failure would cost the reader every other
+/// setting in the same file. Off is the fallback because it is what a machine
+/// that never had this setting did - a profile went straight to its own proxy -
+/// and because a config file that turns something on has to be a deliberate one.
+const SYSTEM_PROXY_ON: &str = "on";
 
 /// The name a collapsed sidebar is stored under.
 ///
@@ -304,6 +337,7 @@ const SIDEBAR_COLLAPSED: &str = "collapsed";
 pub struct Environment {
     pub data_dir: Option<String>,
     pub xray_executable: Option<String>,
+    pub system_proxy: Option<String>,
     pub echo_url: Option<String>,
     pub chromium_bin: Option<String>,
     pub chromium_major: Option<String>,
@@ -321,12 +355,22 @@ impl Environment {
         Self {
             data_dir: read(DATA_DIR_ENV),
             xray_executable: read(XRAY_BIN_ENV),
+            system_proxy: read(SYSTEM_PROXY_ENV),
             echo_url: read(ECHO_URL_ENV),
             chromium_bin: read(CHROMIUM_BIN_ENV),
             chromium_major: read(CHROMIUM_MAJOR_ENV),
             config: read(CONFIG_ENV),
             host: paths::Host::from_process(),
         }
+    }
+
+    /// Whether the variable decides the switch, and with which value.
+    ///
+    /// A word this build does not know is not a value: it is passed over the way
+    /// an unknown stored name is, so a typo in a variable does not silently turn
+    /// something on for one run and off for the next.
+    pub(super) fn use_system_proxy(&self) -> Option<bool> {
+        self.system_proxy.as_deref().and_then(switch_on)
     }
 }
 
@@ -353,6 +397,11 @@ pub struct Settings {
     /// it is the shape the window is drawn in, and the switch that changes it
     /// writes the file before the window moves.
     sidebar_collapsed: bool,
+    /// Whether the engine dials the profile's proxy through this machine's.
+    /// Resolved once, like the executable: the engine is handed it when the
+    /// program starts, and a profile started from this window was built with the
+    /// value this run began with.
+    use_system_proxy: bool,
 }
 
 impl Settings {
@@ -391,6 +440,7 @@ impl Settings {
             .sidebar
             .as_deref()
             .is_some_and(|code| code.trim().eq_ignore_ascii_case(SIDEBAR_COLLAPSED));
+        let use_system_proxy = resolve_use_system_proxy(&stored, &env);
 
         // An error is worth more than the migration note, and only one of them
         // can be set: the move either read the old file or it did not.
@@ -430,6 +480,7 @@ impl Settings {
             lang,
             exit_mode,
             sidebar_collapsed,
+            use_system_proxy,
         };
         (settings, notice)
     }
@@ -545,6 +596,51 @@ impl Settings {
         Ok(())
     }
 
+    /// Whether the engine dials the profile's proxy through this machine's.
+    pub fn use_system_proxy(&self) -> bool {
+        self.use_system_proxy
+    }
+
+    /// Whether the environment decides that switch.
+    ///
+    /// Asked before a click is acted on: the file is written *and* read for the
+    /// next start, so a click that wrote it while a variable outranked it would
+    /// change nothing at all - the switch would move back under the reader's
+    /// hand, and only the banner could say why.
+    pub fn use_system_proxy_from_env(&self) -> bool {
+        self.env.use_system_proxy().is_some()
+    }
+
+    /// Stores whether the engine dials through this machine's proxy.
+    ///
+    /// Written before it is used, like the appearance and the language: a config
+    /// file that cannot be written refuses the switch rather than showing one
+    /// that would be off again by the next start.
+    pub fn set_use_system_proxy(&mut self, use_it: bool) -> Result<(), String> {
+        if let Some(error) = &self.config_error {
+            return Err(self
+                .text()
+                .settings_cannot_write(&self.config_path.display().to_string(), error));
+        }
+        let mut stored = self.stored.clone();
+        // Removed rather than written as "off", the way the sidebar is: absent
+        // is what the file meant before this switch existed, so two spellings
+        // would be a second way to say the same thing in a file people read.
+        stored.system_proxy = use_it.then(|| SYSTEM_PROXY_ON.to_string());
+        write_config(&self.config_path, &stored, self.text())?;
+        self.stored = stored;
+        // Re-resolved rather than assigned, so a variable that is still winning
+        // keeps winning: the page then shows the value the next start will use,
+        // which is not the one just written.
+        self.use_system_proxy = resolve_use_system_proxy(&self.stored, &self.env);
+        Ok(())
+    }
+
+    /// The value the file holds, when it holds one this build understands.
+    fn stored_use_system_proxy(&self) -> Option<bool> {
+        self.stored.system_proxy.as_deref().and_then(switch_on)
+    }
+
     pub fn runtime_dir(&self) -> PathBuf {
         self.data_dir.join("runtime")
     }
@@ -585,6 +681,7 @@ impl Settings {
         vec![
             SettingRow {
                 key: SettingKey::DataDir,
+                switch: None,
                 value: self.rendered(&self.data_dir, t),
                 source: self.source_of(self.env.data_dir.is_some(), false),
                 env: self.env.data_dir.as_ref().map(|_| DATA_DIR_ENV),
@@ -596,6 +693,7 @@ impl Settings {
             },
             SettingRow {
                 key: SettingKey::XrayExecutable,
+                switch: None,
                 value: path(&self.xray_executable),
                 source: self.source_of(
                     self.env.xray_executable.is_some(),
@@ -609,7 +707,35 @@ impl Settings {
                 note: None,
             },
             SettingRow {
+                key: SettingKey::UseSystemProxy,
+                switch: Some(self.use_system_proxy),
+                value: if self.use_system_proxy {
+                    t.value_switch_on
+                } else {
+                    t.value_switch_off
+                }
+                .to_string(),
+                source: self.source_of(
+                    self.use_system_proxy_from_env(),
+                    self.stored_use_system_proxy().is_some(),
+                ),
+                env: self.env.use_system_proxy().map(|_| SYSTEM_PROXY_ENV),
+                // The stored value is a name in the file rather than a word on
+                // the page, so it is shown as the state it means.
+                shadowed: shadowed(&self.stored.system_proxy, self.use_system_proxy_from_env())
+                    .and_then(|stored| switch_on(&stored))
+                    .map(|on| {
+                        if on {
+                            t.value_switch_on.to_string()
+                        } else {
+                            t.value_switch_off.to_string()
+                        }
+                    }),
+                note: Some(t.help_system_proxy.to_string()),
+            },
+            SettingRow {
                 key: SettingKey::EchoUrl,
+                switch: None,
                 value: self.echo_url.clone(),
                 source: self.source_of(self.env.echo_url.is_some(), self.stored.echo_url.is_some()),
                 env: self.env.echo_url.as_ref().map(|_| ECHO_URL_ENV),
@@ -618,6 +744,7 @@ impl Settings {
             },
             SettingRow {
                 key: SettingKey::ChromiumBin,
+                switch: None,
                 value: self
                     .env
                     .chromium_bin
@@ -634,6 +761,7 @@ impl Settings {
             },
             SettingRow {
                 key: SettingKey::ChromiumMajor,
+                switch: None,
                 value: self
                     .env
                     .chromium_major
@@ -650,6 +778,7 @@ impl Settings {
             },
             SettingRow {
                 key: SettingKey::ConfigFile,
+                switch: None,
                 value: path(&self.config_path),
                 source: if self.env.config.is_some() {
                     Source::Environment
@@ -662,6 +791,7 @@ impl Settings {
             },
             SettingRow {
                 key: SettingKey::RuntimeDir,
+                switch: None,
                 value: path(&self.runtime_dir()),
                 source: Source::Derived,
                 env: None,
@@ -744,6 +874,10 @@ impl Settings {
         match key {
             SettingKey::XrayExecutable if self.env.xray_executable.is_some() => None,
             SettingKey::XrayExecutable => self.stored.xray_executable.clone(),
+            // Stored as a name, reported as the state it means: what is waiting
+            // on a restart is a switch, not a word in a file.
+            SettingKey::UseSystemProxy if self.use_system_proxy_from_env() => None,
+            SettingKey::UseSystemProxy => self.stored_use_system_proxy().map(|on| on.to_string()),
             _ => None,
         }
     }

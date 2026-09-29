@@ -1,4 +1,5 @@
 use crate::error::ProxyError;
+use crate::system_proxy::{self, SystemProxy};
 use domain::{ProxyOutbound, ProxyProfile, StreamSettings};
 use serde_json::json;
 use std::fs;
@@ -9,6 +10,13 @@ use std::path::Path;
 /// credentials, so a run that is killed has to clear it on the way back in.
 pub const XRAY_CONFIG_FILE: &str = "xray.json";
 
+/// The tag of the outbound that is the machine's own proxy.
+///
+/// One name for both halves of the link: the profile's outbound names it as the
+/// dialler, and the outbound itself carries it. Nothing else in a generated
+/// config is tagged, so there is no other name it could collide with.
+const SYSTEM_PROXY_TAG: &str = "system-proxy";
+
 pub trait XrayConfigBuilder: Send + Sync {
     fn build(
         &self,
@@ -18,12 +26,55 @@ pub trait XrayConfigBuilder: Send + Sync {
     ) -> Result<(), ProxyError>;
 }
 
+/// Where the first hop of a generated config is read from.
 #[derive(Debug, Default)]
-pub struct DefaultXrayConfigBuilder;
+enum Source {
+    /// The profile's proxy is dialled directly.
+    #[default]
+    Off,
+    /// Read from the machine as the config is written, so a machine whose proxy
+    /// changed since this program started is still read as it is now.
+    Host,
+    /// A reading fixed by a test.
+    #[cfg(test)]
+    Fixed(system_proxy::Reading),
+}
+
+#[derive(Debug, Default)]
+pub struct DefaultXrayConfigBuilder {
+    system_proxy: Source,
+}
 
 impl DefaultXrayConfigBuilder {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Whether the profile's proxy is reached through the machine's own.
+    ///
+    /// Read while the config is written, so what is used is the machine's proxy
+    /// now rather than the one it had when this program started.
+    pub fn with_system_proxy(mut self, use_it: bool) -> Self {
+        self.system_proxy = if use_it { Source::Host } else { Source::Off };
+        self
+    }
+
+    /// The machine's proxy, when this builder was asked for one and has one.
+    ///
+    /// A machine that chooses its proxy with a script is not an error here: the
+    /// engine dials the profile's proxy directly, which is what a machine with
+    /// no proxy at all does, and the page is where the difference is reported.
+    fn hop(&self) -> Option<SystemProxy> {
+        let reading = match &self.system_proxy {
+            Source::Off => return None,
+            Source::Host => system_proxy::detect(),
+            #[cfg(test)]
+            Source::Fixed(reading) => reading.clone(),
+        };
+        match reading {
+            system_proxy::Reading::Found(proxy) => Some(proxy),
+            system_proxy::Reading::Automatic | system_proxy::Reading::None => None,
+        }
     }
 }
 
@@ -143,8 +194,29 @@ impl XrayConfigBuilder for DefaultXrayConfigBuilder {
             }),
         };
 
-        if let Some(stream) = proxy.outbound.stream().and_then(stream_json) {
+        // The machine's own proxy, when the reader asked for it and the machine
+        // has one the engine can dial. The profile's outbound is then reached
+        // through it, which is the whole of what the setting does.
+        let hop = self.hop();
+        let mut stream = proxy.outbound.stream().and_then(stream_json);
+        if hop.is_some() {
+            // `sockopt` is where the engine reads the tag it should dial
+            // through, and the object has to exist even when the stream is
+            // otherwise plain: a profile with no TLS and no transport is exactly
+            // the case where `streamSettings` would not be written at all.
+            let settings = stream.get_or_insert_with(|| json!({}));
+            if let Some(object) = settings.as_object_mut() {
+                object.insert("sockopt".into(), json!({ "dialerProxy": SYSTEM_PROXY_TAG }));
+            }
+        }
+
+        if let Some(stream) = stream {
             outbound["streamSettings"] = stream;
+        }
+
+        let mut outbounds = vec![outbound];
+        if let Some(hop) = hop {
+            outbounds.push(system_proxy_outbound(&hop));
         }
 
         let config = json!({
@@ -152,7 +224,7 @@ impl XrayConfigBuilder for DefaultXrayConfigBuilder {
                 "loglevel": "warning"
             },
             "inbounds": [inbound],
-            "outbounds": [outbound]
+            "outbounds": outbounds
         });
 
         if let Some(parent) = output_path.parent() {
@@ -177,6 +249,29 @@ impl XrayConfigBuilder for DefaultXrayConfigBuilder {
 
         Ok(())
     }
+}
+
+/// The outbound that is the machine's own proxy.
+///
+/// Written after the profile's outbound, and named by it: the engine resolves
+/// `dialerProxy` by tag, so the order of the two does not matter, but a reader
+/// of a generated config reads the profile first and the hop it uses second.
+fn system_proxy_outbound(proxy: &SystemProxy) -> serde_json::Value {
+    let mut users = Vec::new();
+    if let (Some(user), Some(pass)) = (&proxy.username, &proxy.password) {
+        users.push(json!({ "user": user, "pass": pass }));
+    }
+    json!({
+        "protocol": proxy.protocol.engine_name(),
+        "tag": SYSTEM_PROXY_TAG,
+        "settings": {
+            "servers": [{
+                "address": proxy.host,
+                "port": proxy.port,
+                "users": users
+            }]
+        }
+    })
 }
 
 /// The `streamSettings` object, or `None` when nothing but the engine's own
@@ -300,7 +395,7 @@ mod tests {
             outbound,
         };
         let path = std::env::temp_dir().join(format!("fp-xray-check-{}.json", proxy.id));
-        DefaultXrayConfigBuilder
+        DefaultXrayConfigBuilder::new()
             .build(&proxy, 12345, &path)
             .unwrap();
         let config = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -500,7 +595,7 @@ mod tests {
                 outbound,
             };
             let path = std::env::temp_dir().join(format!("fp-xray-{}.json", proxy.id));
-            DefaultXrayConfigBuilder
+            DefaultXrayConfigBuilder::new()
                 .build(&proxy, 12345, &path)
                 .unwrap();
             let config: serde_json::Value =
@@ -538,10 +633,179 @@ mod tests {
         };
         let path = std::env::temp_dir().join(format!("fp-xray-{}.json", proxy.id));
         assert!(
-            DefaultXrayConfigBuilder
+            DefaultXrayConfigBuilder::new()
                 .build(&proxy, 12345, &path)
                 .is_err()
         );
         assert!(!path.exists());
+    }
+
+    /// A profile that writes no stream settings of its own, so the hop's own
+    /// block is the only one there is to read.
+    fn plain_outbound() -> ProxyOutbound {
+        ProxyOutbound::Shadowsocks(ShadowsocksOutbound {
+            host: "node.example".into(),
+            port: 8388,
+            password: "secret".into(),
+            method: "aes-256-gcm".into(),
+            stream: StreamSettings::plain(),
+        })
+    }
+
+    fn machine_proxy(protocol: system_proxy::Protocol, credentials: bool) -> SystemProxy {
+        SystemProxy {
+            protocol,
+            host: "machine.example".into(),
+            port: 3128,
+            username: credentials.then(|| "user".to_string()),
+            password: credentials.then(|| "secret".to_string()),
+        }
+    }
+
+    /// Builds the config a machine's reading produces.
+    ///
+    /// The reading is given to the builder instead of being read, so a test says
+    /// what the machine has rather than depending on the machine it runs on.
+    fn config_with_reading(
+        outbound: ProxyOutbound,
+        reading: system_proxy::Reading,
+    ) -> serde_json::Value {
+        let proxy = ProxyProfile {
+            id: ProxyId::new(),
+            name: "test".into(),
+            outbound,
+        };
+        let path = std::env::temp_dir().join(format!("fp-xray-hop-{}.json", proxy.id));
+        DefaultXrayConfigBuilder {
+            system_proxy: Source::Fixed(reading),
+        }
+        .build(&proxy, 12345, &path)
+        .unwrap();
+        let config = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        fs::remove_file(path).unwrap();
+        config
+    }
+
+    #[test]
+    fn the_machine_proxy_is_an_outbound_the_profile_dials_through() {
+        let config = config_with_reading(
+            plain_outbound(),
+            system_proxy::Reading::Found(machine_proxy(system_proxy::Protocol::Http, false)),
+        );
+        // The profile's outbound is what it was, plus the one field that names
+        // the hop, and the hop is written after it.
+        assert_eq!(config["outbounds"][0]["protocol"], "shadowsocks");
+        assert_eq!(
+            config["outbounds"][0]["streamSettings"]["sockopt"]["dialerProxy"],
+            "system-proxy"
+        );
+        assert_eq!(config["outbounds"][1]["protocol"], "http");
+        assert_eq!(config["outbounds"][1]["tag"], "system-proxy");
+        assert_eq!(
+            config["outbounds"][1]["settings"]["servers"][0]["address"],
+            "machine.example"
+        );
+        assert_eq!(
+            config["outbounds"][1]["settings"]["servers"][0]["port"],
+            3128
+        );
+        assert_eq!(
+            config["outbounds"][1]["settings"]["servers"][0]["users"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn a_socks_hop_carries_the_credentials_the_machine_gave_it() {
+        let config = config_with_reading(
+            plain_outbound(),
+            system_proxy::Reading::Found(machine_proxy(system_proxy::Protocol::Socks5, true)),
+        );
+        assert_eq!(config["outbounds"][1]["protocol"], "socks");
+        assert_eq!(
+            config["outbounds"][1]["settings"]["servers"][0]["users"][0],
+            json!({"user": "user", "pass": "secret"})
+        );
+    }
+
+    #[test]
+    fn a_profile_with_stream_settings_of_its_own_keeps_them_beside_the_hop() {
+        let config = config_with_reading(
+            ProxyOutbound::Vmess(VmessOutbound {
+                host: "node.example".into(),
+                port: 443,
+                uuid: "the-uuid".into(),
+                security: "auto".into(),
+                alter_id: 0,
+                stream: StreamSettings {
+                    network: StreamNetwork::Ws,
+                    security: StreamSecurity::Tls,
+                    ws: Some(WsSettings {
+                        path: Some("/ws".into()),
+                        host: Some("front.example".into()),
+                    }),
+                    ..Default::default()
+                },
+            }),
+            system_proxy::Reading::Found(machine_proxy(system_proxy::Protocol::Http, false)),
+        );
+        let stream = &config["outbounds"][0]["streamSettings"];
+        assert_eq!(stream["network"], "ws");
+        assert_eq!(stream["security"], "tls");
+        assert_eq!(stream["wsSettings"]["path"], "/ws");
+        assert_eq!(stream["sockopt"]["dialerProxy"], "system-proxy");
+    }
+
+    /// The config a machine with a proxy produces is one the real engine reads.
+    ///
+    /// Opt-in, and here rather than beside the other real-engine tests, because
+    /// what a machine has is fixed by this module's own test-only source:
+    ///
+    /// `XRAY_BIN=/path/to/xray cargo test -p runtime --lib a_hop -- --ignored`
+    #[test]
+    #[ignore = "requires XRAY_BIN pointing to a real Xray executable"]
+    fn a_hop_config_is_one_the_real_engine_accepts() {
+        let executable = std::env::var_os("XRAY_BIN").expect("set XRAY_BIN");
+        let proxy = ProxyProfile {
+            id: ProxyId::new(),
+            name: "real".into(),
+            outbound: ProxyOutbound::Socks5(Socks5Outbound {
+                host: "127.0.0.1".into(),
+                port: 19001,
+                username: None,
+                password: None,
+            }),
+        };
+        let path = std::env::temp_dir().join("fp-xray-hop-real.json");
+        DefaultXrayConfigBuilder {
+            system_proxy: Source::Fixed(system_proxy::Reading::Found(machine_proxy(
+                system_proxy::Protocol::Socks5,
+                true,
+            ))),
+        }
+        .build(&proxy, 19080, &path)
+        .unwrap();
+
+        let status = std::process::Command::new(&executable)
+            .args(["run", "-test", "-config"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(status.success(), "the engine refused a generated config");
+    }
+
+    #[test]
+    fn nothing_is_written_when_the_machine_has_no_proxy_or_chooses_one_by_script() {
+        // A script is not a proxy this can dial, and the difference between the
+        // two readings is the page's to report, not the config's to guess at.
+        for reading in [
+            system_proxy::Reading::None,
+            system_proxy::Reading::Automatic,
+        ] {
+            let config = config_with_reading(plain_outbound(), reading);
+            assert_eq!(config["outbounds"].as_array().unwrap().len(), 1);
+            assert!(config["outbounds"][0].get("streamSettings").is_none());
+        }
     }
 }

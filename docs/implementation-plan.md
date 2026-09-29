@@ -11,7 +11,7 @@ statements there are not current TODOs.
 | --- | --- |
 | Workspace/domain/storage | Five Rust crates, domain validation, SQLite repositories/migrations |
 | Direct runtime | Independent profiles, CDP readiness, cancel/stop/restart, graceful close and crashes |
-| Xray | Per-profile process, six outbound builders, transport/TLS settings, fail-closed cleanup |
+| Xray | Per-profile process, six outbound builders, transport/TLS settings, fail-closed cleanup, and a profile's proxy reached through this machine's own proxy when the reader asks for it |
 | Proxy diagnostics | One real request per test: exit address or a classified fault, through a temporary engine or one already running |
 | Fingerprints | Version/capability checks, warnings, live read-back; Linux 142/144/148 measured; the read-back also reports the address a running browser's own traffic leaves from |
 | Desktop UI | Profile forms, core/proxy management, link import, proxy tests, settings, runtime details, logs, a profile-list filter, a dark/light appearance switch and an English/Chinese language switch |
@@ -108,6 +108,57 @@ fingerprint back is the neighbouring check, not a substitute.
   proxy has nothing to ask and is queued at once. The command is never queued
   first and checked afterwards: a launch that goes ahead produces a browser that
   is already running by the time anybody knows the proxy is down.
+
+## The machine's proxy
+
+The gap this closed: a profile's proxy is often reachable only through the proxy
+the machine itself uses - work where the profile's node is outside and the
+machine's proxy is the only way out. The program dialled the profile's proxy
+directly, so such a profile could not start at all, and the only way out was to
+point that profile's proxy somewhere else.
+
+- `runtime::system_proxy` answers what this machine uses: the process's
+  environment first (`all_proxy`, `https_proxy`, `http_proxy`, either case), and
+  then the platform's own setting - GNOME through `gsettings`, macOS through
+  `scutil --proxy`, Windows through the current user's `Internet Settings`. Three
+  answers stay apart: a proxy, a proxy chosen by a script (PAC, WPAD), and
+  nothing. The middle one is not "nothing": a reader who turned the switch on and
+  watched nothing happen is owed the difference between a machine with no proxy
+  and a machine whose proxy this program cannot read. KDE's own store is
+  deliberately not read - a file whose keys have changed shape between releases -
+  and the environment is the answer there instead.
+- Only a first hop the engine has an outbound for is read, HTTP (CONNECT) and
+  SOCKS5, because the chain is one engine outbound naming another:
+  `streamSettings.sockopt.dialerProxy` on the profile's outbound points at a
+  second outbound that is the machine's proxy. Nothing else about a generated
+  config changes. The profile's outbound is written first and the hop second,
+  which the engine does not require - it resolves the name - but which is the
+  order a reader of a generated config wants.
+- The switch is stored like the Xray executable and read when the program starts,
+  so a launch already queueing does not move under the reader; the machine's proxy
+  itself is read while each config is written, so a machine whose proxy changed
+  needs no restart. It is off unless asked for, and `FP_BROWSER_SYSTEM_PROXY`
+  decides it ahead of the config file for a machine whose proxy is stored
+  somewhere this does not read. A click while that variable is set is refused by
+  name rather than storing a value that outranked itself.
+- A proxy that was found is used or the connection fails: measured against a real
+  engine, a hop that cannot be reached resets the connection and never falls back
+  to dialling the profile's proxy directly. A machine with nothing readable goes
+  on dialling the profile's proxy directly, which is what the switch found when it
+  was turned on and what the toast says at the time.
+- Two limits are named rather than discovered. The profile's host name is handed
+  to the machine's proxy as written, so that name is resolved by the proxy. And an
+  HTTP first hop cannot carry UDP: a Shadowsocks or SOCKS5 profile that tunnels
+  UDP loses it, per connection, rather than sending it around the chain. The
+  inbound keeps UDP either way, because a stream protocol can tunnel its own.
+
+Not established, and deliberately not claimed: that a chain like this hides
+anything, or that every protocol a profile uses survives the extra hop. The chain,
+the credentials, the UDP case and the absent fallback were measured against Xray
+26.2.6 with a stand-in pair of proxies, and an opt-in test (`XRAY_BIN=... cargo
+test -p runtime --lib a_hop -- --ignored`) runs a generated config through
+`xray run -test`. The Windows and macOS readers are parsed from `reg query` and
+`scutil --proxy` output and have not been run on those systems.
 
 ## Runtime exit read-back
 

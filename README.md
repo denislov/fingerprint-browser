@@ -152,6 +152,50 @@ itself, **Stop**, an edit to the proxy that was being asked, or a deadline - so 
 check that never reports cannot leave a profile unstartable. The cost is one round
 trip per launch; the alternative is a browser that runs, looks healthy, and leaks.
 
+### Through this machine's proxy
+
+A machine that reaches the internet through a proxy of its own needs both hops:
+the profile's proxy is somewhere outside, and the machine's proxy is the only way
+to it. **Use system proxy**, on the Settings page under Runtime, puts that first
+hop in front of the profile's - the engine dials the profile's proxy through the
+machine's proxy, and nothing else about a launch changes. A profile with no proxy
+is untouched, and so is a machine the switch was left off on.
+
+What can be read is a TCP proxy: an HTTP one, which the engine sends `CONNECT`
+to, or a SOCKS5 one. An `https://` proxy URL is read as a plain HTTP proxy on the
+same host and port, because what TLS means in such a URL is a TLS connection *to
+the proxy*, which the engine has no setting for - the endpoint is kept, so a
+proxy that cannot be spoken to fails visibly instead of being quietly passed
+over. The answer is taken in this order, and the first one found is the one used:
+
+| Source | Where it is read |
+| --- | --- |
+| The environment | `all_proxy`, then `https_proxy`, then `http_proxy`, either case |
+| Linux | GNOME's setting, through `gsettings` |
+| macOS | `scutil --proxy` |
+| Windows | The current user's Internet Settings, through `reg query` |
+
+`FP_BROWSER_SYSTEM_PROXY` decides the switch ahead of the config file, for a
+machine whose proxy is stored somewhere this does not read - KDE's own setting,
+for one. A proxy chosen by a script is not read: a PAC file or WPAD discovery is
+reported as exactly that when the switch is turned on, rather than as a machine
+with no proxy, because the two need different things from the reader.
+
+Two consequences are worth knowing before turning it on. The system proxy is
+handed the profile's host name as written, so that name is resolved by the proxy
+and not here. And an HTTP system proxy cannot carry UDP: a profile that tunnels
+UDP itself - Shadowsocks, SOCKS5 - loses it under that combination, with
+per-connection errors rather than a silent direct path.
+
+The switch is read when the program starts, like the Xray executable - the row
+says *next start* - while the machine's proxy is read again for every config
+written, so a machine whose proxy changed needs no restart. That reading is what
+decides the hop: a proxy that was found is used, and one that cannot be reached
+fails the connection rather than falling back to this machine's own route; a
+machine with nothing this program can read keeps dialling the profile's proxy
+directly, which is what it did before the switch existed, and turning the switch
+on is where that is reported.
+
 ### Where a browser's own traffic leaves from
 
 Testing a proxy establishes what the *proxy* does. It cannot establish that a
@@ -244,6 +288,7 @@ and is the first line of the activity log.
 | FP_BROWSER_CONFIG | Config file path, for a test or a script | `<data dir>/config.json` |
 | FP_BROWSER_DATA_DIR | Database, profiles, logs, runtime files, config file and exports | Platform application-data directory |
 | FP_BROWSER_ECHO_URL | Address endpoint a proxy test asks | http://api.ipify.org |
+| FP_BROWSER_SYSTEM_PROXY | Decides **Use system proxy**: on/off, ahead of the config file | Off |
 | FP_BROWSER_XRAY_BIN | Proxy executable | bin/xray.exe on Windows; bin/xray elsewhere |
 
 Data defaults to %LOCALAPPDATA%\FpBrowser on Windows, $XDG_DATA_HOME/FpBrowser

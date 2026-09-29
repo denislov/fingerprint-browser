@@ -289,7 +289,16 @@ fn a_proxy_can_be_tested_with_nothing_running() {
     assert!(!job.is_live());
     assert_eq!(
         job.echo_url,
-        fixture.state.setting_rows()[2].value,
+        // Found by key rather than by position: the page's order is the page's
+        // business, and a row inserted above this one is not a change to which
+        // endpoint a test asks.
+        fixture
+            .state
+            .setting_rows()
+            .into_iter()
+            .find(|row| row.key == crate::settings::SettingKey::EchoUrl)
+            .expect("a row for the endpoint")
+            .value,
         "the endpoint is the configured one"
     );
     assert!(

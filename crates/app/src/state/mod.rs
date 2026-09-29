@@ -22,7 +22,7 @@ mod proxies;
 mod releases;
 mod xray_releases;
 use crate::proxy_tester::ProxyTestJob;
-use crate::settings::{SettingGroup, SettingKey, SettingRow, Settings};
+use crate::settings::{SYSTEM_PROXY_ENV, SettingGroup, SettingKey, SettingRow, Settings};
 use crate::text::{Lang, Text, text};
 use crate::theme::ThemeChoice;
 use crate::verifier::{EgressJob, VerificationJob, VerificationReport};
@@ -36,6 +36,7 @@ use domain::{
     RuntimeState,
 };
 pub use releases::{ReleaseDownload, ReleaseStatus};
+use runtime::system_proxy::{self, Reading};
 use runtime::{Diagnosis, Discrepancy, Fault, RuntimeComponent, RuntimeEvent, RuntimeSnapshot};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -763,6 +764,40 @@ impl AppState {
         result
     }
 
+    /// Stores that switch, and reports what this machine turned out to have.
+    ///
+    /// The reading is taken here, once, rather than while the page is drawn: on
+    /// every platform but one it is a process to spawn, and a page is drawn many
+    /// times a second. That is also why the sentence says more than "saved" - a
+    /// switch that is on while the machine has no proxy it can read would
+    /// otherwise look like it had done something.
+    pub fn set_use_system_proxy(&mut self, use_it: bool) -> Result<(), AppError> {
+        let t = self.text();
+        // The variable outranks the file, so a click that stored the other
+        // value would move back under the reader's hand, and the page would be
+        // showing a state the next start does not use. Refused, by name.
+        if self.settings.use_system_proxy_from_env() {
+            let message = t.system_proxy_from_env(SYSTEM_PROXY_ENV);
+            self.set_notice(Notice::error(message.clone()));
+            return Err(AppError::Conflict(message));
+        }
+        let result = self
+            .settings
+            .set_use_system_proxy(use_it)
+            .map_err(AppError::Conflict);
+        match &result {
+            Ok(()) if use_it => self.set_notice(Notice::info(system_proxy_message(
+                t,
+                system_proxy::detect(),
+            ))),
+            Ok(()) => self.set_notice(Notice::info(
+                t.setting_saved(t.setting_system_proxy, SettingKey::UseSystemProxy.effect()),
+            )),
+            Err(error) => self.set_notice(Notice::error(error.to_string())),
+        }
+        result
+    }
+
     /// Ends this run with every running session left running.
     ///
     /// The browsers and the tunnels stay, and the runtime marks their records so
@@ -895,6 +930,22 @@ fn component_label(component: RuntimeComponent) -> &'static str {
     match component {
         RuntimeComponent::Browser => "browser",
         RuntimeComponent::Xray => "xray",
+    }
+}
+
+/// What turning "use system proxy" on says about this machine.
+///
+/// A function of the reading rather than of the machine, so the three answers
+/// can be read side by side in a test: what the page says about a machine with
+/// no proxy has to differ from what it says about one that chooses its proxy
+/// with a script, because only the second is a limitation worth naming.
+fn system_proxy_message(t: &Text, reading: Reading) -> String {
+    match reading {
+        Reading::Found(proxy) => {
+            t.system_proxy_enabled_found(proxy.protocol.label(), &proxy.address())
+        }
+        Reading::Automatic => t.system_proxy_enabled_automatic.to_string(),
+        Reading::None => t.system_proxy_enabled_none.to_string(),
     }
 }
 

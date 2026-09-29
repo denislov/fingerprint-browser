@@ -120,7 +120,7 @@ fn a_real_engine_reports_where_a_real_request_left_from() {
 
     let outcome = diagnose_proxy(
         &SocksEchoClient,
-        &DefaultXrayConfigBuilder,
+        &DefaultXrayConfigBuilder::new(),
         &proxy,
         &DiagnosticRequest {
             engine: Engine::Temporary {
@@ -168,7 +168,7 @@ fn an_upstream_that_cannot_reach_the_target_is_a_fault_not_a_reading() {
 
     let outcome = diagnose_proxy(
         &SocksEchoClient,
-        &DefaultXrayConfigBuilder,
+        &DefaultXrayConfigBuilder::new(),
         &proxy,
         &DiagnosticRequest {
             engine: Engine::Temporary {

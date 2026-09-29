@@ -285,6 +285,7 @@ catalog! {
     // ---- the Settings rows ----
     setting_data_dir => "Data directory" => "数据目录";
     setting_xray_executable => "Xray executable" => "Xray 可执行文件";
+    setting_system_proxy => "Use system proxy" => "使用系统代理";
     setting_echo_url => "Proxy test endpoint" => "代理测试端点";
     setting_chromium_bin => "Chromium binary" => "Chromium 可执行文件";
     setting_chromium_major => "Chromium major override" => "Chromium 主版本号覆盖";
@@ -334,6 +335,8 @@ catalog! {
 
     value_not_set_path => "not set; discovered on PATH" => "未设置；在 PATH 中查找";
     value_not_set_versions => "not set; read from each binary" => "未设置；从各可执行文件读取";
+    value_switch_on => "On" => "开启";
+    value_switch_off => "Off" => "关闭";
 
     help_echo_url => "asked to report the address a connection left from, so it sees that address; asked only when you run a proxy test"
         => "被要求报告连接从哪个地址出去，因此它会看到该地址；只有运行代理测试时才会被问到";
@@ -347,6 +350,15 @@ catalog! {
         => "数据库、日志、档案与本配置文件所在的位置；想换目录请在启动前设置 FP_BROWSER_DATA_DIR";
     help_xray_executable_field => "Used when a profile has a proxy. The running process keeps the executable it started with."
         => "档案使用代理时会用到它。正在运行的进程仍使用它启动时的那一个。";
+    help_system_proxy => "Xray reaches a profile's proxy through this machine's proxy, when this machine has one it can read. Profiles without a proxy are unaffected."
+        => "本机存在可读取的代理时，Xray 经过它去连接档案的代理。不用代理的档案不受影响。";
+    // Why the switch did nothing visible. The two are different answers and are
+    // worded apart: one machine has no proxy, the other has one chosen by a
+    // script, and only the second is a limitation worth naming.
+    system_proxy_enabled_none => "Saved. No system proxy was found on this machine, so a profile still reaches its own proxy directly - until a launch finds one, which needs no restart."
+        => "已保存。本机未发现系统代理，档案仍直接连接自己的代理；某次启动时若读到代理就会用上，不需要重启。";
+    system_proxy_enabled_automatic => "Saved. This machine chooses its proxy with a script, which this program does not read, so profiles go on reaching their own proxy directly."
+        => "已保存。本机用脚本选择代理，本程序不读取该脚本，因此档案仍直接连接自己的代理。";
     help_runtime_dir => "temporary launch files; Xray configs are removed on shutdown"
         => "临时启动文件；Xray 配置在退出时删除";
 

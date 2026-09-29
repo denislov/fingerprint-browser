@@ -49,6 +49,31 @@ impl Text {
         }
     }
 
+    /// What turning "use system proxy" on reports about this machine.
+    ///
+    /// The reading is taken when the switch is flipped, once, rather than while
+    /// the page is drawn: on every platform but one it is a process to spawn.
+    /// The sentence says when it starts applying, because a profile that is
+    /// already running does not move.
+    pub fn system_proxy_enabled_found(&self, protocol: &str, address: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "Saved. From the next start, Xray reaches each profile's proxy through this machine's {protocol} proxy at {address}."
+            ),
+            Lang::Zh => format!(
+                "已保存。下次启动起，Xray 经过本机的 {protocol} 代理 {address} 去连接各档案的代理。"
+            ),
+        }
+    }
+
+    /// Why a click on that switch cannot do anything: a variable decides it.
+    pub fn system_proxy_from_env(&self, env: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{env} decides this setting; unset it to choose here"),
+            Lang::Zh => format!("该项设置由 {env} 决定；取消它才能在此选择"),
+        }
+    }
+
     /// The value the field opens with, so a "change" does not look like a blank
     /// field that is about to erase what is there.
     pub fn setting_now(&self, now: &str) -> String {

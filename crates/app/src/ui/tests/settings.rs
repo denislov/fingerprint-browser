@@ -1001,3 +1001,49 @@ fn the_close_question_counts_what_is_running(cx: &mut TestAppContext) {
         asked[0]
     );
 }
+
+/// The row that is a switch draws the control, and clicking it stores the other
+/// state - which is the next start's engine, not this one's.
+#[gpui_kit::test]
+fn the_system_proxy_row_switches_and_stores_the_choice(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = std::env::temp_dir().join(format!("fp-ui-system-proxy-{}", std::process::id()));
+    let (view, _) = view_with_config(cx, &dir.join("config.json"));
+    let cx = window(cx, &view);
+
+    cx.update(|window, cx| window.click("nav-Settings", cx));
+    settle(cx);
+    scroll_settings_to(cx, "switch-setting-system-proxy");
+
+    let row = |cx: &mut gpui_kit::VisualTestContext| {
+        view.read_with(cx, |view, _| {
+            view.state()
+                .setting_rows()
+                .into_iter()
+                .find(|row| row.key == crate::settings::SettingKey::UseSystemProxy)
+                .expect("a row for the switch")
+        })
+    };
+    assert_eq!(row(cx).switch, Some(false), "off until it is turned on");
+    assert_eq!(
+        row(cx).key.effect().label(en()),
+        "next start",
+        "the row says the engine is handed the switch at the next start"
+    );
+
+    cx.update(|window, cx| window.click("switch-setting-system-proxy", cx));
+    settle(cx);
+
+    let row = row(cx);
+    assert_eq!(row.switch, Some(true), "the click stored the other state");
+    assert_eq!(row.value, "On");
+    assert_eq!(row.source, crate::settings::Source::ConfigFile);
+    assert!(
+        std::fs::read_to_string(dir.join("config.json"))
+            .expect("the file the click wrote")
+            .contains("system_proxy"),
+        "the choice was written down rather than only shown"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -48,8 +48,8 @@ use gpui_kit::component::Root;
 use gpui_kit::*;
 use proxy_tester::{ProxyTester, XrayProxyTester};
 use runtime::{
-    ChannelRuntimeFacade, RuntimeCommand, RuntimeFacade, RuntimeSupervisor,
-    RuntimeSupervisorChannels, SupervisorComponents,
+    ChannelRuntimeFacade, DefaultXrayConfigBuilder, RuntimeCommand, RuntimeFacade,
+    RuntimeSupervisor, RuntimeSupervisorChannels, SupervisorComponents,
 };
 use state::{AppState, Services};
 use std::collections::HashMap;
@@ -201,6 +201,14 @@ fn main() {
     let components = SupervisorComponents {
         xray_executable: settings.xray_executable().to_path_buf(),
         runtime_dir: settings.runtime_dir(),
+        // The switch is baked in here, the way the executable is: the engine is
+        // handed it when the program starts, and a profile started from this
+        // window was built with the value this run began with. The machine's
+        // proxy itself is read afresh for every config this writes, so a machine
+        // whose proxy changes does not need this program restarted.
+        xray_builder: Box::new(
+            DefaultXrayConfigBuilder::new().with_system_proxy(settings.use_system_proxy()),
+        ),
         ..SupervisorComponents::default()
     };
 
@@ -249,10 +257,16 @@ fn main() {
     // supervisor: it has to be able to run before anything is launched, and it
     // must never stop an engine a profile is using. Its temporary config lands
     // in the same runtime directory, so a killed run leaves nothing new behind.
-    let proxy_tester: Arc<dyn ProxyTester> = Arc::new(XrayProxyTester::new(
-        settings.xray_executable().to_path_buf(),
-        settings.runtime_dir(),
-    ));
+    let proxy_tester: Arc<dyn ProxyTester> = Arc::new(
+        XrayProxyTester::new(
+            settings.xray_executable().to_path_buf(),
+            settings.runtime_dir(),
+        )
+        // The same hop the launch would use: a test that took a shorter path
+        // than a start would pass where the start fails, which is the one thing
+        // a test must not do.
+        .with_system_proxy(settings.use_system_proxy()),
+    );
 
     // The two halves of downloading a core: what the repository has published,
     // and turning one of its files into a directory with a browser in it. Both

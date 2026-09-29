@@ -12,6 +12,41 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
 
+### Added
+
+- **Use system proxy** on the Settings page (Runtime): a machine that reaches the
+  internet through a proxy of its own now gets both hops. With the switch on, the
+  engine dials the profile's proxy *through* this machine's proxy instead of
+  connecting to it directly, which is what a profile whose proxy is only
+  reachable that way needs. The reading is taken from the process's environment
+  first (`all_proxy`, then `https_proxy`, then `http_proxy`, either case), and
+  then from the platform's own setting - GNOME through `gsettings`, macOS through
+  `scutil --proxy`, Windows through `reg query` - and turning the switch on
+  reports, once, as a toast, which of the three answers this machine gave: the
+  address that was found, that a proxy is chosen by a script and cannot be read,
+  or that nothing was found. A machine with nothing to find is not an error; the
+  switch stays on for a machine whose proxy appears later, and the reading is
+  taken once per click rather than while the page is drawn, because on three of
+  the four platforms it is a process to spawn.
+- The switch is baked in at start, like the Xray executable: the row says *next
+  start*, and a config is built with the value the run began with, while the
+  machine's proxy itself is read afresh for every launch, so changing the proxy
+  on the machine needs no restart. A proxy test uses the same hop a launch would,
+  so a test cannot pass where the launch fails. `FP_BROWSER_SYSTEM_PROXY` (`on`,
+  `off`, and the words a switch is otherwise spelled with) decides the switch
+  ahead of the config file for a machine whose proxy is stored somewhere this
+  does not read - KDE's setting, for one - and while it is set a click on the
+  switch is refused by name rather than storing a value that would move back
+  under the reader's hand. What is deliberately not read is a proxy chosen by a
+  script: a PAC file or WPAD is reported as itself, and a machine with nothing
+  readable goes on dialling the profile's proxy directly, which is what the toast
+  says when the switch is turned on. See
+  [through this machine's proxy](README.md#through-this-machines-proxy) for that
+  and for the two consequences worth knowing first - an HTTP hop resolves the
+  profile's host name rather than this machine doing it, and an HTTP hop cannot
+  carry UDP, so a profile that tunnels UDP itself fails the connection instead of
+  leaking around the proxy.
+
 ## [0.3.0] - 2026-09-29
 
 ### Added

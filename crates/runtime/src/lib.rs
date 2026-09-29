@@ -12,6 +12,7 @@ pub mod planner;
 pub mod ports;
 pub mod process;
 pub mod supervisor;
+pub mod system_proxy;
 pub mod verify;
 pub mod version;
 pub mod xray;

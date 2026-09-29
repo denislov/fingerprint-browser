@@ -116,7 +116,7 @@ fn authenticated_socks_and_http_upstreams_forward_payload() {
         let config = std::env::temp_dir().join(format!("xray-integration-{}.json", proxy.id));
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = reservation.local_addr().unwrap().port();
-        DefaultXrayConfigBuilder
+        DefaultXrayConfigBuilder::new()
             .build(&proxy, port, &config)
             .unwrap();
         assert!(
@@ -240,7 +240,7 @@ fn base64_of(value: &str) -> String {
 /// names, whether a block is read at all).
 fn engine_verdict(executable: &std::ffi::OsStr, proxy: &ProxyProfile) -> Result<(), String> {
     let path = std::env::temp_dir().join(format!("fp-xray-verdict-{}.json", proxy.id));
-    DefaultXrayConfigBuilder
+    DefaultXrayConfigBuilder::new()
         .build(proxy, 10800, &path)
         .map_err(|error| error.to_string())?;
     let verdict = test_config(executable, &path);
@@ -457,7 +457,7 @@ fn every_shape_the_builder_makes_is_accepted_by_the_engine() {
         .find(|candidate| candidate.name == "trojan tls")
         .expect("the trojan case above");
     let path = std::env::temp_dir().join(format!("fp-xray-removed-{}.json", trojan_tls.id));
-    DefaultXrayConfigBuilder
+    DefaultXrayConfigBuilder::new()
         .build(trojan_tls, 10800, &path)
         .expect("build");
     let with_the_removed_switch = std::fs::read_to_string(&path).expect("read").replace(

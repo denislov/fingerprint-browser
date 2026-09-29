@@ -266,8 +266,37 @@ fn setting_row(
                                 this.on_edit_setting(key, window, cx)
                             })),
                     )
+                })
+                // The one row that is a state rather than a value: it is drawn
+                // as the control it is, and the words beside it say the same
+                // thing so the row reads the same as the others.
+                .when(row.switch.is_some(), |this| {
+                    this.child(switch_control(row, cx, t))
                 }),
         )
+}
+
+/// The switch one row offers, wired to the click that stores it.
+///
+/// The checkbox carries no visible label: the row's own label names it, and the
+/// value line beside it says the state. It does carry the accessible one, which
+/// is a name a screen reader reads rather than a second copy on the page.
+fn switch_control(
+    row: &crate::settings::SettingRow,
+    cx: &mut Context<AppView>,
+    t: &Text,
+) -> impl IntoElement {
+    let key = row.key;
+    let on = row.switch == Some(true);
+    let view = cx.entity().downgrade();
+    Checkbox::new(format!("switch-setting-{}", key.id()))
+        .checked(on)
+        .accessibility_label(key.label(t))
+        .on_change(move |&checked, _, cx: &mut App| {
+            if let Some(view) = view.upgrade() {
+                view.update(cx, |view, cx| view.on_set_use_system_proxy(checked, cx));
+            }
+        })
 }
 
 /// The appearance card, first on the page.

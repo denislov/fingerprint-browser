@@ -215,6 +215,16 @@ impl AppView {
         cx.notify();
     }
 
+    /// Stores the "use system proxy" switch, and repaints either way.
+    ///
+    /// Repainted on a refusal as well as on a success: the box has already moved
+    /// under the pointer by the time this runs, and a refusal that left it there
+    /// would be claiming a state that was not stored.
+    pub(in crate::ui) fn on_set_use_system_proxy(&mut self, use_it: bool, cx: &mut Context<Self>) {
+        let _ = self.state.set_use_system_proxy(use_it);
+        cx.notify();
+    }
+
     /// Writes a configuration backup to whatever the field says.
     pub(in crate::ui) fn on_export_configuration(&mut self, cx: &mut Context<Self>) {
         // Read here rather than watched, so there is no observer to keep in step

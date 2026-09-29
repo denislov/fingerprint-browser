@@ -71,6 +71,10 @@ pub trait ProxyTester: Send + Sync {
 pub struct XrayProxyTester {
     executable: PathBuf,
     runtime_dir: PathBuf,
+    /// Whether a test's engine dials through this machine's proxy too. Read by
+    /// the config builder the test writes its own engine's config with, so a
+    /// test that passes is a test of what a launch would do.
+    use_system_proxy: bool,
 }
 
 impl XrayProxyTester {
@@ -78,7 +82,14 @@ impl XrayProxyTester {
         Self {
             executable: executable.into(),
             runtime_dir: runtime_dir.into(),
+            use_system_proxy: false,
         }
+    }
+
+    /// Dials the profile's proxy through this machine's, as a launch would.
+    pub fn with_system_proxy(mut self, use_it: bool) -> Self {
+        self.use_system_proxy = use_it;
+        self
     }
 }
 
@@ -102,7 +113,7 @@ impl ProxyTester for XrayProxyTester {
         };
         diagnose_proxy(
             &SocksEchoClient,
-            &DefaultXrayConfigBuilder::new(),
+            &DefaultXrayConfigBuilder::new().with_system_proxy(self.use_system_proxy),
             &job.proxy,
             &DiagnosticRequest {
                 engine,

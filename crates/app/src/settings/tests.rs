@@ -815,3 +815,150 @@ fn every_setting_belongs_to_a_group_and_the_groups_read_differently() {
         assert_eq!(notes.len(), SettingGroup::ALL.len(), "{notes:?}");
     }
 }
+
+/// The switch survives a restart, off is written as the absent value, and a
+/// name this build does not know means off rather than a refusal to start.
+#[test]
+fn the_system_proxy_switch_is_stored_and_an_unknown_name_means_off() {
+    let config = TempConfig::new("system-proxy");
+    config.write(r#"{"xray_executable": "/srv/xray"}"#);
+    let (mut settings, _) = Settings::load(env(&config));
+    assert!(!settings.use_system_proxy(), "absent means off");
+    let row = settings
+        .rows(en())
+        .into_iter()
+        .find(|row| row.key == SettingKey::UseSystemProxy)
+        .expect("a row for the switch");
+    assert_eq!(row.switch, Some(false), "the control reads the same state");
+    assert_eq!(row.value, "Off");
+    assert_eq!(row.source, Source::Default);
+    assert_eq!(
+        row.key.effect().label(en()),
+        "next start",
+        "the engine is handed the switch when the program starts"
+    );
+    assert!(!row.key.editable(), "a switch is not edited as text");
+
+    settings.set_use_system_proxy(true).expect("save");
+    assert!(settings.use_system_proxy());
+    assert_eq!(
+        settings.xray_executable(),
+        Path::new("/srv/xray"),
+        "kept across the rewrite"
+    );
+    assert!(
+        config.read().contains(r#""system_proxy": "on""#),
+        "{}",
+        config.read()
+    );
+    let (reloaded, _) = Settings::load(env(&config));
+    assert!(reloaded.use_system_proxy(), "the choice outlives the run");
+    assert_eq!(
+        reloaded.pending(SettingKey::UseSystemProxy).as_deref(),
+        Some("true"),
+        "what the next start will use"
+    );
+
+    // Off is the absent value, not a second name for it: the file people read
+    // should have one way to say "as it was before this switch existed".
+    let (mut off, _) = Settings::load(env(&config));
+    off.set_use_system_proxy(false).expect("save");
+    assert!(
+        config.read().contains(r#""system_proxy": null"#),
+        "off is the absent value: {}",
+        config.read()
+    );
+
+    config.write(r#"{"system_proxy": "maybe"}"#);
+    let (unknown, _) = Settings::load(env(&config));
+    assert!(!unknown.use_system_proxy(), "not knowing is not a refusal");
+    let row = unknown
+        .rows(en())
+        .into_iter()
+        .find(|row| row.key == SettingKey::UseSystemProxy)
+        .expect("a row for the switch");
+    assert_eq!(
+        row.source,
+        Source::Default,
+        "a name this build cannot read is not a stored value it uses"
+    );
+}
+
+/// The variable outranks the file, the page says which one won, and the value
+/// it is overriding is shown rather than hidden.
+#[test]
+fn the_environment_decides_the_system_proxy_switch() {
+    let config = TempConfig::new("system-proxy-env");
+    config.write(r#"{"system_proxy": "on"}"#);
+    let mut environment = env(&config);
+    environment.system_proxy = Some("off".to_string());
+    let (settings, _) = Settings::load(environment);
+    assert!(!settings.use_system_proxy(), "the variable wins");
+    assert!(settings.use_system_proxy_from_env());
+    let row = settings
+        .rows(en())
+        .into_iter()
+        .find(|row| row.key == SettingKey::UseSystemProxy)
+        .expect("a row for the switch");
+    assert_eq!(row.source, Source::Environment);
+    assert_eq!(row.env, Some(SYSTEM_PROXY_ENV));
+    assert_eq!(row.value, "Off");
+    assert_eq!(
+        row.shadowed_label(en()).as_deref(),
+        Some("the config file holds On, which this overrides"),
+        "the state the file holds is shown as the word for it, not as \"on\""
+    );
+    assert_eq!(
+        settings.pending(SettingKey::UseSystemProxy),
+        None,
+        "nothing stored is waiting for a restart: the variable decides"
+    );
+
+    // A word this build does not know is not a value, so a typo in a variable
+    // leaves the stored setting alone instead of turning it off for one run.
+    let config = TempConfig::new("system-proxy-env-typo");
+    config.write(r#"{"system_proxy": "on"}"#);
+    let mut environment = env(&config);
+    environment.system_proxy = Some("sure".to_string());
+    let (settings, _) = Settings::load(environment);
+    assert!(settings.use_system_proxy());
+    assert!(!settings.use_system_proxy_from_env());
+    let row = settings
+        .rows(en())
+        .into_iter()
+        .find(|row| row.key == SettingKey::UseSystemProxy)
+        .expect("a row for the switch");
+    assert_eq!(row.source, Source::ConfigFile);
+    assert_eq!(row.value, "On");
+}
+
+/// Every spelling of the two states, and nothing else.
+#[test]
+fn the_switch_reads_the_words_a_switch_is_spelled_with() {
+    for word in ["on", "ON", "true", "yes", "1", " on "] {
+        assert_eq!(switch_on(word), Some(true), "{word}");
+    }
+    for word in ["off", "FALSE", "no", "0"] {
+        assert_eq!(switch_on(word), Some(false), "{word}");
+    }
+    for word in ["", "sure", "enabled", "2"] {
+        assert_eq!(switch_on(word), None, "{word}");
+    }
+}
+
+/// A config file this build cannot write refuses the switch, like the
+/// appearance: showing one that would be off again by the next start is worse
+/// than saying no.
+#[test]
+fn the_switch_is_refused_while_the_config_file_is_unreadable() {
+    let config = TempConfig::new("system-proxy-broken");
+    config.write("{ not json");
+    let (mut settings, _) = Settings::load(env(&config));
+
+    let error = settings
+        .set_use_system_proxy(true)
+        .expect_err("a broken file cannot be rewritten");
+
+    assert!(error.contains("cannot be written"), "{error}");
+    assert!(!settings.use_system_proxy(), "nothing changed");
+}
