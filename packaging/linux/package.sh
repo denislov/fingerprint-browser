@@ -42,7 +42,12 @@ if [ ! -x "$binary" ]; then
     exit 1
 fi
 
-version=$("$binary" --version | awk '{print $3}')
+# The version is the token before the parenthesized commit, not a fixed field:
+# the name used to be two words (`Fingerprint Browser 0.3.0 (abc)`) and is now
+# one (`FpBrowser 0.4.0 (abc)`), which moved a positional `$3` onto the commit.
+# `git describe` never prints a space, so the commit is one token and the
+# version is the one before it.
+version=$("$binary" --version | awk '{print $(NF-1)}')
 manifest=$(scripts/version.sh)
 if [ "$version" != "$manifest" ]; then
     # The manifest is the source of truth and the binary is what ships; when they
