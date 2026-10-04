@@ -12,6 +12,8 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-04
+
 ### Added
 
 - **Use system proxy** on the Settings page (Runtime): a machine that reaches the
@@ -46,6 +48,22 @@ says nothing about, and the notes are that section rather than the whole file.
   profile's host name rather than this machine doing it, and an HTTP hop cannot
   carry UDP, so a profile that tunnels UDP itself fails the connection instead of
   leaking around the proxy.
+
+### Changed
+
+- The program is renamed from `fingerprint-browser` / `Fingerprint Browser` to
+  `fp-browser` / `FpBrowser`. The executable, the desktop entry and the
+  Start-menu entry now carry the short name - the installed command is
+  `fp-browser` - and the title bar, the tray tooltip, a diagnostics report and
+  `--version` show `FpBrowser`. Nothing a user has on disk moves: the data
+  directory is still `FpBrowser`, the configuration directory is still
+  `fp-browser`, and the `FP_BROWSER_*` variables are unchanged, so no setting is
+  re-entered and no file is migrated. A command line that named
+  `fingerprint-browser` has to name `fp-browser`, and on Linux the Debian package
+  is now `fp-browser` - a name of its own, so the old `fingerprint-browser`
+  package is removed separately after the new one is installed. On Windows the
+  installer's application id is unchanged, so an upgrade replaces the installed
+  copy in place.
 
 ## [0.3.0] - 2026-09-29
 
@@ -556,7 +574,8 @@ says nothing about, and the notes are that section rather than the whole file.
   outside the data directory - which stopped being true when the config file
   moved in beside the database.
 
-[Unreleased]: https://github.com/denislov/fingerprint-browser/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/denislov/fingerprint-browser/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/denislov/fingerprint-browser/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/denislov/fingerprint-browser/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/denislov/fingerprint-browser/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/denislov/fingerprint-browser/releases/tag/v0.1.0

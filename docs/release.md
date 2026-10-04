@@ -5,14 +5,14 @@ in a habit because three of them are load-bearing: the version a user reports ha
 to identify a commit, the binary a user runs has to be built the same way twice,
 and nothing may be downloaded on the user's behalf.
 
-**Status: `0.3.0` release.** The version policy, the release
+**Status: `0.4.0` release.** The version policy, the release
 profile, the identity surfaces, the icons, the Linux archive, the Debian package
 and the Windows installer script all exist, and the release workflow that drives
 them has been verified end-to-end on GitHub Actions runners. The changelog's
-`## [0.3.0]` section is what the tag publishes. This release adds both download
-dialogs - a browser core from the Browser Cores page and an Xray engine from the
-Settings page - which is the one thing the table below has to be read with: a
-release still carries neither binary, and neither is fetched without a click.
+`## [0.4.0]` section is what the tag publishes. This release adds reaching a
+profile's proxy through this machine's own proxy from the Settings page, and
+renames the program to `fp-browser` / `FpBrowser`; a release still carries
+neither a browser nor Xray, and neither is fetched without a click.
 
 ## Versioning
 
