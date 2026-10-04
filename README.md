@@ -1,4 +1,4 @@
-# Fingerprint Browser
+# FpBrowser
 
 <img src="assets/icon.png" alt="" width="96" align="right">
 
@@ -272,7 +272,7 @@ cargo run -p app
 FP_BROWSER_CHROMIUM_BIN=/path/chrome FP_BROWSER_XRAY_BIN=/path/xray cargo run -p app
 ```
 
-The program itself is `fingerprint-browser`. It takes no argument to open the
+The program itself is `fp-browser`. It takes no argument to open the
 window, and three options that answer a question and exit: `--version`, `--help`,
 and `--diagnostics`, which writes one file about this installation - the build,
 the effective settings and where each came from, the state and permissions of

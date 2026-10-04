@@ -19,7 +19,7 @@
 //! a key that quit the program from anywhere in it would be a key nobody dares
 //! press.
 
-gpui_kit::actions!(fingerprint_browser, [FocusProfileFilter, CloseDetails]);
+gpui_kit::actions!(fp_browser, [FocusProfileFilter, CloseDetails]);
 
 /// The keys this window answers to itself.
 ///

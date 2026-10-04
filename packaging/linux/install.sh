@@ -21,14 +21,14 @@ appsdir="$data/applications"
 icondir="$data/icons/hicolor/512x512/apps"
 
 install -d "$bindir" "$appsdir" "$icondir"
-install -m 0755 "$here/fingerprint-browser" "$bindir/fingerprint-browser"
-install -m 0644 "$here/assets/icon.png" "$icondir/fingerprint-browser.png"
+install -m 0755 "$here/fp-browser" "$bindir/fp-browser"
+install -m 0644 "$here/assets/icon.png" "$icondir/fp-browser.png"
 
 # The entry names the program, and the menu does not search a user's PATH for
 # it: the path is written in so the launcher works whatever PATH happens to be.
-sed "s|^Exec=.*|Exec=$bindir/fingerprint-browser|" \
-    "$here/fingerprint-browser.desktop" > "$appsdir/fingerprint-browser.desktop"
-chmod 0644 "$appsdir/fingerprint-browser.desktop"
+sed "s|^Exec=.*|Exec=$bindir/fp-browser|" \
+    "$here/fp-browser.desktop" > "$appsdir/fp-browser.desktop"
+chmod 0644 "$appsdir/fp-browser.desktop"
 
 # Both caches are optional: a desktop that has the tools picks the new files up
 # immediately, and one that does not will on its next refresh.
@@ -39,10 +39,10 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -q -t -f "$data/icons/hicolor" || true
 fi
 
-echo "Installed: $bindir/fingerprint-browser"
-echo "Menu entry: $appsdir/fingerprint-browser.desktop"
+echo "Installed: $bindir/fp-browser"
+echo "Menu entry: $appsdir/fp-browser.desktop"
 case ":$PATH:" in
     *":$bindir:"*) ;;
-    *) echo "Note: $bindir is not on your PATH, so 'fingerprint-browser' will not" \
+    *) echo "Note: $bindir is not on your PATH, so 'fp-browser' will not" \
             "run from a shell until you add it. The menu entry does not need it." ;;
 esac

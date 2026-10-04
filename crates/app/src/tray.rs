@@ -161,7 +161,7 @@ mod linux {
 
     impl ksni::Tray for StatusIcon {
         fn id(&self) -> String {
-            "fingerprint-browser".to_string()
+            "fp-browser".to_string()
         }
 
         fn title(&self) -> String {

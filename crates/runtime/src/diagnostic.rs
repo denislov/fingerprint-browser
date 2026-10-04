@@ -50,7 +50,7 @@ pub const DEFAULT_ECHO_URL: &str = "http://api.ipify.org";
 
 /// What the diagnostic calls itself. Named rather than blank, so an operator
 /// reading an endpoint's logs can tell this traffic apart from a browser's.
-const USER_AGENT: &str = "fingerprint-browser-diagnostic";
+const USER_AGENT: &str = "fp-browser-diagnostic";
 
 /// A reading from an address endpoint is a line, not a document.
 const READING_LIMIT: u64 = 4 * 1024;

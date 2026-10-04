@@ -85,11 +85,11 @@ jobs:
         run: |
           set -eu
           scratch="$(mktemp -d)"
-          tar xzf dist/fingerprint-browser-*-linux-*.tar.gz -C "$scratch"
-          unpacked="$(find "$scratch" -maxdepth 1 -type d -name 'fingerprint-browser-*')"
+          tar xzf dist/fp-browser-*-linux-*.tar.gz -C "$scratch"
+          unpacked="$(find "$scratch" -maxdepth 1 -type d -name 'fp-browser-*')"
           ( cd "$unpacked" && HOME="$scratch/home" PREFIX="$scratch/home/.local" ./install.sh )
-          "$scratch/home/.local/bin/fingerprint-browser" --version
-          test -f "$scratch/home/.local/share/applications/fingerprint-browser.desktop"
+          "$scratch/home/.local/bin/fp-browser" --version
+          test -f "$scratch/home/.local/share/applications/fp-browser.desktop"
           ( cd dist && sha256sum -c ./*.sha256 )
 
       # The package, installed the way a user installs it. `dpkg --install` does
@@ -112,12 +112,12 @@ jobs:
             echo "in this distribution: $dependency"
           done
           sudo dpkg --install "$deb"
-          /usr/bin/fingerprint-browser --version
-          test -f /usr/share/applications/fingerprint-browser.desktop
-          test -f /usr/share/icons/hicolor/512x512/apps/fingerprint-browser.png
-          test -f /usr/share/doc/fingerprint-browser/copyright
-          sudo dpkg --remove fingerprint-browser
-          test ! -e /usr/bin/fingerprint-browser
+          /usr/bin/fp-browser --version
+          test -f /usr/share/applications/fp-browser.desktop
+          test -f /usr/share/icons/hicolor/512x512/apps/fp-browser.png
+          test -f /usr/share/doc/fp-browser/copyright
+          sudo dpkg --remove fp-browser
+          test ! -e /usr/bin/fp-browser
 
       - uses: actions/upload-artifact@v4
         with:
@@ -179,5 +179,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "Fingerprint Browser ${{ needs.manifest.outputs.version }}" \
+            --title "FpBrowser ${{ needs.manifest.outputs.version }}" \
             --notes-file RELEASE_NOTES.md

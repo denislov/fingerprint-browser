@@ -8,7 +8,7 @@ license.workspace = true
 # for what it does, because this is the name that ends up in `--version`, in the
 # window's title bar and in an installed shortcut.
 [[bin]]
-name = "fingerprint-browser"
+name = "fp-browser"
 path = "src/main.rs"
 
 [dependencies]

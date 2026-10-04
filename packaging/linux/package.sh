@@ -36,7 +36,7 @@ if [ "${FP_SKIP_BUILD:-}" != "1" ]; then
     cargo build --release -p app
 fi
 
-binary=target/release/fingerprint-browser
+binary=target/release/fp-browser
 if [ ! -x "$binary" ]; then
     echo "$binary is not there: build it first, or unset FP_SKIP_BUILD" >&2
     exit 1
@@ -53,14 +53,14 @@ if [ "$version" != "$manifest" ]; then
 fi
 
 arch=$(uname -m)
-name="fingerprint-browser-$version-linux-$arch"
+name="fp-browser-$version-linux-$arch"
 stage="dist/$name"
 
 rm -rf "$stage"
 install -d "$stage/docs" "$stage/assets"
-install -m 0755 "$binary" "$stage/fingerprint-browser"
+install -m 0755 "$binary" "$stage/fp-browser"
 install -m 0755 packaging/linux/install.sh "$stage/install.sh"
-install -m 0644 packaging/linux/fingerprint-browser.desktop "$stage/"
+install -m 0644 packaging/linux/fp-browser.desktop "$stage/"
 install -m 0644 assets/icon.png assets/icon.svg "$stage/assets/"
 install -m 0644 README.md CHANGELOG.md LICENSE "$stage/"
 install -m 0644 docs/*.md "$stage/docs/"
@@ -80,7 +80,7 @@ fi
 # The same files as the archive, laid out where a Debian system looks for them:
 # the binary in /usr/bin, the entry in /usr/share/applications, the icon in the
 # icon theme's 512x512 directory, and the documentation - including the licence
-# under policy's name for it - in /usr/share/doc/fingerprint-browser.
+# under policy's name for it - in /usr/share/doc/fp-browser.
 #
 # Nothing here runs as root and nothing here installs anything: the tree is
 # written into place by dpkg, which is what `--root-owner-group` below is for -
@@ -103,9 +103,9 @@ esac
 # happens to run the script: an artifact built twice has to be the same artifact,
 # and the package's maintainer is not a fact about the build machine.
 deb_maintainer=${FP_DEB_MAINTAINER:-"denislov <2864326614@qq.com>"}
-deb_package="fingerprint-browser_${version}_${deb_arch}"
+deb_package="fp-browser_${version}_${deb_arch}"
 deb_dir="dist/$deb_package"
-deb_doc="$deb_dir/usr/share/doc/fingerprint-browser"
+deb_doc="$deb_dir/usr/share/doc/fp-browser"
 
 rm -rf "$deb_dir"
 install -d "$deb_dir/DEBIAN" \
@@ -115,13 +115,13 @@ install -d "$deb_dir/DEBIAN" \
     "$deb_dir/usr/share/icons/hicolor/scalable/apps" \
     "$deb_doc"
 
-install -m 0755 "$binary" "$deb_dir/usr/bin/fingerprint-browser"
-install -m 0644 packaging/linux/fingerprint-browser.desktop \
+install -m 0755 "$binary" "$deb_dir/usr/bin/fp-browser"
+install -m 0644 packaging/linux/fp-browser.desktop \
     "$deb_dir/usr/share/applications/"
 install -m 0644 assets/icon.png \
-    "$deb_dir/usr/share/icons/hicolor/512x512/apps/fingerprint-browser.png"
+    "$deb_dir/usr/share/icons/hicolor/512x512/apps/fp-browser.png"
 install -m 0644 assets/icon.svg \
-    "$deb_dir/usr/share/icons/hicolor/scalable/apps/fingerprint-browser.svg"
+    "$deb_dir/usr/share/icons/hicolor/scalable/apps/fp-browser.svg"
 install -m 0644 README.md "$deb_doc/"
 # Policy's name for the licence of the package, which is not the repository's
 # name for the same file.
@@ -171,7 +171,7 @@ deb_depends=$(printf '%s\n' "$deb_depends" | tr ',' '\n' | sort -u | paste -sd, 
     sed 's/,/, /g')
 
 cat > "$deb_dir/DEBIAN/control" <<EOF
-Package: fingerprint-browser
+Package: fp-browser
 Version: $version
 Architecture: $deb_arch
 Maintainer: $deb_maintainer

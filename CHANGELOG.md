@@ -141,10 +141,10 @@ says nothing about, and the notes are that section rather than the whole file.
   frame would drop the keyboard at every runtime poll, and the test for that is
   `the_keyboard_stays_on_its_row_when_the_runtime_reports`.
 - The Linux packaging also builds a Debian package.
-  `packaging/linux/package.sh` writes `fingerprint-browser_<version>_<arch>.deb`
+  `packaging/linux/package.sh` writes `fp-browser_<version>_<arch>.deb`
   beside the archive, out of the same staged files: the binary in `/usr/bin`, the
   menu entry, the icon in its two themes, and the documentation under
-  `/usr/share/doc/fingerprint-browser` - the licence under policy's name for it,
+  `/usr/share/doc/fp-browser` - the licence under policy's name for it,
   and the changelog compressed and named `changelog.gz`. Its dependencies are
   asked of `dpkg` rather than written down - they are the packages that carry the
   libraries the binary asks the loader for - so the list cannot go stale the next
@@ -456,7 +456,7 @@ says nothing about, and the notes are that section rather than the whole file.
   with no window over it, and what is stopped. With nothing running the standing
   sentence is still the whole truth.
 - The sidebar names the program in short form and keeps its five destinations in
-  one left-aligned list. The brand read **Fingerprint Browser** in a 200-pixel
+  one left-aligned list. The brand read **FpBrowser** in a 200-pixel
   column it shared with the mark, and Settings was pinned to the foot as a block
   of its own - so the pages were found in one place and the fifth destination in
   another. The brand now reads **FpBrowser**, and Settings is the last row of the
@@ -533,7 +533,7 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Changed
 
-- The binary is named `fingerprint-browser`, which is what the help text and the
+- The binary is named `fp-browser`, which is what the help text and the
   documentation have been telling people to run.
 - The distributed build is built with `[profile.release]`: thin LTO, one codegen
   unit, and symbols kept so a crash can be read. Not `panic = "abort"`, which

@@ -7,16 +7,10 @@
 /// The program's name.
 ///
 /// A name rather than a sentence: it is spelled the same in every language the
-/// window speaks, like `SOCKS5` and the `FP_BROWSER_*` variables.
-pub const NAME: &str = "Fingerprint Browser";
-
-/// The short name the sidebar's brand shows.
-///
-/// The sidebar has room for a mark and a word, not for the name the title bar
-/// and a report need spelled out, so the brand there is the short form. One
-/// constant rather than a literal in the window: the mark and the word beside
-/// it are the same brand, and a second copy would be one that drifts.
-pub const BRAND: &str = "FpBrowser";
+/// window speaks, like `SOCKS5` and the `FP_BROWSER_*` variables. One constant
+/// for every surface that shows it - the title bar, the sidebar's brand, a
+/// report and `--version` - so there is no short form to drift from.
+pub const NAME: &str = "FpBrowser";
 
 /// The crate version, from the workspace's `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -27,7 +21,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// when the tree it was built from had uncommitted changes.
 pub const COMMIT: &str = env!("FP_BUILD_COMMIT");
 
-/// `Fingerprint Browser 0.1.0 (a1b2c3d)`.
+/// `FpBrowser 0.1.0 (a1b2c3d)`.
 pub fn line() -> String {
     format!("{NAME} {VERSION} ({COMMIT})")
 }

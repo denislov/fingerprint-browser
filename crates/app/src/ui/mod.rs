@@ -1048,7 +1048,7 @@ fn brand(collapsed: bool, cx: &mut Context<AppView>, t: &'static Text) -> impl I
                 .truncate()
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(version::BRAND),
+                .child(version::NAME),
         )
         // The name keeps its natural width and the switch takes the far edge,
         // rather than the name being pushed there by a spacer: a translated name

@@ -89,7 +89,7 @@ pub const UNPACK_DIR: &str = "unpacked";
 /// what it is makes this program's requests legible in whatever the reader has
 /// to look at if the repository ever wonders who is calling it.
 pub(crate) fn user_agent() -> String {
-    format!("{}/{}", crate::version::BRAND, crate::version::VERSION)
+    format!("{}/{}", crate::version::NAME, crate::version::VERSION)
 }
 
 /// Which system a published asset is for.

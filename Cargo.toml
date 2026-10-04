@@ -12,7 +12,7 @@ members = [
 version = "0.3.0"
 edition = "2024"
 license = "MIT"
-authors = ["Fingerprint Browser Team"]
+authors = ["FpBrowser Team"]
 
 [workspace.dependencies]
 domain = { path = "crates/domain" }

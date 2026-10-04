@@ -1,4 +1,4 @@
-# Fingerprint Browser v1 Architecture
+# FpBrowser v1 Architecture
 
 ## 1. 目标
 
@@ -87,7 +87,7 @@ v1 明确不做：
 建议采用 Rust workspace：
 
 ```text
-fingerprint-browser/
+fp-browser/
 ├── Cargo.toml
 ├── crates/
 │   ├── domain/

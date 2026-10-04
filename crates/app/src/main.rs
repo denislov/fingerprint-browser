@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-//! Fingerprint Browser — application bootstrap.
+//! FpBrowser — application bootstrap.
 //!
 //! Owns process-wide wiring only: storage, the runtime supervisor thread, the
 //! services over them, and the single window. No child process is ever owned by

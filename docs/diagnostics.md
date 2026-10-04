@@ -1,7 +1,7 @@
 # Diagnostics
 
 **Status: implemented.** One command writes one file about this installation:
-`fingerprint-browser --diagnostics`. The Settings page has the same report
+`fp-browser --diagnostics`. The Settings page has the same report
 behind a button. It exists because the first three messages of a bug report are
 always the same - which build, which platform, where the files are - and none of
 them should have to be asked for.
@@ -59,7 +59,7 @@ lines, so it renders in an issue and greps in a terminal.
 ## The command line
 
 ```
-fingerprint-browser [option]
+fp-browser [option]
 
   -h, --help         Print this help and exit
   -V, --version      Print the version, the commit and the platform, and exit
@@ -75,7 +75,7 @@ before the lock, so it works either way).
 Two rules are worth stating because they are the difference between a tool you
 can put in a script and one you cannot:
 
-- **`--version` reads nothing.** It prints `Fingerprint Browser 0.1.0 (a1b2c3d)`
+- **`--version` reads nothing.** It prints `FpBrowser 0.1.0 (a1b2c3d)`
   and ends. No config file, no migration, no data directory, no window: a script
   asking what is installed cannot change the answer by asking.
 - **`--help` writes nothing.** It is answered in the language the config file

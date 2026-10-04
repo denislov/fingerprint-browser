@@ -18,7 +18,7 @@
 //! What is deliberately **not** here, and stays inline at its call site:
 //!
 //! - names rather than sentences: `SOCKS5`, `Shadowsocks`, `Chrome`, `Windows`,
-//!   `Fingerprint Browser`, the `FP_BROWSER_*` variables, the JavaScript property
+//!   `FpBrowser`, the `FP_BROWSER_*` variables, the JavaScript property
 //!   names shown on the Runtime Details panel (`Brand`, `Platform`, `Language`,
 //!   `Timezone`), and the `ss://, vmess://, vless:// or trojan://` example. A
 //!   translated protocol name is a worse bug than an untranslated one.
@@ -118,10 +118,10 @@ catalog! {
     // the cheap way (`settings::language_hint`), so answering it cannot move a
     // file, and falls back to English when there is nothing to read.
     cli_usage => concat!(
-        "Fingerprint Browser - browser profiles for fingerprint-chromium\n",
+        "FpBrowser - browser profiles for fingerprint-chromium\n",
         "\n",
         "Usage:\n",
-        "  fingerprint-browser [option]\n",
+        "  fp-browser [option]\n",
         "\n",
         "Options:\n",
         "  -h, --help         Print this help and exit\n",
@@ -137,10 +137,10 @@ catalog! {
         "and the end of the activity log; it holds no proxy credentials and no browser\n",
         "data. See the README for what each environment variable does.",
     ) => concat!(
-        "Fingerprint Browser —— fingerprint-chromium 的浏览器档案管理器\n",
+        "FpBrowser —— fingerprint-chromium 的浏览器档案管理器\n",
         "\n",
         "用法：\n",
-        "  fingerprint-browser [选项]\n",
+        "  fp-browser [选项]\n",
         "\n",
         "选项：\n",
         "  -h, --help         显示本帮助并退出\n",
@@ -155,8 +155,8 @@ catalog! {
         "不带选项时打开窗口。报告包含版本、路径、文件权限与日志的末尾若干行，\n",
         "不包含任何代理凭据与浏览器数据。各环境变量的作用见 README。",
     );
-    cli_usage_hint => "Run fingerprint-browser --help for the options."
-        => "运行 fingerprint-browser --help 查看选项。";
+    cli_usage_hint => "Run fp-browser --help for the options."
+        => "运行 fp-browser --help 查看选项。";
 
     // ---- the shell ----
     // The sidebar's overflow menu. "Stop everything and quit" rather than the
@@ -273,7 +273,7 @@ catalog! {
 
     exit_in_background => "Still running in the background. The tray icon brings the window back, or leaves for good."
         => "仍在后台运行。托盘图标可以恢复窗口，或彻底退出。";
-    exit_dialog_title => "Close Fingerprint Browser?" => "关闭 Fingerprint Browser？";
+    exit_dialog_title => "Close FpBrowser?" => "关闭 FpBrowser？";
     exit_dialog_body => "Browsers and proxy tunnels are running. Choose what happens to them."
         => "当前有浏览器或代理隧道在运行。请选择它们的去向。";
     exit_dialog_body_idle => "Choose what closing the window does."
@@ -518,7 +518,7 @@ catalog! {
         => "该目录下每个档案一个子目录，以标识符命名，因此能与配置一一对应。";
 
     // ---- the diagnostics report ----
-    diag_title => "Fingerprint Browser diagnostics" => "Fingerprint Browser 诊断报告";
+    diag_title => "FpBrowser diagnostics" => "FpBrowser 诊断报告";
     diag_intro => "Versions, paths, file modes and the end of the activity log. No proxy credentials and no browser data: this report never opens the database."
         => "版本、路径、文件权限与日志的末尾。不含代理凭据与浏览器数据：本报告不会打开数据库。";
     diag_build => "Build" => "构建";
@@ -826,7 +826,7 @@ mod tests {
     #[test]
     fn the_second_instance_refusal_names_the_holder_where_it_can() {
         for lang in Lang::ALL {
-            let named = text(lang).instance_busy(Some((4242, "Fingerprint Browser 0.1.0 (abc)")));
+            let named = text(lang).instance_busy(Some((4242, "FpBrowser 0.1.0 (abc)")));
             assert!(named.contains("4242"), "{named}");
             assert!(named.contains("0.1.0"), "{named}");
 

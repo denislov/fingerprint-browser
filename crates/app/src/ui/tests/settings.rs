@@ -854,7 +854,7 @@ fn writing_a_diagnostics_report_from_the_settings_page_says_where_it_went(cx: &m
 
     let text = std::fs::read_to_string(written).expect("read back");
     assert!(text.contains(crate::version::VERSION), "{text}");
-    assert!(text.contains("Fingerprint Browser diagnostics"), "{text}");
+    assert!(text.contains("FpBrowser diagnostics"), "{text}");
 
     let message = last_message(cx, &view);
     assert!(

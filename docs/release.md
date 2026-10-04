@@ -51,7 +51,7 @@ release still carries neither binary, and neither is fetched without a click.
 
 | Artifact | Where it comes from | Who it is for |
 | --- | --- | --- |
-| `fingerprint-browser` (release binary) | `cargo build --release -p app` | Running from a checkout or an unpacked archive |
+| `fp-browser` (release binary) | `cargo build --release -p app` | Running from a checkout or an unpacked archive |
 | Windows installer (`...-setup.exe`) | `packaging/windows/package.ps1` | The first install on Windows |
 | Linux archive (`.tar.gz`) | `packaging/linux/package.sh` | The first install on Linux, wherever it is unpacked by hand |
 | Debian package (`..._amd64.deb`) | `packaging/linux/package.sh` | Installing on Debian, Ubuntu, and everything else `apt` serves |
@@ -70,7 +70,7 @@ once the reader has asked for that one.
 
 ```sh
 cargo build --release -p app
-./target/release/fingerprint-browser --version
+./target/release/fp-browser --version
 ```
 
 `[profile.release]` in the workspace `Cargo.toml` is the profile a distributed
@@ -107,8 +107,8 @@ git, because an artifact is built rather than committed. Every artifact has a
 
 ```sh
 packaging/linux/package.sh
-# dist/fingerprint-browser-0.1.0-linux-x86_64.tar.gz
-# dist/fingerprint-browser_0.1.0_amd64.deb
+# dist/fp-browser-0.1.0-linux-x86_64.tar.gz
+# dist/fp-browser_0.1.0_amd64.deb
 ```
 
 Two artifacts out of one staged set of files, because which files ship is not a
@@ -137,7 +137,7 @@ it.
 It installs what the archive holds into the places a Debian system looks: the
 binary in `/usr/bin`, the menu entry in `/usr/share/applications`, the icon in
 the icon theme at 512x512 and as a scalable one, and the documentation in
-`/usr/share/doc/fingerprint-browser` - with the licence under policy's name for
+`/usr/share/doc/fp-browser` - with the licence under policy's name for
 it (`copyright`) and the changelog compressed and named as policy wants it
 (`changelog.gz`). Its maintainer scripts refresh the desktop and icon caches, and
 nothing in them is allowed to fail an install. The architecture is Debian's name
@@ -149,11 +149,11 @@ what the binary itself reports, so neither artifact can be named for a version
 the binary does not claim.
 
 **Windows** - `packaging/windows/package.ps1`, over
-`packaging/windows/fingerprint-browser.iss`:
+`packaging/windows/fp-browser.iss`:
 
 ```powershell
 pwsh -File packaging\windows\package.ps1 -Version 0.1.0
-# dist\fingerprint-browser-0.1.0-windows-x86_64-setup.exe
+# dist\fp-browser-0.1.0-windows-x86_64-setup.exe
 ```
 
 Inno Setup 6, per-user by default (`PrivilegesRequired=lowest`, with the

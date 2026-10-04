@@ -18,9 +18,9 @@
   #define SourceRoot "..\.."
 #endif
 
-#define AppName "Fingerprint Browser"
-#define AppExeName "fingerprint-browser.exe"
-#define AppPublisher "the Fingerprint Browser authors"
+#define AppName "FpBrowser"
+#define AppExeName "fp-browser.exe"
+#define AppPublisher "the FpBrowser authors"
 
 [Setup]
 ; The identity of this installation, not of the program: it has to stay the same
@@ -32,7 +32,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\Fingerprint Browser
+DefaultDirName={autopf}\FpBrowser
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 AllowNoIcons=yes
@@ -40,7 +40,7 @@ AllowNoIcons=yes
 SetupIconFile={#SourceRoot}\assets\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 OutputDir={#SourceRoot}\dist
-OutputBaseFilename=fingerprint-browser-{#AppVersion}-windows-x86_64-setup
+OutputBaseFilename=fp-browser-{#AppVersion}-windows-x86_64-setup
 LicenseFile={#SourceRoot}\LICENSE
 Compression=lzma2
 SolidCompression=yes

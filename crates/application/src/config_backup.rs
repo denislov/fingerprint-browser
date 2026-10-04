@@ -196,7 +196,7 @@ impl ConfigBackup {
 /// one does not; the third means the file itself is damaged.
 #[derive(Debug, Error)]
 pub enum BackupError {
-    #[error("this is not a fingerprint-browser configuration backup: its format is {found:?}")]
+    #[error("this is not an fp-browser configuration backup: its format is {found:?}")]
     UnknownFormat { found: String },
 
     #[error(

@@ -133,15 +133,15 @@ fn embed_windows_resource() {
     let mut resource = winresource::WindowsResource::new();
     resource
         .set_icon(&icon)
-        .set("ProductName", "Fingerprint Browser")
+        .set("ProductName", "FpBrowser")
         .set(
             "FileDescription",
             "Browser profiles for fingerprint-chromium",
         )
-        .set("OriginalFilename", "fingerprint-browser.exe")
+        .set("OriginalFilename", "fp-browser.exe")
         .set(
             "LegalCopyright",
-            "Copyright (c) 2026 the Fingerprint Browser authors. MIT licensed.",
+            "Copyright (c) 2026 the FpBrowser authors. MIT licensed.",
         );
 
     // A warning rather than a failure: a machine without a resource compiler can

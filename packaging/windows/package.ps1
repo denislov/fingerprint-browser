@@ -3,7 +3,7 @@
     Builds the Windows installer.
 
 .DESCRIPTION
-    The release binary, then Inno Setup over packaging\windows\fingerprint-browser.iss,
+    The release binary, then Inno Setup over packaging\windows\fp-browser.iss,
     with the version read out of it: the installer's name, the version in
     Add/Remove Programs and the tag a release is cut from all come from the one
     number in Cargo.toml.
@@ -39,7 +39,7 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
 }
 
-$exe = Join-Path $root "target\release\fingerprint-browser.exe"
+$exe = Join-Path $root "target\release\fp-browser.exe"
 if (-not (Test-Path $exe)) { throw "$exe is not there: build it first" }
 
 # The resource section, which is where the version comes from when the caller did
@@ -52,7 +52,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 if ($info.ProductVersion -ne $Version) {
     throw "the executable says '$($info.ProductVersion)' and this build is '$Version' - a stale target\release, or the wrong -Version"
 }
-if ($info.ProductName -ne "Fingerprint Browser") {
+if ($info.ProductName -ne "FpBrowser") {
     throw "the executable has no product resource: the resource compiler did not run, so the icon is missing too"
 }
 Write-Host "resource section: $($info.ProductName) $($info.ProductVersion)"
@@ -76,10 +76,10 @@ if (-not $iscc) {
 New-Item -ItemType Directory -Force (Join-Path $root "dist") | Out-Null
 
 & $iscc "/DAppVersion=$Version" "/DSourceRoot=$root" `
-    (Join-Path $root "packaging\windows\fingerprint-browser.iss")
+    (Join-Path $root "packaging\windows\fp-browser.iss")
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
-$installer = Join-Path $root "dist\fingerprint-browser-$Version-windows-x86_64-setup.exe"
+$installer = Join-Path $root "dist\fp-browser-$Version-windows-x86_64-setup.exe"
 if (-not (Test-Path $installer)) { throw "$installer was not produced" }
 
 # The checksum file, in the same one-line form the Linux archive gets.
