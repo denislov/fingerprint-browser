@@ -23,9 +23,17 @@ pub const LOG_FILE: &str = "activity.log";
 pub const MAX_LOG_BYTES: u64 = 512 * 1024;
 
 /// The window's activity log on disk.
+///
+/// The handle is held open between lines rather than taken and returned per
+/// line: a start, a stop and a verification each write one, and re-opening the
+/// same path for every one of them was an open and a close around every write.
+/// What is written reaches the file immediately either way - there is no
+/// buffering here - so a reader (the Log page builds from memory, but
+/// `--diagnostics` reads the file) sees every line as it lands.
 #[derive(Debug)]
 pub struct LogFile {
     path: PathBuf,
+    file: Option<fs::File>,
     written: u64,
     limit: u64,
 }
@@ -51,13 +59,14 @@ impl LogFile {
         let written = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
         // Touch it now: an unwritable directory is reported at startup, not at
         // the first line someone needed.
-        OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .map_err(|error| format!("could not open {}: {error}", path.display()))?;
         Ok(Self {
             path,
+            file: Some(file),
             written,
             limit,
         })
@@ -68,6 +77,7 @@ impl LogFile {
     pub(crate) fn at(path: PathBuf) -> Self {
         Self {
             path,
+            file: None,
             written: 0,
             limit: MAX_LOG_BYTES,
         }
@@ -80,18 +90,35 @@ impl LogFile {
     /// Appends one line, rotating first when the file is full.
     pub fn append(&mut self, line: &str) -> Result<(), String> {
         if self.written >= self.limit {
+            // Let the handle go before the rename: an open file cannot be moved
+            // on every platform, and the next line opens the new file anyway.
+            self.file = None;
             rotate(&self.path)?;
             self.written = 0;
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|error| format!("could not open {}: {error}", self.path.display()))?;
+        let file = self.handle()?;
         file.write_all(line.as_bytes())
             .map_err(|error| format!("could not write {}: {error}", self.path.display()))?;
         self.written += line.len() as u64;
         Ok(())
+    }
+
+    /// The open handle, taking one the first time it is asked for.
+    ///
+    /// `at` builds a sink without touching the path, so a failure belongs to the
+    /// first append that needed it - which is exactly the line a test drives.
+    fn handle(&mut self) -> Result<&mut fs::File, String> {
+        match self.file {
+            Some(ref mut file) => Ok(file),
+            None => {
+                let file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)
+                    .map_err(|error| format!("could not open {}: {error}", self.path.display()))?;
+                Ok(self.file.insert(file))
+            }
+        }
     }
 }
 

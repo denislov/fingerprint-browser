@@ -12,6 +12,27 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The database journals ahead of the file** (Storage): writes - a saved
+  profile, an imported row, a re-probed core - now commit in WAL mode with
+  `synchronous = NORMAL` instead of creating, syncing and deleting a rollback
+  journal around each one. What the trade costs is named where it is made: after
+  a power loss the last few commits can be gone, where the default would have
+  kept them; the database itself stays consistent. The two sidecar files this
+  adds (`app.db-wal`, `app.db-shm`) are listed in `--diagnostics`, and a
+  filesystem that cannot support WAL keeps the old mode. The profile table also
+  gains indexes on its core and proxy columns, which the delete paths and the
+  "in use" lookups scan.
+
+- **A first frame that reads less and waits less** (Storage/Window): starting no
+  longer reads every table twice, every frame queries only the page on screen
+  rather than every page's rows, and the activity log keeps its file open
+  instead of re-opening it per line. A machine with several registered browser
+  cores no longer waits for each core's `--version` in turn before the window
+  opens - the probes run together, so the wait is the slowest core's rather than
+  their sum.
+
 ## [0.4.0] - 2026-10-04
 
 ### Added

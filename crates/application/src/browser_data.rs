@@ -117,20 +117,29 @@ pub fn restore_browser_data(
 /// that was lost.
 pub fn recover_user_data_dirs(profiles: &[BrowserProfile]) -> Vec<String> {
     let mut put_back = Vec::new();
-    for profile in profiles {
-        let to = resolve(&profile.user_data_dir);
+    // Resolved once per profile rather than once per pair. `resolve` walks the
+    // filesystem to the deepest existing ancestor, and the pair-wise form asked
+    // it, and `footprint`, N-1 times for every profile - all of it before the
+    // window opens. The comparison itself is still every pair, which is what the
+    // guarantee is; it is only the filesystem walks that stop repeating.
+    let resolved: Vec<PathBuf> = profiles
+        .iter()
+        .map(|profile| resolve(&profile.user_data_dir))
+        .collect();
+    let footprints: Vec<Vec<PathBuf>> = resolved.iter().map(|path| footprint(path)).collect();
+    for (index, profile) in profiles.iter().enumerate() {
         // Recovery may run before a copy plan exists. Protect every other
         // profile's directory, including profiles with no source to copy.
-        if profiles.iter().any(|other| {
-            other.id != profile.id
-                && footprint(&to)
+        if profiles.iter().enumerate().any(|(other, other_profile)| {
+            other_profile.id != profile.id
+                && footprints[index]
                     .iter()
-                    .any(|path| overlaps(path, &resolve(&other.user_data_dir)))
+                    .any(|path| overlaps(path, &resolved[other]))
         }) {
             tracing::warn!("refused overlapping recovery for {}", profile.name);
             continue;
         }
-        match recover(&profile.name, &to) {
+        match recover(&profile.name, &resolved[index]) {
             Ok(true) => put_back.push(profile.name.clone()),
             Ok(false) => {}
             Err(error) => tracing::warn!("{error}"),
@@ -250,6 +259,15 @@ fn plan(
     let mut copies: Vec<Copy> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
+    // Every profile's source directory, resolved once. The checks below compare
+    // every profile against every other, and resolving inside those loops walked
+    // the filesystem for the same paths over and over - the copy itself is the
+    // slow part, not finding out whether it is allowed.
+    let resolved_sources: Vec<PathBuf> = ordered
+        .iter()
+        .map(|profile| resolve(&profile.user_data_dir))
+        .collect();
+
     for profile in ordered {
         let held = directory.join("profiles").join(profile.id.to_string());
         let (from, to) = match direction {
@@ -289,30 +307,39 @@ fn plan(
                     to: path,
                 });
             }
-            for other in ordered {
-                let source = resolve(&other.user_data_dir);
-                if other.id != copy.id && overlaps(&path, &source) {
+            for (other, source) in ordered.iter().zip(&resolved_sources) {
+                if other.id != copy.id && overlaps(&path, source) {
                     return Err(BrowserDataError::ProfilesOverlap {
                         first_profile: copy.profile.clone(),
                         second_profile: other.name.clone(),
                         first: path.clone(),
-                        second: source,
+                        second: source.clone(),
                     });
                 }
             }
         }
     }
+    // Every path each copy will be read from or written to, resolved once; the
+    // pair-wise comparison below is the guarantee, and it used to re-walk the
+    // filesystem for both sides of every pair inside it.
+    let paths: Vec<Vec<PathBuf>> = copies
+        .iter()
+        .map(|copy| {
+            std::iter::once(copy.from.clone())
+                .chain(footprint(&copy.to))
+                .collect()
+        })
+        .collect();
     for (index, first) in copies.iter().enumerate() {
-        let first_paths = std::iter::once(first.from.clone()).chain(footprint(&first.to));
-        for a in first_paths {
-            for second in &copies[index + 1..] {
-                for b in std::iter::once(second.from.clone()).chain(footprint(&second.to)) {
-                    if overlaps(&a, &b) {
+        for a in &paths[index] {
+            for (offset, second) in copies[index + 1..].iter().enumerate() {
+                for b in &paths[index + 1 + offset] {
+                    if overlaps(a, b) {
                         return Err(BrowserDataError::ProfilesOverlap {
                             first_profile: first.profile.clone(),
                             second_profile: second.profile.clone(),
                             first: a.clone(),
-                            second: b,
+                            second: b.clone(),
                         });
                     }
                 }

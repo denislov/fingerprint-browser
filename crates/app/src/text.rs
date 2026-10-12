@@ -529,6 +529,8 @@ catalog! {
     diag_settings => "Settings in force" => "当前设置";
     diag_files => "Files" => "文件";
     diag_database => "Database" => "数据库";
+    diag_database_wal => "Database write-ahead log" => "数据库预写日志";
+    diag_database_shm => "Database shared memory" => "数据库共享内存";
     diag_activity_log => "Activity log" => "日志文件";
     diag_activity_log_rotated => "Rotated activity log" => "轮转的日志文件";
     diag_instance_lock => "Instance lock" => "实例锁";

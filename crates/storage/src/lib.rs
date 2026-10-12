@@ -34,6 +34,45 @@ mod tests {
         assert!(run_migrations(&mut conn).is_ok());
     }
 
+    /// WAL with `synchronous = NORMAL`, and one index per reference column: the
+    /// settings that keep a single-row write from costing a journal file and a
+    /// "who uses this core" question from scanning every profile. The indexes
+    /// are asked of `sqlite_master` rather than of the migration text, because
+    /// what matters is the schema that was applied, not the one that was meant.
+    #[test]
+    fn a_file_database_is_wal_and_its_reference_columns_are_indexed() {
+        let dir = std::env::temp_dir().join(format!("fp-storage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let storage = SqliteStorage::open(dir.join("app.db")).expect("open file sqlite");
+        let conn_arc = storage.conn();
+        let conn = conn_arc.lock().unwrap();
+
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal mode");
+        assert_eq!(mode, "wal");
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("synchronous");
+        assert_eq!(synchronous, 1, "NORMAL");
+
+        for index in ["idx_profiles_core_id", "idx_profiles_proxy_id"] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |row| row.get(0),
+                )
+                .expect("index lookup");
+            assert_eq!(found, 1, "missing {index}");
+        }
+
+        drop(conn);
+        drop(conn_arc);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_sqlite_core_crud_and_roundtrip() {
         let storage = SqliteStorage::in_memory().expect("init in-memory sqlite");
@@ -428,8 +467,8 @@ mod tests {
                 error,
                 StorageError::SchemaTooNew {
                     found: 99,
-                    supported: 2
-                }
+                    supported
+                } if supported == MIGRATIONS.len() as i64
             ),
             "{error}"
         );

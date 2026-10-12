@@ -21,7 +21,10 @@ pub use crate::settings::CHROMIUM_MAJOR_ENV as MAJOR_ENV;
 pub type Notice = (String, bool);
 
 /// Version probe, injected so maintenance can be tested without spawning.
-pub type Probe<'a> = &'a dyn Fn(&Path) -> VersionReport;
+///
+/// Shared by reference and therefore `Sync`: a refresh probes every registered
+/// core at once, so the probe is called from several threads.
+pub type Probe<'a> = &'a (dyn Fn(&Path) -> VersionReport + Sync);
 
 /// Environment-first discovery, then conventional relative paths, then `PATH`.
 ///
@@ -136,13 +139,38 @@ fn refresh(
     let mut updated: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
 
-    for core in existing {
-        if !core.executable.is_file() {
+    // Probed together rather than one after another. A probe starts the binary
+    // and waits up to its deadline for an answer, so a catalogue of N cores used
+    // to cost N answers in a row before the window could open; the cores do not
+    // depend on each other, and the answers are applied below in the catalogue's
+    // own order, which is the order the report and the writes keep.
+    let reports: Vec<Option<VersionReport>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = existing
+            .iter()
+            .map(|core| {
+                let absent = !core.executable.is_file();
+                let executable = core.executable.clone();
+                scope.spawn(move || (!absent).then(|| probe(&executable)))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(report) => report,
+                // A probe that panicked is the caller's bug, not a core's
+                // answer: it comes back up here rather than reading as "no
+                // version".
+                Err(payload) => std::panic::resume_unwind(payload),
+            })
+            .collect()
+    });
+
+    for (core, report) in existing.iter().zip(reports) {
+        let Some(report) = report else {
             missing.push(format!("{} ({})", core.name, core.executable.display()));
             continue;
-        }
+        };
 
-        let report = probe(&core.executable);
         let Some(major) = report.major else {
             continue;
         };
@@ -230,7 +258,7 @@ fn executable_names() -> Vec<OsString> {
 mod tests {
     use super::*;
     use crate::text::en;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use storage::MemCoreRepository;
 
     fn touching(path: &Path) {
@@ -420,6 +448,71 @@ mod tests {
 
         assert_eq!(notice, None, "an unreadable probe is not news");
         assert_eq!(cores.list().expect("list")[0].major, 148);
+    }
+
+    /// Every registered core is re-probed, each exactly once, and all of them
+    /// are reported - a refresh probes them together now, and the outcome must
+    /// not depend on that.
+    #[test]
+    fn every_registered_core_is_probed_and_updated() {
+        let cores: Arc<MemCoreRepository> = Arc::new(MemCoreRepository::new());
+        let first = TempExecutable::new("chrome");
+        let second = TempExecutable::new("chromium");
+        // Registered directly: `maintain_with` only registers when the
+        // catalogue is empty, so a second core cannot arrive that way.
+        for (name, path) in [
+            ("chrome 148", first.path()),
+            ("chromium 148", second.path()),
+        ] {
+            cores
+                .save(&BrowserCore {
+                    id: CoreId::new(),
+                    name: name.to_string(),
+                    executable: path,
+                    version: "Chromium 148.0.7778.215".to_string(),
+                    major: 148,
+                })
+                .expect("save");
+        }
+
+        let seen: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let probe = {
+            let seen = Arc::clone(&seen);
+            move |path: &Path| {
+                seen.lock().expect("seen").push(path.to_path_buf());
+                VersionReport::from_banner(Some("Chromium 150.0.1.2".to_string()))
+            }
+        };
+
+        let (message, is_error) = maintain_with(cores.as_ref(), None, None, en(), &probe)
+            .expect("two changed cores are news");
+
+        assert!(!is_error, "{message}");
+        // Each line is asserted on its own, so the report's order - which comes
+        // from a map-backed test repository - is not a contract.
+        assert!(
+            message.contains("chrome 148 is Chromium 150.0.1.2 (major 150)"),
+            "{message}"
+        );
+        assert!(
+            message.contains("chromium 148 is Chromium 150.0.1.2 (major 150)"),
+            "{message}"
+        );
+        let seen = seen.lock().expect("seen");
+        assert_eq!(seen.len(), 2, "each core is probed once: {seen:?}");
+        assert!(
+            seen.contains(&first.path()) && seen.contains(&second.path()),
+            "{seen:?}"
+        );
+        let stored = cores.list().expect("list");
+        assert_eq!(stored.len(), 2);
+        let mut names: Vec<&str> = stored.iter().map(|core| core.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["chrome 150", "chromium 150"]);
+        assert!(
+            stored.iter().all(|core| core.major == 150),
+            "both stored majors move: {stored:?}"
+        );
     }
 
     #[test]

@@ -292,7 +292,11 @@ fn main() {
         },
         settings,
     );
-    let _ = app_state.load();
+    // Storage is deliberately not read here: `AppView::boot` loads it once, on
+    // the frame that has a window, and everything between this point and there -
+    // the startup line, the notices, the reclaim report - names no profile, so
+    // it needs no rows. Loading here as well read every table twice before the
+    // first frame.
     // The activity log's first line, before anything a start has to report: what
     // build this is, on what platform, and where it keeps its files is what
     // every problem report is asked for first, and the log is what outlives the

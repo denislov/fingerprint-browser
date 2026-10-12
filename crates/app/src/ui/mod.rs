@@ -648,31 +648,50 @@ impl Render for AppView {
         let import_input = self.ensure_import_input(window, cx);
         let restore_input = self.ensure_restore_input(window, cx);
         let browser_data_input = self.ensure_browser_data_input(window, cx);
-        let export_destination = self.state.export_destination();
-        let diagnostics_destination = self.state.diagnostics_destination();
-        let export_includes_credentials = self.state.export_includes_credentials();
+        // What each page draws is gathered only when that page is drawn. All of
+        // it used to be rebuilt on every frame whichever page was showing, so
+        // repainting the profile list read the core catalogue (with a stat per
+        // core), the proxy list and the whole activity log out of storage for
+        // tables it was not going to draw.
+        let page = self.state.page();
+        let profiles_page = page == Page::Profiles;
         let filter = self.state.profile_filter().to_string();
         let total = self.state.rows().len();
-        let visible = self.state.visible_rows();
-        let selected = self.state.selected().cloned();
+        let visible = if profiles_page {
+            self.state.visible_rows()
+        } else {
+            Vec::new()
+        };
+        let selected = if profiles_page {
+            self.state.selected().cloned()
+        } else {
+            None
+        };
         let selected_id = self.state.selected_id();
-        let verifications: std::collections::HashMap<ProfileId, Verification> = self
-            .state
-            .rows()
-            .iter()
-            .filter_map(|row| {
-                self.state
-                    .verification(row.profile.id)
-                    .map(|verification| (row.profile.id, verification.clone()))
-            })
-            .collect();
+        let verifications: std::collections::HashMap<ProfileId, Verification> = if profiles_page {
+            self.state
+                .rows()
+                .iter()
+                .filter_map(|row| {
+                    self.state
+                        .verification(row.profile.id)
+                        .map(|verification| (row.profile.id, verification.clone()))
+                })
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
         let verification = selected_id.and_then(|id| verifications.get(&id).cloned());
         let notice = self.state.notice().cloned();
-        let has_core = self.state.has_core();
+        let has_core = profiles_page && self.state.has_core();
         let details_tab = self.state.details_tab();
-        let log_tail = selected_id
-            .map(|id| self.state.log_tail(id))
-            .unwrap_or_default();
+        let log_tail = if profiles_page {
+            selected_id
+                .map(|id| self.state.log_tail(id))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         if !self.focused_once
             && let Some(handle) = self.view_focus.clone()
@@ -698,19 +717,6 @@ impl Render for AppView {
                     .min_h_0()
                     .child(sidebar(self.state.page(), collapsed, cx, t))
                     .child({
-                        let page = self.state.page();
-                        let proxy_rows = self.state.proxy_rows().unwrap_or_default();
-                        let proxy_tests: std::collections::HashMap<ProxyId, ProxyTest> = proxy_rows
-                            .iter()
-                            .filter_map(|row| {
-                                self.state
-                                    .proxy_test(row.proxy.id)
-                                    .map(|test| (row.proxy.id, test.clone()))
-                            })
-                            .collect();
-                        let core_rows = self.state.core_rows().unwrap_or_default();
-                        let setting_rows = self.state.setting_rows();
-                        let log_rows = self.state.log_rows();
                         let log_count = self.state.log_len();
                         let log_filter = self.state.log_filter();
                         // How much room the log's message column has, measured from
@@ -755,6 +761,16 @@ impl Render for AppView {
                             })
                             .children(notice.map(|notice| notice_banner(notice, cx, t)))
                             .when(page == Page::Proxies, |this| {
+                                let proxy_rows = self.state.proxy_rows().unwrap_or_default();
+                                let proxy_tests: std::collections::HashMap<ProxyId, ProxyTest> =
+                                    proxy_rows
+                                        .iter()
+                                        .filter_map(|row| {
+                                            self.state
+                                                .proxy_test(row.proxy.id)
+                                                .map(|test| (row.proxy.id, test.clone()))
+                                        })
+                                        .collect();
                                 this.child(proxies_body(
                                     &proxy_rows,
                                     &proxy_tests,
@@ -764,9 +780,11 @@ impl Render for AppView {
                                 ))
                             })
                             .when(page == Page::Cores, |this| {
+                                let core_rows = self.state.core_rows().unwrap_or_default();
                                 this.child(cores_body(&core_rows, compact_resources, cx, t))
                             })
                             .when(page == Page::Log, |this| {
+                                let log_rows = self.state.log_rows();
                                 this.child(logs_body(
                                     &log_rows,
                                     log_count,
@@ -779,6 +797,11 @@ impl Render for AppView {
                                 ))
                             })
                             .when(page == Page::Settings, |this| {
+                                let setting_rows = self.state.setting_rows();
+                                let export_destination = self.state.export_destination();
+                                let diagnostics_destination = self.state.diagnostics_destination();
+                                let export_includes_credentials =
+                                    self.state.export_includes_credentials();
                                 this.child(settings_body(
                                     &setting_rows,
                                     SettingsCards {

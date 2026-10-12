@@ -97,6 +97,20 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
     CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
     "#,
     ),
+    (
+        "003_profile_reference_indexes",
+        // Both foreign keys on `profiles` are asked by value: deleting a core or
+        // a proxy looks up who uses it (`... WHERE core_id = ?1 LIMIT 1`), and
+        // the `RESTRICT` on the key itself runs the same lookup inside every
+        // refused delete. Without an index each of those is a full scan of
+        // `profiles`, and the profile count is the one number here that grows.
+        // Only the lookup columns: `profiles.name` already has an index, and
+        // nothing else is ever queried by value.
+        r#"
+    CREATE INDEX IF NOT EXISTS idx_profiles_core_id ON profiles(core_id);
+    CREATE INDEX IF NOT EXISTS idx_profiles_proxy_id ON profiles(proxy_id);
+    "#,
+    ),
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> Result<(), StorageError> {

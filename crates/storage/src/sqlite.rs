@@ -57,6 +57,28 @@ impl SqliteStorage {
             PRAGMA busy_timeout = 5000;
             "#,
         )?;
+        // Write-ahead logging with `synchronous = NORMAL` instead of the default
+        // rollback journal with `FULL`. Every write here is a small autocommit
+        // transaction - a settings change, one row of an import, a re-probed core
+        // - and the default makes each of them create, fsync and delete a journal
+        // file beside the database. In WAL those writes append to `app.db-wal`
+        // and one fsync happens at a checkpoint, which is the difference between
+        // writing while the user watches and doing it in the background.
+        //
+        // What the trade costs, exactly: after a power loss the last few
+        // committed transactions can be gone, where the default would have kept
+        // them. The database is still consistent - WAL commits atomically - and
+        // what lives here is configuration the user just typed, not data being
+        // streamed. The other cost is the two sidecar files (`-wal`, `-shm`),
+        // which the diagnostics report names because a report that lists the
+        // database should not leave out the files that hold its recent writes.
+        //
+        // A filesystem SQLite cannot keep the shared memory on (some network
+        // mounts) refuses the mode and stays on the rollback journal. The answer
+        // is deliberately unchecked: both modes are correct, and the one the
+        // engine settled on is the one the file uses.
+        let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
         Ok(())
     }
 
