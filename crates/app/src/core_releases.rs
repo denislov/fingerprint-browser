@@ -3,8 +3,9 @@
 //! A core is a fingerprint-chromium build, and the builds this program is meant
 //! to launch are published as GitHub releases by `adryfish/fingerprint-chromium`:
 //! one release per Chromium version, each holding a Windows, a Linux and a macOS
-//! asset. This module is the narrow half of that - asking GitHub what has been
-//! published, and turning one asset into a directory with a browser binary in it.
+//! asset. This module is the narrow half of that - which of those assets a
+//! release offers, and turning one of them into a directory with a browser
+//! binary in it.
 //!
 //! It sits below the window and above the disk, and knows about neither
 //! [`crate::state`] nor GPUI. That is what makes the classification and the
@@ -12,18 +13,22 @@
 //! be handed a catalog and a downloader that never dial, the same way
 //! [`crate::proxy_tester`] and [`crate::open_dir`] are handed theirs.
 //!
+//! What the engine download beside it does the same way is [`crate::releases`] -
+//! the request to GitHub, the reading of the release list, the streaming of one
+//! asset and the small name and path helpers - called rather than copied. What
+//! is here is what makes this a *core* download: which assets a release offers,
+//! and what a downloaded file becomes on disk.
+//!
 //! Registering what came down is deliberately *not* here. The major a core
 //! reports decides which fingerprint switches it may be asked to spoof, so the
 //! reading has to come from the one place that probes a binary
 //! ([`application::CoreService`]) rather than from the release tag - `148.0.7778.215`
 //! is what the file is called, not necessarily what the binary inside answers.
 
-use crate::text::Text;
-use serde::Deserialize;
+use crate::releases::{self, Asset, RawAsset, Release};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 /// The repository the published cores come from.
 ///
@@ -31,47 +36,6 @@ use std::time::Duration;
 /// the request, the dialog's caption and a test: a fork or a mirror is then a
 /// change in one place.
 pub const REPOSITORY: &str = "adryfish/fingerprint-chromium";
-
-/// The API root one release list is read from.
-const API: &str = "https://api.github.com";
-
-/// How many releases one fetch asks for.
-///
-/// The page lists versions to choose between, and a reader picking a core wants
-/// the recent ones. Thirty is more than a Chromium major has releases in a year,
-/// so the one page is the whole choice rather than the first page of one.
-const RELEASES_PER_PAGE: usize = 30;
-
-/// How long one release list may take.
-const CATALOG_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long a download may take to connect.
-const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long a download may wait for the response headers before giving up.
-const DOWNLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// How long the whole body of a download may take.
-///
-/// Deliberately generous: a core is a hundred megabytes and a slow line is not a
-/// failure. It is a whole-body budget and not the bound on a stalled connection
-/// this was written as - `timeout_recv_body` is the total time for the body, and
-/// its budget is not restarted by a read that arrives - so at two minutes a
-/// hundred megabytes needed a line better than a megabyte a second, and a reader
-/// below that was told a download had failed while it was still arriving. What
-/// this still catches is a transfer that has effectively stopped, which is the
-/// failure that would otherwise sit on the row forever.
-const DOWNLOAD_BODY_BUDGET: Duration = Duration::from_secs(30 * 60);
-
-/// The buffer one download is copied through.
-const COPY_BUFFER: usize = 64 * 1024;
-
-/// How many bytes arrive between two progress reports.
-///
-/// A report is a channel message and a repaint; one per read would be three
-/// thousand of them for one core. This is small enough that the bar moves
-/// steadily and large enough that the window is not redrawn for every packet.
-const REPORT_EVERY: u64 = 1024 * 1024;
 
 /// How deep the search for the browser binary goes.
 ///
@@ -82,15 +46,6 @@ const SEARCH_DEPTH: usize = 8;
 
 /// The directory an unpacked archive lands in, under the release's own.
 pub const UNPACK_DIR: &str = "unpacked";
-
-/// How the client names itself to GitHub.
-///
-/// The API refuses a request that carries no `User-Agent`, and one that says
-/// what it is makes this program's requests legible in whatever the reader has
-/// to look at if the repository ever wonders who is calling it.
-pub(crate) fn user_agent() -> String {
-    format!("{}/{}", crate::version::NAME, crate::version::VERSION)
-}
 
 /// Which system a published asset is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,19 +137,38 @@ pub struct CoreAsset {
     pub kind: AssetKind,
 }
 
-/// One published version, with the assets it offers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CoreRelease {
-    /// The tag, which is the version the build reports: `148.0.7778.215`.
-    pub tag: String,
-    /// The day it was published, as `YYYY-MM-DD`, or empty when GitHub gave no
-    /// date.
-    pub published: String,
-    pub prerelease: bool,
-    pub assets: Vec<CoreAsset>,
+impl Asset for CoreAsset {
+    fn read(raw: RawAsset) -> Option<Self> {
+        let (platform, kind) = classify(&raw.name)?;
+        Some(Self {
+            name: raw.name,
+            url: raw.url,
+            size: raw.size,
+            platform,
+            kind,
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
 }
 
-impl CoreRelease {
+/// One published version, with the assets it offers.
+///
+/// The shape is [`crate::releases::Release`]'s - a tag, a day, a prerelease flag
+/// and the assets - and what makes it a *core* release is the asset type inside.
+pub type CoreRelease = Release<CoreAsset>;
+
+impl Release<CoreAsset> {
     /// The asset this platform would run, or `None` when the release has none.
     ///
     /// A portable build wins over the alternatives: it is the one this program
@@ -213,33 +187,6 @@ impl CoreRelease {
     }
 }
 
-/// How one asset of one release is named to the window.
-///
-/// The key a progress report belongs to: a row is a version and a file, and two
-/// releases can carry assets with the same name.
-pub fn asset_key(release: &str, asset: &str) -> String {
-    format!("{release}/{asset}")
-}
-
-/// A byte count as the window writes it: `181 MB`.
-///
-/// Binary units with the decimal spelling, which is what the file managers on
-/// the three systems this runs on show, so a size here matches the one in the
-/// folder it lands in. Language-neutral, and therefore not in the text table.
-pub fn size_label(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut value = bytes as f64 / 1024.0;
-    let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.0} {}", UNITS[unit])
-}
-
 /// Reads what a repository has published.
 pub trait ReleaseCatalog: Send + Sync {
     /// Every release with at least one asset this program understands, newest
@@ -254,15 +201,9 @@ pub struct GithubReleaseCatalog {
 
 impl GithubReleaseCatalog {
     pub fn new() -> Self {
-        let agent = ureq::Agent::config_builder()
-            .user_agent(user_agent())
-            // One whole-request deadline, because a list that has not arrived in
-            // half a minute is a list the reader has stopped waiting for. A
-            // download cannot use this: see [`HttpCoreDownloader`].
-            .timeout_global(Some(CATALOG_TIMEOUT))
-            .build()
-            .into();
-        Self { agent }
+        Self {
+            agent: releases::catalog_agent(),
+        }
     }
 }
 
@@ -274,34 +215,17 @@ impl Default for GithubReleaseCatalog {
 
 impl ReleaseCatalog for GithubReleaseCatalog {
     fn list(&self) -> Result<Vec<CoreRelease>, String> {
-        let url = format!("{API}/repos/{REPOSITORY}/releases?per_page={RELEASES_PER_PAGE}");
-        let response = self
-            .agent
-            .get(&url)
-            .header("Accept", "application/vnd.github+json")
-            .call()
-            .map_err(|error| format!("GitHub did not answer: {error}"))?;
-        let json = response
-            .into_body()
-            .read_to_string()
-            .map_err(|error| format!("the reply could not be read: {error}"))?;
+        let json = releases::fetch_release_list(&self.agent, REPOSITORY)?;
         parse_releases(&json)
     }
 }
 
-/// One asset, and where its release is being put.
-pub struct DownloadJob {
-    /// The table the job's own failure sentences come from; see
-    /// [`crate::maintenance`], which is the same arrangement for the same
-    /// reason - a sentence built on a worker thread must already be in the
-    /// reader's language.
-    pub text: &'static Text,
-    pub release: String,
-    pub asset: CoreAsset,
-    /// The release's directory. The file lands in it and an archive unpacks
-    /// into [`UNPACK_DIR`] under it.
-    pub directory: PathBuf,
-}
+/// One core asset, and where its release is being put.
+///
+/// The shape is [`crate::releases::DownloadJob`]'s; what makes it a core's is
+/// the asset inside. The directory is the release's own: the file lands in it,
+/// and an archive unpacks into [`UNPACK_DIR`] under it.
+pub type DownloadJob = releases::DownloadJob<CoreAsset>;
 
 /// What a finished download left on disk.
 pub struct Downloaded {
@@ -338,73 +262,9 @@ pub struct HttpCoreDownloader {
 
 impl HttpCoreDownloader {
     pub fn new() -> Self {
-        let agent = ureq::Agent::config_builder()
-            .user_agent(user_agent())
-            // No whole-request deadline: a core is a hundred megabytes, and a
-            // deadline that a slow line trips would report a working download as
-            // a failure. What is bounded instead is each step that could hang -
-            // connecting, waiting for the headers, and waiting for bytes that
-            // never come.
-            .timeout_connect(Some(DOWNLOAD_CONNECT_TIMEOUT))
-            .timeout_recv_response(Some(DOWNLOAD_RESPONSE_TIMEOUT))
-            .timeout_recv_body(Some(DOWNLOAD_BODY_BUDGET))
-            .build()
-            .into();
-        Self { agent }
-    }
-
-    /// Streams one URL into `partial`, reporting as it goes.
-    ///
-    /// Returns the bytes written. The file is complete when this returns `Ok`;
-    /// the caller renames it, so a run that is interrupted leaves a `.part`
-    /// rather than a half-written file that looks like a core.
-    fn fetch(
-        &self,
-        asset: &CoreAsset,
-        partial: &Path,
-        progress: &mut dyn FnMut(u64, u64),
-        t: &Text,
-    ) -> Result<u64, String> {
-        let response = self
-            .agent
-            .get(&asset.url)
-            .call()
-            .map_err(|error| t.core_release_request_failed(&asset.name, &error.to_string()))?;
-        // The API's own number is the fallback: the asset list carries a size
-        // for every file, and a redirect or a proxy may not repeat it.
-        let total = response.body().content_length().unwrap_or(asset.size);
-        let mut reader = response.into_body().into_reader();
-        let mut writer = BufWriter::new(File::create(partial).map_err(|error| {
-            t.core_release_disk_failed(&partial.display().to_string(), &error.to_string())
-        })?);
-
-        let mut buffer = vec![0u8; COPY_BUFFER];
-        let mut received: u64 = 0;
-        let mut reported: u64 = 0;
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|error| t.core_release_request_failed(&asset.name, &error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            writer.write_all(&buffer[..read]).map_err(|error| {
-                t.core_release_disk_failed(&partial.display().to_string(), &error.to_string())
-            })?;
-            received += read as u64;
-            if received - reported >= REPORT_EVERY {
-                reported = received;
-                progress(received, total);
-            }
+        Self {
+            agent: releases::download_agent(),
         }
-        writer.flush().map_err(|error| {
-            t.core_release_disk_failed(&partial.display().to_string(), &error.to_string())
-        })?;
-        drop(writer);
-        // The last report is sent whatever the size: a progress bar that stops
-        // one report short of the end is a bar that looks stuck.
-        progress(received, total);
-        Ok(received)
     }
 }
 
@@ -421,30 +281,19 @@ impl CoreDownloader for HttpCoreDownloader {
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<Downloaded, String> {
         let t = job.text;
-        fs::create_dir_all(&job.directory).map_err(|error| {
-            t.core_release_disk_failed(&job.directory.display().to_string(), &error.to_string())
-        })?;
-
-        let file = job.directory.join(safe_file_name(&job.asset.name));
-        let partial = partial_path(&file);
-        self.fetch(&job.asset, &partial, progress, t)?;
-        // Windows refuses a rename onto a name that is taken, and a reader who
-        // downloads the same release twice is not making a mistake.
-        let _ = fs::remove_file(&file);
-        fs::rename(&partial, &file).map_err(|error| {
-            t.core_release_disk_failed(&file.display().to_string(), &error.to_string())
-        })?;
+        // A core has nowhere to write a digest, so one is not asked for.
+        let file = releases::fetch_asset(&self.agent, job, progress, false)?.file;
 
         if job.asset.kind.unpacks() {
             let unpacked = job.directory.join(UNPACK_DIR);
             fs::create_dir_all(&unpacked).map_err(|error| {
-                t.core_release_disk_failed(&unpacked.display().to_string(), &error.to_string())
+                t.release_disk_failed(&unpacked.display().to_string(), &error.to_string())
             })?;
             unpack(&file, &unpacked)
-                .map_err(|error| t.core_release_unpack_failed(&job.asset.name, &error))?;
+                .map_err(|error| t.release_unpack_failed(&job.asset.name, &error))?;
             let executable = find_browser(&unpacked, job.asset.platform);
             if let Some(path) = &executable {
-                make_runnable(path);
+                releases::make_runnable(path);
             }
             return Ok(Downloaded {
                 file,
@@ -460,7 +309,7 @@ impl CoreDownloader for HttpCoreDownloader {
         // not - an installer, a disk image - are the same ones the download
         // cannot register.
         if job.asset.kind.becomes_core() {
-            make_runnable(&file);
+            releases::make_runnable(&file);
             return Ok(Downloaded {
                 executable: Some(file.clone()),
                 file,
@@ -478,94 +327,19 @@ impl CoreDownloader for HttpCoreDownloader {
 
 /// What a worker reported back to the window.
 ///
-/// One enum for the three answers, so a fourth cannot report somewhere the
-/// window does not hear it - the same reason [`crate::maintenance::Outcome`] is
-/// one type.
-pub enum ReleaseEvent {
-    /// The list came back, newest first.
-    Listed(Result<Vec<CoreRelease>, String>),
-    /// How much of one asset has arrived.
-    Progress {
-        key: String,
-        received: u64,
-        total: u64,
-    },
-    /// One asset finished, with what unpacking left behind.
-    Downloaded {
-        release: String,
-        result: Result<Downloaded, String>,
-    },
-}
+/// The shape is [`crate::releases::ReleaseEvent`]'s - a list, a progress report
+/// and a finished download - read over this feature's releases and its own
+/// [`Downloaded`].
+pub type ReleaseEvent = releases::ReleaseEvent<CoreRelease, Downloaded>;
 
 /// Reads one release list out of the API's JSON.
 ///
-/// Split from the request so the shape it depends on is tested against a
-/// document rather than against the network - which is also what makes a change
-/// in GitHub's answer a failing test instead of a dialog that lists nothing.
+/// The walk - the draft filter, the day, and a release left with nothing being
+/// no release at all - is [`crate::releases::read_releases`]'s; what is fixed
+/// here is the asset type it is read into, which is what the tests below
+/// exercise against the file names the releases really carry.
 fn parse_releases(json: &str) -> Result<Vec<CoreRelease>, String> {
-    #[derive(Deserialize)]
-    struct RawRelease {
-        tag_name: String,
-        #[serde(default)]
-        published_at: Option<String>,
-        #[serde(default)]
-        prerelease: bool,
-        #[serde(default)]
-        draft: bool,
-        #[serde(default)]
-        assets: Vec<RawAsset>,
-    }
-
-    #[derive(Deserialize)]
-    struct RawAsset {
-        name: String,
-        #[serde(default)]
-        size: u64,
-        browser_download_url: String,
-    }
-
-    let raw: Vec<RawRelease> = serde_json::from_str(json)
-        .map_err(|error| format!("the reply was not the release list this expects: {error}"))?;
-
-    Ok(raw
-        .into_iter()
-        // A draft is not published, and the API can hand one to a caller that is
-        // allowed to see it; a pre-release is listed, because the tag says so.
-        .filter(|release| !release.draft)
-        .filter_map(|release| {
-            let RawRelease {
-                tag_name,
-                published_at,
-                prerelease,
-                draft: _,
-                assets,
-            } = release;
-            let assets: Vec<CoreAsset> = assets
-                .into_iter()
-                .filter_map(|asset| {
-                    let (platform, kind) = classify(&asset.name)?;
-                    Some(CoreAsset {
-                        name: asset.name,
-                        url: asset.browser_download_url,
-                        size: asset.size,
-                        platform,
-                        kind,
-                    })
-                })
-                .collect();
-            // A release this program has nothing to run from is not a choice;
-            // listing it would be a row of buttons that are all absent.
-            if assets.is_empty() {
-                return None;
-            }
-            Some(CoreRelease {
-                tag: tag_name,
-                published: published_day(published_at.as_deref()),
-                prerelease,
-                assets,
-            })
-        })
-        .collect())
+    releases::read_releases(json)
 }
 
 /// Which platform and which kind of file an asset's name describes.
@@ -598,54 +372,6 @@ fn classify(name: &str) -> Option<(Platform, AssetKind)> {
         }
     }
     None
-}
-
-/// The publication date, as `YYYY-MM-DD`.
-///
-/// The API sends an RFC 3339 instant and the window shows a day. The hour is
-/// deliberately dropped: it is in UTC, the reader is not, and a time that has to
-/// be converted before it means anything is worse than the date that does not.
-fn published_day(at: Option<&str>) -> String {
-    at.map(|at| at.chars().take(10).collect())
-        .unwrap_or_default()
-}
-
-/// A name that is safe to create in the download's own directory.
-///
-/// The asset name comes out of a JSON document, so it is data rather than a
-/// path this program chose: `../../.ssh/authorized_keys` is a legal asset name
-/// and must not become a path here. Everything that is not a plain name
-/// character becomes `_`, and a name that is left empty becomes `core`. The
-/// release tag goes through the same rule where it names a directory.
-pub(crate) fn safe_file_name(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    // `.` and `..` survive the mapping and are not file names: one is this
-    // directory and the other is its parent. Everything else keeps the name the
-    // release gave it, so what is on disk is what the release called it.
-    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
-        "core".to_string()
-    } else {
-        cleaned
-    }
-}
-
-/// The `.part` name a download is written under until it is complete.
-pub(crate) fn partial_path(file: &Path) -> PathBuf {
-    let mut name = file
-        .file_name()
-        .map(|name| name.to_os_string())
-        .unwrap_or_default();
-    name.push(".part");
-    file.with_file_name(name)
 }
 
 /// Unpacks `archive` into `destination`, choosing the reader by its extension.
@@ -726,25 +452,6 @@ fn is_browser(path: &Path, platform: Platform) -> bool {
                     .is_some_and(|parent| parent.ends_with("Contents/MacOS"))
         }
     }
-}
-
-/// Marks a file as runnable, on the systems that have the bit.
-///
-/// Best effort: an archive that carried the bit keeps it, and one that did not
-/// is reported by the version probe that follows rather than here - which is
-/// where the reader can still be told which file to run by hand.
-pub(crate) fn make_runnable(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = fs::metadata(path) {
-            let mut permissions = metadata.permissions();
-            permissions.set_mode(permissions.mode() | 0o755);
-            let _ = fs::set_permissions(path, permissions);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = path;
 }
 
 #[cfg(test)]
@@ -860,7 +567,9 @@ pub(crate) mod testing {
                 "chrome"
             });
             fs::write(&executable, banner.as_bytes()).expect("fake browser");
-            let file = job.directory.join(safe_file_name(&job.asset.name));
+            let file = job
+                .directory
+                .join(releases::safe_file_name(&job.asset.name));
             fs::write(&file, b"fake archive").expect("fake archive");
 
             self.progress
@@ -914,7 +623,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{BufWriter, Cursor, Write};
 
     /// The names the releases actually carry, one per platform and kind.
     #[test]
@@ -1046,40 +755,6 @@ mod tests {
         assert!(
             release.for_platform(Platform::Linux).is_none(),
             "a platform the release does not cover has no asset"
-        );
-    }
-
-    #[test]
-    fn the_size_is_written_in_the_units_a_file_manager_uses() {
-        assert_eq!(size_label(0), "0 B");
-        assert_eq!(size_label(1023), "1023 B");
-        assert_eq!(size_label(1024), "1 KB");
-        assert_eq!(size_label(189_767_686), "181 MB");
-        assert_eq!(size_label(2 * 1024 * 1024 * 1024), "2 GB");
-    }
-
-    /// The asset name is data out of a JSON document, not a path this program
-    /// chose, and it must not be able to name a file outside the download's own
-    /// directory.
-    #[test]
-    fn an_asset_name_cannot_describe_a_path() {
-        assert_eq!(safe_file_name("core.zip"), "core.zip");
-        assert_eq!(safe_file_name("a/b.zip"), "a_b.zip");
-        assert_eq!(safe_file_name("..\\..\\x.zip"), ".._.._x.zip");
-        assert_eq!(safe_file_name("../../x.zip"), ".._.._x.zip");
-        assert_eq!(safe_file_name(".."), "core");
-        assert_eq!(safe_file_name("."), "core");
-        assert_eq!(safe_file_name(""), "core");
-    }
-
-    /// A `.part` file sits beside the file it will become, so the rename at the
-    /// end of a download stays within one directory.
-    #[test]
-    fn a_partial_download_is_named_beside_its_file() {
-        let file = PathBuf::from("/cores/148/x.tar.xz");
-        assert_eq!(
-            partial_path(&file),
-            PathBuf::from("/cores/148/x.tar.xz.part")
         );
     }
 

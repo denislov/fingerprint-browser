@@ -25,6 +25,7 @@ mod proxy_tester;
 #[cfg(all(test, target_os = "linux"))]
 mod real_browser;
 mod reclaim;
+mod releases;
 mod settings;
 #[cfg(unix)]
 mod signal;

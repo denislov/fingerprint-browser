@@ -251,38 +251,6 @@ impl Text {
         }
     }
 
-    /// How far a download has got, as two sizes the caller has already written.
-    pub fn core_release_progress(&self, received: &str, total: &str) -> String {
-        match self.lang {
-            Lang::En => format!("{received} of {total}"),
-            Lang::Zh => format!("已下载 {received}，共 {total}"),
-        }
-    }
-
-    /// The download itself did not finish.
-    pub fn core_release_request_failed(&self, asset: &str, error: &str) -> String {
-        match self.lang {
-            Lang::En => format!("could not download {asset}: {error}"),
-            Lang::Zh => format!("无法下载 {asset}：{error}"),
-        }
-    }
-
-    /// The file could not be written, or moved into place.
-    pub fn core_release_disk_failed(&self, path: &str, error: &str) -> String {
-        match self.lang {
-            Lang::En => format!("could not write {path}: {error}"),
-            Lang::Zh => format!("无法写入 {path}：{error}"),
-        }
-    }
-
-    /// The archive did not unpack.
-    pub fn core_release_unpack_failed(&self, asset: &str, error: &str) -> String {
-        match self.lang {
-            Lang::En => format!("{asset} downloaded but did not unpack: {error}"),
-            Lang::Zh => format!("{asset} 已下载，但解压失败：{error}"),
-        }
-    }
-
     /// The archive unpacked and no browser was found in it.
     ///
     /// The directory is named because that is the one thing the reader can still
@@ -308,14 +276,6 @@ impl Text {
             Lang::Zh => format!(
                 "已保存到 {path}；这个构建是安装程序而不是内核——请先运行它，再添加它安装出来的浏览器"
             ),
-        }
-    }
-
-    /// Refusing a second download while one is running.
-    pub fn core_release_busy(&self, asset: &str) -> String {
-        match self.lang {
-            Lang::En => format!("{asset} is already downloading; wait for it to finish"),
-            Lang::Zh => format!("{asset} 正在下载中，请等待它完成"),
         }
     }
 

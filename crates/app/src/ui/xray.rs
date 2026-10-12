@@ -13,13 +13,14 @@
 //! Linux at the far end would be offering a coin toss. What the reader gets
 //! instead is the build this program can run, named by platform and architecture.
 //!
-//! The list, the progress bar and the footer are the core dialog's, drawn the
-//! same way for the same reasons; see [`super::cores`].
+//! The caption, the progress bar and the footer's two buttons are the core
+//! dialog's too, drawn by [`super::downloads`] for both; what is this dialog's
+//! own is the row, which offers the build for this machine rather than three
+//! system buttons.
 
 use super::*;
 use crate::xray_releases::{DownloadJob, REPOSITORY, XrayAsset, XrayRelease};
 use gpui_kit::component::dialog::Dialog;
-use gpui_kit::component::progress::Progress;
 
 /// The dialog's width: the two reading columns and the one build column beside
 /// them, with the page's own padding.
@@ -152,21 +153,26 @@ impl Render for XrayDownloads {
             .flex_col()
             .gap_2()
             .min_h_0()
-            .child(xray_download_caption(p, t));
+            .child(downloads::caption(
+                "xray-download-source",
+                t.xray_download_source(REPOSITORY),
+                t.xray_download_intro,
+                p,
+            ));
 
         match &self.releases {
             XrayReleaseStatus::Unasked | XrayReleaseStatus::Loading => {
-                body = body.child(download_note(
+                body = body.child(downloads::note(
                     "xray-download-loading",
                     t.xray_download_loading,
                     p.muted,
                 ));
             }
             XrayReleaseStatus::Failed(message) => {
-                body = body.child(download_failure(message, p));
+                body = body.child(downloads::failure("xray-download-failed", message, p));
             }
             XrayReleaseStatus::Listed(releases) if releases.is_empty() => {
-                body = body.child(download_note(
+                body = body.child(downloads::note(
                     "xray-download-empty",
                     t.xray_download_empty,
                     p.muted,
@@ -210,8 +216,19 @@ fn xray_download_dialog(
         .child(downloads)
         .footer(
             DialogFooter::new()
-                .child(open_xray_dir_button(&view, text))
-                .child(refresh_xray_releases_button(&view, text, loading))
+                .child(downloads::open_dir_button(
+                    "xray-download-open-folder",
+                    text.xray_download_open_folder,
+                    &view,
+                    AppView::on_open_xray_dir,
+                ))
+                .child(downloads::refresh_button(
+                    "xray-download-refresh",
+                    text.xray_download_refresh,
+                    &view,
+                    loading,
+                    AppView::on_fetch_xray_releases,
+                ))
                 .child(
                     DialogClose::new()
                         .trigger(|button| button.label(text.xray_download_close).outline()),
@@ -287,7 +304,7 @@ impl AppView {
 
         let downloader = Arc::clone(&self.xray_downloader);
         let sender = self.xray_tx.clone();
-        let key = crate::xray_releases::asset_key(&job.release, &job.asset.name);
+        let key = crate::releases::asset_key(&job.release, &job.asset.name);
         std::thread::spawn(move || {
             let mut report = |received: u64, total: u64| {
                 let _ = sender.send(XrayReleaseEvent::Progress {
@@ -316,7 +333,7 @@ impl AppView {
         let t = self.state.text();
         if let Err(error) = std::fs::create_dir_all(&directory) {
             self.state.push_notice(
-                t.xray_release_disk_failed(&directory.display().to_string(), &error.to_string()),
+                t.release_disk_failed(&directory.display().to_string(), &error.to_string()),
                 true,
             );
             cx.notify();
@@ -343,56 +360,6 @@ impl AppView {
             cx.notify();
         });
     }
-}
-
-/// The line above the list: where the builds come from, what the dialog offers,
-/// and the one thing that is not like the core dialog.
-fn xray_download_caption(p: Palette, t: &'static Text) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .id("xray-download-source")
-                .test_support()
-                .text_xs()
-                .text_color(rgb(p.muted))
-                .child(t.xray_download_source(REPOSITORY)),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(p.dim))
-                .child(t.xray_download_intro),
-        )
-}
-
-/// A centred line standing in for the list: loading, or nothing to list.
-fn download_note(id: &'static str, text: &str, colour: u32) -> impl IntoElement {
-    div()
-        .id(id)
-        .test_support()
-        .py_6()
-        .flex()
-        .justify_center()
-        .text_xs()
-        .text_color(rgb(colour))
-        .child(text.to_string())
-}
-
-/// Why the list could not be read.
-fn download_failure(message: &str, p: Palette) -> impl IntoElement {
-    div()
-        .id("xray-download-failed")
-        .test_support()
-        .px_3()
-        .py_2()
-        .rounded_md()
-        .bg(rgb(p.danger_bg))
-        .text_xs()
-        .text_color(rgb(p.danger))
-        .child(message.to_string())
 }
 
 /// The list's headings, laid out with the rows' own widths.
@@ -516,7 +483,14 @@ fn xray_release_row(
                 .items_center()
                 .gap_2()
                 .when_some(running, |this, running| {
-                    this.child(xray_download_progress(running, p, t))
+                    this.child(downloads::progress(
+                        "xray-download-progress",
+                        "xray-download-bar",
+                        running,
+                        t.xray_download_working,
+                        p,
+                        t,
+                    ))
                 })
                 .when(running.is_none(), |this| {
                     this.child(match release.for_host() {
@@ -550,7 +524,7 @@ fn xray_download_button(
     let tooltip = format!(
         "{} · {}",
         asset.name,
-        crate::core_releases::size_label(asset.size)
+        crate::releases::size_label(asset.size)
     );
 
     let button = Button::new(format!("xray-download-{}", release.tag))
@@ -571,78 +545,4 @@ fn xray_download_button(
             view.update(cx, |view, cx| view.on_download_xray(tag, asset, cx));
         }
     })
-}
-
-/// How far the download on this row has got.
-fn xray_download_progress(
-    running: &XrayDownload,
-    p: Palette,
-    t: &'static Text,
-) -> impl IntoElement {
-    let received = crate::core_releases::size_label(running.received);
-    let total = crate::core_releases::size_label(running.total);
-    let line = if running.total > 0 {
-        t.core_release_progress(&received, &total)
-    } else {
-        received.clone()
-    };
-
-    div()
-        .id("xray-download-progress")
-        .test_support()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .text_xs()
-                .text_color(rgb(p.muted))
-                .child(div().min_w_0().truncate().child(running.asset.clone()))
-                .child(line),
-        )
-        .child(
-            Progress::new("xray-download-bar")
-                .value(running.fraction().unwrap_or(0.0) * 100.0)
-                .accessibility_label(t.xray_download_working),
-        )
-}
-
-/// The footer's button that opens the engines directory.
-fn open_xray_dir_button(view: &WeakEntity<AppView>, t: &'static Text) -> Button {
-    let view = view.clone();
-    Button::new("xray-download-open-folder")
-        .icon(icons::action(icons::glyph::OPEN_DIR))
-        .label(t.xray_download_open_folder)
-        .outline()
-        .on_click(move |_, _, cx| {
-            if let Some(view) = view.upgrade() {
-                view.update(cx, |view, cx| view.on_open_xray_dir(cx));
-            }
-        })
-}
-
-/// The footer's button that asks for the list again.
-fn refresh_xray_releases_button(
-    view: &WeakEntity<AppView>,
-    t: &'static Text,
-    loading: bool,
-) -> Button {
-    let view = view.clone();
-    Button::new("xray-download-refresh")
-        .icon(icons::action(icons::glyph::REFRESH))
-        .label(t.xray_download_refresh)
-        .outline()
-        // A list already on its way is not asked for again: two requests for one
-        // dialog is one more than the API's rate limit was asked to carry.
-        .disabled(loading)
-        .on_click(move |_, _, cx| {
-            if let Some(view) = view.upgrade() {
-                view.update(cx, |view, cx| view.on_fetch_xray_releases(cx));
-            }
-        })
 }

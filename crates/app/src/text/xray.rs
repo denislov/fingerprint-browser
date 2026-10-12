@@ -1,10 +1,11 @@
 //! xray messages.
 //!
 //! The sentences for the one download this window makes that is not a browser
-//! core. They live here rather than in [`super::cores`] because what goes wrong
-//! is different: an engine archive is unpacked for two files rather than
-//! searched for a browser, and what comes out of it becomes a setting instead of
-//! a row.
+//! core. They live here rather than in [`super::cores`] because what a finished
+//! download becomes is different: an engine archive is unpacked for two files
+//! rather than searched for a browser, and what comes out of it becomes a
+//! setting instead of a row. What the machinery itself says while a file is
+//! being fetched belongs to neither flow - see [`super::releases`].
 use super::*;
 
 impl Text {
@@ -24,30 +25,6 @@ impl Text {
         }
     }
 
-    /// The download itself did not finish.
-    pub fn xray_release_request_failed(&self, asset: &str, error: &str) -> String {
-        match self.lang {
-            Lang::En => format!("could not download {asset}: {error}"),
-            Lang::Zh => format!("无法下载 {asset}：{error}"),
-        }
-    }
-
-    /// The file could not be written, or moved into place.
-    pub fn xray_release_disk_failed(&self, path: &str, error: &str) -> String {
-        match self.lang {
-            Lang::En => format!("could not write {path}: {error}"),
-            Lang::Zh => format!("无法写入 {path}：{error}"),
-        }
-    }
-
-    /// The archive did not unpack.
-    pub fn xray_release_unpack_failed(&self, asset: &str, error: &str) -> String {
-        match self.lang {
-            Lang::En => format!("{asset} downloaded but did not unpack: {error}"),
-            Lang::Zh => format!("{asset} 已下载，但解压失败：{error}"),
-        }
-    }
-
     /// The archive unpacked and no engine was found in it.
     ///
     /// The directory is named because the files that did arrive are still there,
@@ -60,14 +37,6 @@ impl Text {
             Lang::Zh => format!(
                 "Xray {tag} 已解压到 {directory}，但没有找到可执行文件；请手动把 Xray 可执行文件设置指向它"
             ),
-        }
-    }
-
-    /// Refusing a second download while one is running.
-    pub fn xray_release_busy(&self, asset: &str) -> String {
-        match self.lang {
-            Lang::En => format!("{asset} is already downloading; wait for it to finish"),
-            Lang::Zh => format!("{asset} 正在下载中，请等待它完成"),
         }
     }
 

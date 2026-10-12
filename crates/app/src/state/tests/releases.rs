@@ -170,7 +170,7 @@ fn a_downloaded_browser_is_registered_with_the_version_it_reports() {
         .begin_core_download("148.0.7778.215", &asset)
         .expect("accepted");
     fixture.state.update_download(
-        &crate::core_releases::asset_key("148.0.7778.215", &asset.name),
+        &crate::releases::asset_key("148.0.7778.215", &asset.name),
         1024,
         2048,
     );

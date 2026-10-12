@@ -15,43 +15,17 @@
 //! binary inside answers.
 
 use super::*;
-use crate::core_releases::{self, CoreAsset, CoreRelease, Downloaded};
+use crate::core_releases::{CoreAsset, CoreRelease, Downloaded};
+use crate::releases;
 
 /// What the window knows about the published cores.
-#[derive(Debug, Clone)]
-pub enum ReleaseStatus {
-    /// Nothing has been asked for yet. The dialog asks when it is opened.
-    Unasked,
-    /// A list is on its way.
-    Loading,
-    /// What the last fetch returned, newest first.
-    Listed(Vec<CoreRelease>),
-    /// Why the last fetch failed, already written for the reader.
-    Failed(String),
-}
+///
+/// The shape is [`crate::releases::ReleaseStatus`]'s; what makes this the cores'
+/// is the release type inside.
+pub type ReleaseStatus = releases::ReleaseStatus<CoreRelease>;
 
-/// The download in flight.
-#[derive(Debug, Clone)]
-pub struct ReleaseDownload {
-    /// Which asset of which release: the row the progress belongs to.
-    pub key: String,
-    pub release: String,
-    /// The asset's file name, for the sentences about it.
-    pub asset: String,
-    pub received: u64,
-    pub total: u64,
-}
-
-impl ReleaseDownload {
-    /// How far it has got, when the server said how big the file is.
-    ///
-    /// A fraction of the total rather than a flag, and `None` rather than a
-    /// made-up number when there is no total: a bar that invents its own length
-    /// is a bar that has to be unlearned when the real one arrives.
-    pub fn fraction(&self) -> Option<f32> {
-        (self.total > 0).then(|| (self.received as f32 / self.total as f32).clamp(0.0, 1.0))
-    }
-}
+/// The core download in flight; the shape is [`crate::releases::Download`]'s.
+pub use crate::releases::Download as ReleaseDownload;
 
 impl AppState {
     pub fn releases(&self) -> &ReleaseStatus {
@@ -73,7 +47,7 @@ impl AppState {
     /// The tag names the directory, sanitized on the way: it arrives in a JSON
     /// document, and a tag is not allowed to describe a path either.
     pub fn release_dir(&self, tag: &str) -> PathBuf {
-        self.cores_dir().join(core_releases::safe_file_name(tag))
+        self.cores_dir().join(releases::safe_file_name(tag))
     }
 
     /// Marks a fetch as started.
@@ -86,58 +60,40 @@ impl AppState {
     }
 
     /// Takes what a fetch found, or why it failed.
+    ///
+    /// The banner says it as well as the dialog: the banner is what the reader
+    /// sees if the dialog was closed while the fetch was out, and the list is
+    /// what the dialog shows in place of rows.
     pub fn finish_release_fetch(&mut self, result: Result<Vec<CoreRelease>, String>) {
-        self.releases = match result {
-            Ok(releases) => ReleaseStatus::Listed(releases),
-            Err(error) => {
-                // The banner and the dialog both say it: the banner is what the
-                // reader sees if the dialog was closed while the fetch was out,
-                // and the list is what the dialog shows in place of rows.
-                let message = self.text().core_download_failed(&error);
-                self.set_notice(Notice::error(message.clone()));
-                ReleaseStatus::Failed(message)
-            }
-        };
+        let t = self.text();
+        if let Some(message) = self
+            .releases
+            .finish_fetch(result, |error| t.core_download_failed(error))
+        {
+            self.set_notice(Notice::error(message));
+        }
     }
 
     /// Records a download starting.
     ///
-    /// One at a time, and refused rather than queued: two cores is a third of a
-    /// gigabyte, the row has one progress bar, and a queue behind a two-minute
-    /// download is a click that appears to have been ignored. The refusal names
-    /// what is already running, so the reader knows to wait rather than to try
-    /// again.
+    /// The one-at-a-time rule and its reason live with the machinery:
+    /// [`crate::releases::Download::begin`].
     pub fn begin_core_download(
         &mut self,
         release: &str,
         asset: &CoreAsset,
     ) -> Result<ReleaseDownload, String> {
-        if let Some(running) = &self.download {
-            return Err(self.text().core_release_busy(&running.asset));
-        }
-        self.download = Some(ReleaseDownload {
-            key: core_releases::asset_key(release, &asset.name),
-            release: release.to_string(),
-            asset: asset.name.clone(),
-            received: 0,
-            total: asset.size,
-        });
-        Ok(self.download.clone().expect("just recorded"))
+        let t = self.text();
+        ReleaseDownload::begin(&mut self.download, t, release, asset)
     }
 
     /// Records how far the download in flight has got.
     ///
-    /// An answer for an asset that is no longer the one in flight is dropped:
-    /// the reader may have cancelled, and a stale report must not move a bar
-    /// that belongs to something else.
+    /// Whether a report still belongs to the download in flight is the
+    /// download's own judgement - the rule is [`crate::releases::Download::update`]'s.
     pub fn update_download(&mut self, key: &str, received: u64, total: u64) {
-        if let Some(download) = &mut self.download
-            && download.key == key
-        {
-            download.received = received;
-            if total > 0 {
-                download.total = total;
-            }
+        if let Some(download) = &mut self.download {
+            download.update(key, received, total);
         }
     }
 

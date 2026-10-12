@@ -16,41 +16,18 @@
 //! will never run is worse than one reported as failed.
 
 use super::*;
-use crate::core_releases::size_label;
+use crate::releases::{self, size_label};
 use crate::settings::{SettingKey, XRAY_BIN_ENV};
 use crate::xray_releases::{Downloaded, XrayAsset, XrayRelease};
 
 /// What the window knows about the published engines.
-#[derive(Debug, Clone)]
-pub enum XrayReleaseStatus {
-    /// Nothing has been asked for yet. The dialog asks when it is opened.
-    Unasked,
-    /// A list is on its way.
-    Loading,
-    /// What the last fetch returned, newest first.
-    Listed(Vec<XrayRelease>),
-    /// Why the last fetch failed, already written for the reader.
-    Failed(String),
-}
+///
+/// The shape is [`crate::releases::ReleaseStatus`]'s; what makes this the
+/// engines' is the release type inside.
+pub type XrayReleaseStatus = releases::ReleaseStatus<XrayRelease>;
 
-/// The engine download in flight.
-#[derive(Debug, Clone)]
-pub struct XrayDownload {
-    /// Which asset of which release: the row the progress belongs to.
-    pub key: String,
-    pub release: String,
-    /// The asset's file name, for the sentences about it.
-    pub asset: String,
-    pub received: u64,
-    pub total: u64,
-}
-
-impl XrayDownload {
-    /// How far it has got, when the server said how big the file is.
-    pub fn fraction(&self) -> Option<f32> {
-        (self.total > 0).then(|| (self.received as f32 / self.total as f32).clamp(0.0, 1.0))
-    }
-}
+/// The engine download in flight; the shape is [`crate::releases::Download`]'s.
+pub use crate::releases::Download as XrayDownload;
 
 impl AppState {
     pub fn xray_releases(&self) -> &XrayReleaseStatus {
@@ -72,8 +49,7 @@ impl AppState {
     /// The tag names the directory, sanitized on the way: it arrives in a JSON
     /// document, and a tag is not allowed to describe a path either.
     pub fn xray_release_dir(&self, tag: &str) -> PathBuf {
-        self.xray_dir()
-            .join(crate::core_releases::safe_file_name(tag))
+        self.xray_dir().join(crate::releases::safe_file_name(tag))
     }
 
     /// The release this window downloaded and pointed the setting at, if any.
@@ -112,56 +88,40 @@ impl AppState {
     }
 
     /// Takes what a fetch found, or why it failed.
+    ///
+    /// The banner says it as well as the dialog: the banner is what the reader
+    /// sees if the dialog was closed while the fetch was out, and the list is
+    /// what the dialog shows in place of rows.
     pub fn finish_xray_release_fetch(&mut self, result: Result<Vec<XrayRelease>, String>) {
-        self.xray_releases = match result {
-            Ok(releases) => XrayReleaseStatus::Listed(releases),
-            Err(error) => {
-                // The banner and the dialog both say it: the banner is what the
-                // reader sees if the dialog was closed while the fetch was out,
-                // and the list is what the dialog shows in place of rows.
-                let message = self.text().xray_download_failed(&error);
-                self.set_notice(Notice::error(message.clone()));
-                XrayReleaseStatus::Failed(message)
-            }
-        };
+        let t = self.text();
+        if let Some(message) = self
+            .xray_releases
+            .finish_fetch(result, |error| t.xray_download_failed(error))
+        {
+            self.set_notice(Notice::error(message));
+        }
     }
 
     /// Records a download starting.
     ///
-    /// One at a time, and refused rather than queued, for the reason the core
-    /// download is: the row has one progress bar, and a queue behind a download
-    /// is a click that appears to have been ignored.
+    /// The one-at-a-time rule and its reason live with the machinery:
+    /// [`crate::releases::Download::begin`].
     pub fn begin_xray_download(
         &mut self,
         release: &str,
         asset: &XrayAsset,
     ) -> Result<XrayDownload, String> {
-        if let Some(running) = &self.xray_download {
-            return Err(self.text().xray_release_busy(&running.asset));
-        }
-        self.xray_download = Some(XrayDownload {
-            key: crate::xray_releases::asset_key(release, &asset.name),
-            release: release.to_string(),
-            asset: asset.name.clone(),
-            received: 0,
-            total: asset.size,
-        });
-        Ok(self.xray_download.clone().expect("just recorded"))
+        let t = self.text();
+        XrayDownload::begin(&mut self.xray_download, t, release, asset)
     }
 
     /// Records how far the download in flight has got.
     ///
-    /// An answer for an asset that is no longer the one in flight is dropped:
-    /// the reader may have closed the dialog, and a stale report must not move a
-    /// bar that belongs to something else.
+    /// Whether a report still belongs to the download in flight is the
+    /// download's own judgement - the rule is [`crate::releases::Download::update`]'s.
     pub fn update_xray_download(&mut self, key: &str, received: u64, total: u64) {
-        if let Some(download) = &mut self.xray_download
-            && download.key == key
-        {
-            download.received = received;
-            if total > 0 {
-                download.total = total;
-            }
+        if let Some(download) = &mut self.xray_download {
+            download.update(key, received, total);
         }
     }
 

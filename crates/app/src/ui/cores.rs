@@ -13,7 +13,6 @@ use super::*;
 use crate::core_releases::{AssetKind, CoreAsset, CoreRelease, DownloadJob, Platform, REPOSITORY};
 use domain::BrowserCore;
 use gpui_kit::component::dialog::Dialog;
-use gpui_kit::component::progress::Progress;
 
 /// The core row's fixed columns.
 ///
@@ -813,21 +812,26 @@ impl Render for CoreDownloads {
             .flex_col()
             .gap_2()
             .min_h_0()
-            .child(download_caption(p, t));
+            .child(downloads::caption(
+                "core-download-source",
+                t.core_download_source(REPOSITORY),
+                t.core_download_intro,
+                p,
+            ));
 
         match &self.releases {
             ReleaseStatus::Unasked | ReleaseStatus::Loading => {
-                body = body.child(download_note(
+                body = body.child(downloads::note(
                     "core-download-loading",
                     t.core_download_loading,
                     p.muted,
                 ));
             }
             ReleaseStatus::Failed(message) => {
-                body = body.child(download_failure(message, p));
+                body = body.child(downloads::failure("core-download-failed", message, p));
             }
             ReleaseStatus::Listed(releases) if releases.is_empty() => {
-                body = body.child(download_note(
+                body = body.child(downloads::note(
                     "core-download-empty",
                     t.core_download_empty,
                     p.muted,
@@ -875,8 +879,19 @@ fn core_download_dialog(
         .child(downloads)
         .footer(
             DialogFooter::new()
-                .child(open_cores_dir_button(&view, text))
-                .child(refresh_releases_button(&view, text, loading))
+                .child(downloads::open_dir_button(
+                    "core-download-open-folder",
+                    text.core_download_open_folder,
+                    &view,
+                    AppView::on_open_cores_dir,
+                ))
+                .child(downloads::refresh_button(
+                    "core-download-refresh",
+                    text.core_download_refresh,
+                    &view,
+                    loading,
+                    AppView::on_fetch_releases,
+                ))
                 .child(
                     DialogClose::new()
                         .trigger(|button| button.label(text.core_download_close).outline()),
@@ -959,7 +974,7 @@ impl AppView {
 
         let downloader = Arc::clone(&self.downloader);
         let sender = self.releases_tx.clone();
-        let key = crate::core_releases::asset_key(&job.release, &job.asset.name);
+        let key = crate::releases::asset_key(&job.release, &job.asset.name);
         std::thread::spawn(move || {
             let mut report = |received: u64, total: u64| {
                 let _ = sender.send(ReleaseEvent::Progress {
@@ -988,7 +1003,7 @@ impl AppView {
         let t = self.state.text();
         if let Err(error) = std::fs::create_dir_all(&directory) {
             self.state.push_notice(
-                t.core_release_disk_failed(&directory.display().to_string(), &error.to_string()),
+                t.release_disk_failed(&directory.display().to_string(), &error.to_string()),
                 true,
             );
             cx.notify();
@@ -1021,56 +1036,6 @@ impl AppView {
             cx.notify();
         });
     }
-}
-
-/// The line above the list: where the builds come from, and what the buttons
-/// beside them will do.
-fn download_caption(p: Palette, t: &'static Text) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .id("core-download-source")
-                .test_support()
-                .text_xs()
-                .text_color(rgb(p.muted))
-                .child(t.core_download_source(REPOSITORY)),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(p.dim))
-                .child(t.core_download_intro),
-        )
-}
-
-/// A centred line standing in for the list: loading, or nothing to list.
-fn download_note(id: &'static str, text: &str, colour: u32) -> impl IntoElement {
-    div()
-        .id(id)
-        .test_support()
-        .py_6()
-        .flex()
-        .justify_center()
-        .text_xs()
-        .text_color(rgb(colour))
-        .child(text.to_string())
-}
-
-/// Why the list could not be read.
-fn download_failure(message: &str, p: Palette) -> impl IntoElement {
-    div()
-        .id("core-download-failed")
-        .test_support()
-        .px_3()
-        .py_2()
-        .rounded_md()
-        .bg(rgb(p.danger_bg))
-        .text_xs()
-        .text_color(rgb(p.danger))
-        .child(message.to_string())
 }
 
 /// The list's headings, laid out with the rows' own widths.
@@ -1194,7 +1159,14 @@ fn release_row(
                 .items_center()
                 .gap_2()
                 .when_some(running, |this, running| {
-                    this.child(download_progress(running, p, t))
+                    this.child(downloads::progress(
+                        "core-download-progress",
+                        "core-download-bar",
+                        running,
+                        t.core_download_working,
+                        p,
+                        t,
+                    ))
                 })
                 .when(running.is_none(), |this| {
                     this.children(Platform::ALL.into_iter().filter_map(|platform| {
@@ -1226,7 +1198,7 @@ fn download_button(
         "{} · {} · {}",
         platform.label(),
         asset_kind_label(asset.kind, t),
-        crate::core_releases::size_label(asset.size)
+        crate::releases::size_label(asset.size)
     );
     let tooltip = if host {
         format!("{detail} ({})", t.core_download_this_system)
@@ -1260,46 +1232,6 @@ fn download_button(
     })
 }
 
-/// How far the download on this row has got.
-///
-/// The bar is drawn from the fraction only when the server said how large the
-/// file is; without a total the bytes that have arrived are still shown, because
-/// "42 MB" with nothing to compare it to is at least true, and a bar that
-/// guessed would not be.
-fn download_progress(running: &ReleaseDownload, p: Palette, t: &'static Text) -> impl IntoElement {
-    let received = crate::core_releases::size_label(running.received);
-    let total = crate::core_releases::size_label(running.total);
-    let line = if running.total > 0 {
-        t.core_release_progress(&received, &total)
-    } else {
-        received.clone()
-    };
-
-    div()
-        .id("core-download-progress")
-        .test_support()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .text_xs()
-                .text_color(rgb(p.muted))
-                .child(div().min_w_0().truncate().child(running.asset.clone()))
-                .child(line),
-        )
-        .child(
-            Progress::new("core-download-bar")
-                .value(running.fraction().unwrap_or(0.0) * 100.0)
-                .accessibility_label(t.core_download_working),
-        )
-}
-
 /// What kind of file an asset is, in the reader's language.
 ///
 /// `AppImage` is the format's own name and is deliberately not translated, for
@@ -1313,35 +1245,4 @@ fn asset_kind_label(kind: AssetKind, t: &'static Text) -> &'static str {
         AssetKind::AppImage => "AppImage",
         AssetKind::DiskImage => t.core_download_disk_image,
     }
-}
-
-/// The footer's button that opens the cores directory.
-fn open_cores_dir_button(view: &WeakEntity<AppView>, t: &'static Text) -> Button {
-    let view = view.clone();
-    Button::new("core-download-open-folder")
-        .icon(icons::action(icons::glyph::OPEN_DIR))
-        .label(t.core_download_open_folder)
-        .outline()
-        .on_click(move |_, _, cx| {
-            if let Some(view) = view.upgrade() {
-                view.update(cx, |view, cx| view.on_open_cores_dir(cx));
-            }
-        })
-}
-
-/// The footer's button that asks for the list again.
-fn refresh_releases_button(view: &WeakEntity<AppView>, t: &'static Text, loading: bool) -> Button {
-    let view = view.clone();
-    Button::new("core-download-refresh")
-        .icon(icons::action(icons::glyph::REFRESH))
-        .label(t.core_download_refresh)
-        .outline()
-        // A list already on its way is not asked for again: two requests for one
-        // dialog is one more than the API's rate limit was asked to carry.
-        .disabled(loading)
-        .on_click(move |_, _, cx| {
-            if let Some(view) = view.upgrade() {
-                view.update(cx, |view, cx| view.on_fetch_releases(cx));
-            }
-        })
 }

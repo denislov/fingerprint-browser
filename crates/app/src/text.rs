@@ -741,6 +741,7 @@ mod cores;
 mod maintenance;
 mod profiles;
 mod proxies;
+mod releases;
 mod settings;
 mod system;
 mod xray;

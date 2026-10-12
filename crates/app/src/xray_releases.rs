@@ -19,60 +19,29 @@
 //!   configuration, read at the start of a run, and one an environment variable
 //!   can outrank.
 //!
-//! What the two do share is called rather than copied: the name sanitiser, the
-//! size label, the `.part` rename, the runnable bit and the `User-Agent`.
+//! What the two do share is [`crate::releases`], called rather than copied: the
+//! request to GitHub, the reading of the release list, the streaming of one
+//! asset, the name sanitiser, the size label, the `.part` rename, the runnable
+//! bit and the `User-Agent`. What is here is what makes this an *engine*
+//! download: the architecture table, the two files kept out of an archive, and
+//! the record written beside the binary.
 //!
 //! Nothing here dials at test time. The catalog and the downloader are traits so
 //! the window can be handed fakes, the same way [`crate::proxy_tester`] and
 //! [`crate::open_dir`] are.
 
-use crate::core_releases::{Platform, make_runnable, partial_path, safe_file_name, user_agent};
+use crate::core_releases::Platform;
+use crate::releases::{self, Asset, RawAsset, Release};
 use crate::text::Text;
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 /// The repository the published engines come from.
 ///
 /// One constant rather than `XTLS/Xray-core` written into the request, the
 /// dialog's caption and a test: a mirror is then a change in one place.
 pub const REPOSITORY: &str = "XTLS/Xray-core";
-
-/// The API root one release list is read from.
-const API: &str = "https://api.github.com";
-
-/// How many releases one fetch asks for.
-const RELEASES_PER_PAGE: usize = 30;
-
-/// How long one release list may take.
-const CATALOG_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long a download may take to connect.
-const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How long a download may wait for the response headers before giving up.
-const DOWNLOAD_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// How long the whole body of a download may take.
-///
-/// A budget rather than a bound on a stalled connection, which is what this was
-/// written as and what the HTTP client cannot express: `timeout_recv_body` is the
-/// total time for the body, and its budget is not restarted by a read that
-/// arrives. So it is set generously - twenty megabytes, or the hundred-odd of a
-/// core, finishes on any line faster than about 75 KB/s - and what it still
-/// catches is a transfer that has effectively stopped. The failure it exists to
-/// prevent is the one a reader on a slow line used to get instead: a download
-/// reported as failed while it was still arriving.
-const DOWNLOAD_BODY_BUDGET: Duration = Duration::from_secs(30 * 60);
-
-/// The buffer one download is copied through.
-const COPY_BUFFER: usize = 64 * 1024;
-
-/// How many bytes arrive between two progress reports.
-const REPORT_EVERY: u64 = 1024 * 1024;
 
 /// The name of the file one download's provenance is written to.
 ///
@@ -265,18 +234,39 @@ impl XrayAsset {
     }
 }
 
-/// One published version, with the assets it offers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct XrayRelease {
-    pub tag: String,
-    /// The day it was published, as `YYYY-MM-DD`, or empty when GitHub gave no
-    /// date.
-    pub published: String,
-    pub prerelease: bool,
-    pub assets: Vec<XrayAsset>,
+impl Asset for XrayAsset {
+    fn read(raw: RawAsset) -> Option<Self> {
+        let (platform, architecture) = classify(&raw.name)?;
+        Some(Self {
+            name: raw.name,
+            url: raw.url,
+            size: raw.size,
+            platform,
+            architecture,
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
 }
 
-impl XrayRelease {
+/// One published version, with the assets it offers.
+///
+/// The shape is [`crate::releases::Release`]'s - a tag, a day, a prerelease flag
+/// and the assets - and what makes it an *engine* release is the asset type
+/// inside.
+pub type XrayRelease = Release<XrayAsset>;
+
+impl Release<XrayAsset> {
     /// The asset this machine would run, or `None` when the release has none.
     ///
     /// Host platform and host architecture only, which is the one place this
@@ -298,11 +288,6 @@ impl XrayRelease {
     }
 }
 
-/// How one asset of one release is named to the window.
-pub fn asset_key(release: &str, asset: &str) -> String {
-    format!("{release}/{asset}")
-}
-
 /// Reads what a repository has published.
 pub trait XrayCatalog: Send + Sync {
     /// Every release with at least one asset this program understands, newest
@@ -317,12 +302,9 @@ pub struct GithubXrayCatalog {
 
 impl GithubXrayCatalog {
     pub fn new() -> Self {
-        let agent = ureq::Agent::config_builder()
-            .user_agent(user_agent())
-            .timeout_global(Some(CATALOG_TIMEOUT))
-            .build()
-            .into();
-        Self { agent }
+        Self {
+            agent: releases::catalog_agent(),
+        }
     }
 }
 
@@ -334,34 +316,17 @@ impl Default for GithubXrayCatalog {
 
 impl XrayCatalog for GithubXrayCatalog {
     fn list(&self) -> Result<Vec<XrayRelease>, String> {
-        let url = format!("{API}/repos/{REPOSITORY}/releases?per_page={RELEASES_PER_PAGE}");
-        let response = self
-            .agent
-            .get(&url)
-            .header("Accept", "application/vnd.github+json")
-            .call()
-            .map_err(|error| format!("GitHub did not answer: {error}"))?;
-        let json = response
-            .into_body()
-            .read_to_string()
-            .map_err(|error| format!("the reply could not be read: {error}"))?;
+        let json = releases::fetch_release_list(&self.agent, REPOSITORY)?;
         parse_releases(&json)
     }
 }
 
-/// One asset, and where its release is being put.
-pub struct DownloadJob {
-    /// The table the job's own failure sentences come from; see
-    /// [`crate::maintenance`], which is the same arrangement for the same
-    /// reason - a sentence built on a worker thread must already be in the
-    /// reader's language.
-    pub text: &'static Text,
-    pub release: String,
-    pub asset: XrayAsset,
-    /// The release's directory. The archive lands in it and the engine is
-    /// written beside it.
-    pub directory: PathBuf,
-}
+/// One engine asset, and where its release is being put.
+///
+/// The shape is [`crate::releases::DownloadJob`]'s; what makes it an engine's
+/// is the asset inside. The directory is the release's own: the archive lands
+/// in it and the engine is written beside it.
+pub type DownloadJob = releases::DownloadJob<XrayAsset>;
 
 /// What a finished download left on disk.
 pub struct Downloaded {
@@ -402,72 +367,9 @@ pub struct HttpXrayDownloader {
 
 impl HttpXrayDownloader {
     pub fn new() -> Self {
-        let agent = ureq::Agent::config_builder()
-            .user_agent(user_agent())
-            // No whole-request deadline, for the reason the core downloader has
-            // none: a slow line is not a failure. Each step that could hang is
-            // bounded instead.
-            .timeout_connect(Some(DOWNLOAD_CONNECT_TIMEOUT))
-            .timeout_recv_response(Some(DOWNLOAD_RESPONSE_TIMEOUT))
-            .timeout_recv_body(Some(DOWNLOAD_BODY_BUDGET))
-            .build()
-            .into();
-        Self { agent }
-    }
-
-    /// Streams one URL into `partial`, reporting as it goes, and hashes it.
-    ///
-    /// Returns the bytes written and their SHA-256. The file is complete when
-    /// this returns `Ok`; the caller renames it, so a run that is interrupted
-    /// leaves a `.part` rather than a half-written file that looks like an
-    /// engine.
-    fn fetch(
-        &self,
-        asset: &XrayAsset,
-        partial: &Path,
-        progress: &mut dyn FnMut(u64, u64),
-        t: &Text,
-    ) -> Result<(u64, String), String> {
-        let response = self
-            .agent
-            .get(&asset.url)
-            .call()
-            .map_err(|error| t.xray_release_request_failed(&asset.name, &error.to_string()))?;
-        let total = response.body().content_length().unwrap_or(asset.size);
-        let mut reader = response.into_body().into_reader();
-        let mut writer = BufWriter::new(File::create(partial).map_err(|error| {
-            t.xray_release_disk_failed(&partial.display().to_string(), &error.to_string())
-        })?);
-
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0u8; COPY_BUFFER];
-        let mut received: u64 = 0;
-        let mut reported: u64 = 0;
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(|error| t.xray_release_request_failed(&asset.name, &error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-            writer.write_all(&buffer[..read]).map_err(|error| {
-                t.xray_release_disk_failed(&partial.display().to_string(), &error.to_string())
-            })?;
-            received += read as u64;
-            if received - reported >= REPORT_EVERY {
-                reported = received;
-                progress(received, total);
-            }
+        Self {
+            agent: releases::download_agent(),
         }
-        writer.flush().map_err(|error| {
-            t.xray_release_disk_failed(&partial.display().to_string(), &error.to_string())
-        })?;
-        drop(writer);
-        // The last report is sent whatever the size: a progress bar that stops
-        // one report short of the end is a bar that looks stuck.
-        progress(received, total);
-        Ok((received, format!("{:x}", hasher.finalize())))
     }
 
     /// Writes the entries of `archive` that [`keeps`] names into `destination`.
@@ -482,16 +384,16 @@ impl HttpXrayDownloader {
     /// the archive.
     fn extract(&self, archive: &Path, destination: &Path, t: &Text) -> Result<Extracted, String> {
         let file = File::open(archive).map_err(|error| {
-            t.xray_release_disk_failed(&archive.display().to_string(), &error.to_string())
+            t.release_disk_failed(&archive.display().to_string(), &error.to_string())
         })?;
         let mut zip = zip::ZipArchive::new(BufReader::new(file)).map_err(|error| {
-            t.xray_release_unpack_failed(&archive.display().to_string(), &error.to_string())
+            t.release_unpack_failed(&archive.display().to_string(), &error.to_string())
         })?;
 
         let mut extracted = Extracted::default();
         for index in 0..zip.len() {
             let mut entry = zip.by_index(index).map_err(|error| {
-                t.xray_release_unpack_failed(&archive.display().to_string(), &error.to_string())
+                t.release_unpack_failed(&archive.display().to_string(), &error.to_string())
             })?;
             if !entry.is_file() || !keeps(entry.name()) {
                 extracted.skipped += entry.size();
@@ -507,13 +409,13 @@ impl HttpXrayDownloader {
             };
             let target = destination.join(&name);
             let mut writer = BufWriter::new(File::create(&target).map_err(|error| {
-                t.xray_release_disk_failed(&target.display().to_string(), &error.to_string())
+                t.release_disk_failed(&target.display().to_string(), &error.to_string())
             })?);
             std::io::copy(&mut entry, &mut writer).map_err(|error| {
-                t.xray_release_disk_failed(&target.display().to_string(), &error.to_string())
+                t.release_disk_failed(&target.display().to_string(), &error.to_string())
             })?;
             writer.flush().map_err(|error| {
-                t.xray_release_disk_failed(&target.display().to_string(), &error.to_string())
+                t.release_disk_failed(&target.display().to_string(), &error.to_string())
             })?;
             drop(writer);
             match name.as_str() {
@@ -546,21 +448,11 @@ impl XrayDownloader for HttpXrayDownloader {
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<Downloaded, String> {
         let t = job.text;
-        fs::create_dir_all(&job.directory).map_err(|error| {
-            t.xray_release_disk_failed(&job.directory.display().to_string(), &error.to_string())
-        })?;
+        // The digest is written down beside the binary, so one is asked for.
+        let fetched = releases::fetch_asset(&self.agent, job, progress, true)?;
+        let archive_sha256 = fetched.sha256.expect("the fetch was asked to hash");
 
-        let file = job.directory.join(safe_file_name(&job.asset.name));
-        let partial = partial_path(&file);
-        let (_, archive_sha256) = self.fetch(&job.asset, &partial, progress, t)?;
-        // Windows refuses a rename onto a name that is taken, and a reader who
-        // downloads the same release twice is not making a mistake.
-        let _ = fs::remove_file(&file);
-        fs::rename(&partial, &file).map_err(|error| {
-            t.xray_release_disk_failed(&file.display().to_string(), &error.to_string())
-        })?;
-
-        let extracted = self.extract(&file, &job.directory, t)?;
+        let extracted = self.extract(&fetched.file, &job.directory, t)?;
         let Some(executable) = extracted.engine else {
             // The licence is not an engine: an archive without one is reported
             // as what it is, and the directory is named because the files that
@@ -569,7 +461,7 @@ impl XrayDownloader for HttpXrayDownloader {
                 t.xray_release_no_binary(&job.release, &job.directory.display().to_string())
             );
         };
-        make_runnable(&executable);
+        releases::make_runnable(&executable);
         if let Some(licence) = &extracted.licence {
             make_runnable_off(licence);
         }
@@ -622,9 +514,8 @@ fn write_provenance(directory: &Path, provenance: &Provenance<'_>, t: &Text) -> 
         provenance.sha256,
         provenance.digest_url,
     );
-    fs::write(&path, body).map_err(|error| {
-        t.xray_release_disk_failed(&path.display().to_string(), &error.to_string())
-    })
+    fs::write(&path, body)
+        .map_err(|error| t.release_disk_failed(&path.display().to_string(), &error.to_string()))
 }
 
 /// Clears the runnable bit on the licence, on the systems that have one.
@@ -704,97 +595,20 @@ const ARCHITECTURES: [Architecture; 15] = [
 ];
 
 /// What a worker reported back to the window.
-pub enum ReleaseEvent {
-    /// The list came back, newest first.
-    Listed(Result<Vec<XrayRelease>, String>),
-    /// How much of one asset has arrived.
-    Progress {
-        key: String,
-        received: u64,
-        total: u64,
-    },
-    /// One asset finished, with what unpacking left behind.
-    Downloaded {
-        release: String,
-        result: Result<Downloaded, String>,
-    },
-}
+///
+/// The shape is [`crate::releases::ReleaseEvent`]'s - a list, a progress report
+/// and a finished download - read over this feature's releases and its own
+/// [`Downloaded`].
+pub type ReleaseEvent = releases::ReleaseEvent<XrayRelease, Downloaded>;
 
 /// Reads one release list out of the API's JSON.
 ///
-/// Split from the request so the shape it depends on is tested against a
-/// document rather than against the network - which is also what makes a change
-/// in GitHub's answer a failing test instead of a dialog that lists nothing.
+/// The walk - the draft filter, the day, and a release left with nothing being
+/// no release at all - is [`crate::releases::read_releases`]'s; what is fixed
+/// here is the asset type it is read into, which is what the tests below
+/// exercise against the file names upstream really publishes.
 fn parse_releases(json: &str) -> Result<Vec<XrayRelease>, String> {
-    #[derive(Deserialize)]
-    struct RawRelease {
-        tag_name: String,
-        #[serde(default)]
-        published_at: Option<String>,
-        #[serde(default)]
-        prerelease: bool,
-        #[serde(default)]
-        draft: bool,
-        #[serde(default)]
-        assets: Vec<RawAsset>,
-    }
-
-    #[derive(Deserialize)]
-    struct RawAsset {
-        name: String,
-        #[serde(default)]
-        size: u64,
-        browser_download_url: String,
-    }
-
-    let raw: Vec<RawRelease> = serde_json::from_str(json)
-        .map_err(|error| format!("the reply was not the release list this expects: {error}"))?;
-
-    Ok(raw
-        .into_iter()
-        // A draft is not published, and the API can hand one to a caller that is
-        // allowed to see it; a pre-release is listed, because the tag says so.
-        .filter(|release| !release.draft)
-        .filter_map(|release| {
-            let RawRelease {
-                tag_name,
-                published_at,
-                prerelease,
-                draft: _,
-                assets,
-            } = release;
-            let assets: Vec<XrayAsset> = assets
-                .into_iter()
-                .filter_map(|asset| {
-                    let (platform, architecture) = classify(&asset.name)?;
-                    Some(XrayAsset {
-                        name: asset.name,
-                        url: asset.browser_download_url,
-                        size: asset.size,
-                        platform,
-                        architecture,
-                    })
-                })
-                .collect();
-            // A release this program has nothing to run from is not a choice;
-            // listing it would be a row of buttons that are all absent.
-            if assets.is_empty() {
-                return None;
-            }
-            Some(XrayRelease {
-                tag: tag_name,
-                published: published_day(published_at.as_deref()),
-                prerelease,
-                assets,
-            })
-        })
-        .collect())
-}
-
-/// The publication date, as `YYYY-MM-DD`.
-fn published_day(at: Option<&str>) -> String {
-    at.map(|at| at.chars().take(10).collect())
-        .unwrap_or_default()
+    releases::read_releases(json)
 }
 
 #[cfg(test)]

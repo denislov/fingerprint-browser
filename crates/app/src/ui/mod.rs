@@ -570,6 +570,7 @@ impl AppView {
 pub(crate) mod components;
 mod cores;
 mod details;
+mod downloads;
 pub(crate) mod icons;
 pub(crate) mod keys;
 mod lifecycle;

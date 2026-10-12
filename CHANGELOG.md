@@ -51,6 +51,17 @@ says nothing about, and the notes are that section rather than the whole file.
   redraw the clock still owns belongs to the two places that read the clock
   themselves - a log line's age, and how long a running profile has been up.
 
+- **The two downloads share one implementation** (Window): the browser-core and
+  Xray-engine downloads had their own copy each of the same machinery - the
+  GitHub API request, the reading of the release list, the streaming fetch with
+  its `.part` rename and progress reports, the download's state in the window,
+  the progress row and the footer's two buttons. That machinery is one
+  implementation now (`releases.rs`, its sentences in `text/releases.rs`, the
+  dialogs' common pieces in `ui/downloads.rs`), and each feature keeps what it
+  actually differs in: which assets a release offers, what a finished download
+  becomes, and what each dialog says. Nothing a reader sees, downloads or finds
+  on disk has changed.
+
 ### Fixed
 
 - **A database that will not open says why** (Startup): an installation whose
