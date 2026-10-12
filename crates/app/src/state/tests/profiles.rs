@@ -399,12 +399,57 @@ fn refresh_runtime_picks_up_external_state_changes() {
             message: "browser exited".to_string(),
         },
     );
-    fixture.state.refresh_runtime();
+    assert!(
+        fixture.state.refresh_runtime(),
+        "the crash moved something, and the tick redraws on that answer"
+    );
+    // A second look at the same snapshots must not claim another change: this
+    // is what keeps an idle window from redrawing once a second.
+    assert!(
+        !fixture.state.refresh_runtime(),
+        "nothing changed the second time"
+    );
 
     let row = fixture.state.selected().expect("selected row");
     assert_eq!(row.state_label(en()), "Crashed");
     assert_eq!(row.state_message(), Some("browser exited"));
     assert!(row.can_start());
+}
+
+/// Only the places that read the clock keep the tick redrawing: the log page's
+/// ages, and the details panel's uptime. Everything else changes when something
+/// changed, and the change itself is what asks for the frame.
+#[test]
+fn the_tick_redraws_for_the_clock_only_where_one_is_shown() {
+    let mut fixture = fixture();
+    seed_core(&fixture);
+    fixture.state.load().expect("load");
+    let id = fixture.state.create_profile("Primary").expect("create");
+
+    // Creating a profile selects it, so its details panel is up - and the
+    // uptime field there is read off the clock.
+    assert!(
+        fixture.state.clock_driven(),
+        "the details panel shows how long the profile has been up"
+    );
+    fixture.state.close_details();
+    assert!(
+        !fixture.state.clock_driven(),
+        "the profiles list shows no ages"
+    );
+    fixture.state.set_page(Page::Log);
+    assert!(
+        fixture.state.clock_driven(),
+        "a log line's age is computed on every render"
+    );
+    fixture.state.set_page(Page::Profiles);
+    fixture.state.select(id);
+    assert!(
+        fixture.state.clock_driven(),
+        "the panel carries the uptime back with it"
+    );
+    fixture.state.close_details();
+    assert!(!fixture.state.clock_driven(), "and no panel, no uptime");
 }
 
 #[test]

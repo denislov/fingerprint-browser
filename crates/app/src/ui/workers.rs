@@ -28,18 +28,24 @@ impl AppView {
                     let maintained = view.drain_maintenance(cx);
                     let released = view.drain_releases(cx);
                     let engines = view.drain_xray_releases(cx);
-                    if notified
-                        || reconcile
+                    let drained = notified
                         || verified
                         || tested
                         || opened
                         || copied
                         || maintained
                         || released
-                        || engines
-                    {
-                        view.state.refresh_runtime();
-                        cx.notify();
+                        || engines;
+                    if drained || reconcile {
+                        let changed = view.state.refresh_runtime();
+                        // The tick's own redraw, once a second, is worth it
+                        // only when something moved: a queue answered, a
+                        // runtime state that changed, or a place whose text is
+                        // read off the clock. Everything else the queues
+                        // already redraw for.
+                        if drained || changed || view.state.clock_driven() {
+                            cx.notify();
+                        }
                     }
                     // The toasts and the tray's requests are both carried out
                     // from outside this update: one updates the root view the

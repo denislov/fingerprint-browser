@@ -112,6 +112,17 @@ impl Text {
         }
     }
 
+    /// The database could not be opened, which is the one failure the window
+    /// cannot be shown for: the window's own state lives in it.
+    pub fn storage_open_failed(&self, error: &str) -> String {
+        match self.lang {
+            Lang::En => {
+                format!("the database could not be opened, so this run will not start: {error}")
+            }
+            Lang::Zh => format!("无法打开数据库，因此本次运行不会启动：{error}"),
+        }
+    }
+
     /// The first line of the activity log: what this run is and where it keeps
     /// its files, which is what a problem report is asked for first.
     pub fn run_started(&self, build: &str, platform: &str, data_dir: &str) -> String {

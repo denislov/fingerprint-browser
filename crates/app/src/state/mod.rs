@@ -554,11 +554,26 @@ impl AppState {
     }
 
     /// Reconcile snapshots only; used by the periodic tick and after commands.
-    pub fn refresh_runtime(&mut self) {
+    ///
+    /// Says whether anything the window draws is different now - a snapshot
+    /// that moved, a start the supervisor acknowledged, a proxy check that ran
+    /// out its lease. The tick redraws when it did and leaves the window alone
+    /// when it did not: a window that redraws on a clock of its own spends a
+    /// laptop's battery drawing the same picture.
+    pub fn refresh_runtime(&mut self) -> bool {
+        let mut changed = false;
         let runtime = Arc::clone(&self.runtime);
         for row in &mut self.rows {
-            row.checking_proxy = self.pending_starts.contains_key(&row.profile.id);
-            row.snapshot = runtime.snapshot(row.profile.id);
+            let checking_proxy = self.pending_starts.contains_key(&row.profile.id);
+            if row.checking_proxy != checking_proxy {
+                row.checking_proxy = checking_proxy;
+                changed = true;
+            }
+            let snapshot = runtime.snapshot(row.profile.id);
+            if row.snapshot != snapshot {
+                row.snapshot = snapshot;
+                changed = true;
+            }
             // Old failure/running snapshots do not answer a newly queued start.
             if self
                 .queued_starts
@@ -571,8 +586,13 @@ impl AppState {
             {
                 self.queued_starts.remove(&row.profile.id);
                 self.operations.free(row.profile.id, Operation::Starting);
+                changed = true;
             }
-            row.queued_start = self.queued_starts.contains_key(&row.profile.id);
+            let queued_start = self.queued_starts.contains_key(&row.profile.id);
+            if row.queued_start != queued_start {
+                row.queued_start = queued_start;
+                changed = true;
+            }
         }
 
         // A check nobody ever answered is called off here rather than left to
@@ -584,10 +604,22 @@ impl AppState {
             .filter(|(_, pending)| pending.asked.elapsed() >= CHECK_LEASE)
             .map(|(profile, _)| *profile)
             .collect();
+        changed |= !unanswered.is_empty();
         for profile in unanswered {
             let reason = self.text().proxy_check_timed_out();
             self.cancel_pending_start(profile, reason);
         }
+        changed
+    }
+
+    /// Whether anything on screen is read off the clock rather than off the
+    /// configuration: a log line's age, a running profile's uptime.
+    ///
+    /// Those two places are the reason the tick keeps redrawing at rest. Every
+    /// other pixel changes when something changed, which is where the change
+    /// itself comes from.
+    pub fn clock_driven(&self) -> bool {
+        self.page == Page::Log || self.details_open
     }
 
     /// The row of one profile, for the places that ask about it by identifier.

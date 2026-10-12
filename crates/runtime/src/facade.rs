@@ -3,7 +3,7 @@ use crate::events::StartParams;
 use domain::{ProfileId, RuntimeState};
 use std::time::SystemTime;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSnapshot {
     /// Last start/restart fully handled or cancelled by the supervisor.
     pub acknowledged_start: u64,

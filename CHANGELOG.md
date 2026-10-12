@@ -44,6 +44,22 @@ says nothing about, and the notes are that section rather than the whole file.
   landed. The banner notices are unchanged, so a downloaded core is still
   announced, and refused, exactly like one added by hand.
 
+- **The window redraws when something changed** (Window): the tick used to
+  redraw the whole window once a second whether or not anything had moved. The
+  runtime rows are compared with what is on screen first now, and a frame is
+  asked for only when the answer is that something is different. The one
+  redraw the clock still owns belongs to the two places that read the clock
+  themselves - a log line's age, and how long a running profile has been up.
+
+### Fixed
+
+- **A database that will not open says why** (Startup): an installation whose
+  `app.db` cannot be opened - an unreadable file, a directory without
+  permission, another program holding it - used to end in a panic message and
+  nothing else. It now says what failed, on the terminal, in the configured
+  language, writes the report `--diagnostics` writes beside it (the question it
+  answers is "why will it not start"), and exits with code 1.
+
 ## [0.4.0] - 2026-10-04
 
 ### Added

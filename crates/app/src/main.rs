@@ -184,7 +184,21 @@ fn main() {
         settings.text(),
     );
 
-    let storage = SqliteStorage::open(data_dir.join("app.db")).expect("open sqlite storage");
+    // The one failure the window cannot show, because the window's own state
+    // lives in this database. What is said instead is the reason, out loud and
+    // in a report - "why will it not start" is what the report is for.
+    let storage = match SqliteStorage::open(data_dir.join("app.db")) {
+        Ok(storage) => storage,
+        Err(error) => {
+            eprintln!("{}", t.storage_open_failed(&error.to_string()));
+            let destination = paths::default_diagnostics_file(&data_dir, SystemTime::now());
+            match diagnostics::write_for(&settings, &destination, t) {
+                Ok(()) => eprintln!("{}", t.diag_written(&destination.display().to_string())),
+                Err(error) => eprintln!("{error}"),
+            }
+            std::process::exit(1);
+        }
+    };
     let profile_repo: Arc<dyn ProfileRepository> = Arc::new(storage.profiles());
     let core_repo: Arc<dyn CoreRepository> = Arc::new(storage.cores());
     let proxy_repo: Arc<dyn ProxyRepository> = Arc::new(storage.proxies());
