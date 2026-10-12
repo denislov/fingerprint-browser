@@ -11,6 +11,7 @@
 use super::components::{EmptyState, PageHeader};
 use super::*;
 use crate::core_releases::{AssetKind, CoreAsset, CoreRelease, DownloadJob, Platform, REPOSITORY};
+use domain::BrowserCore;
 use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::progress::Progress;
 
@@ -559,11 +560,12 @@ impl AppView {
     }
 
     /// Opens the form for a new core, or for one that is already registered.
-    /// Opens the form for a new core, or for one that is already registered.
     ///
     /// Adding goes through the service, which probes the binary: the version a
     /// core claims decides what the engine may be asked to spoof, so it is read
-    /// rather than typed.
+    /// rather than typed. The read runs on a worker - see
+    /// [`AppView::start_core_save`] - so the form stays open over it and is
+    /// settled when the answer lands.
     pub(super) fn on_edit_core(
         &mut self,
         id: Option<CoreId>,
@@ -582,6 +584,9 @@ impl AppView {
             None => CoreEditor::new(t, window, cx),
         });
         self.core_editor = Some(core_editor.clone());
+        // The waiter belongs to the form that asked: a form opened while
+        // another save is out does not adopt that answer.
+        self.core_save_waiter = None;
         let view = cx.entity().downgrade();
         let accepted = core_editor.clone();
         window.open_dialog(cx, move |dialog, _, cx| {
@@ -600,7 +605,22 @@ impl AppView {
                         )
                         .child(DialogAction::new().child(Button::new("ok").label(t.save))),
                 )
+                .on_close({
+                    let view = view.clone();
+                    move |_, _, cx| {
+                        // The form went away while its probe was out. The
+                        // answer still lands in the banner; what must not
+                        // happen is it landing on a form opened later, or
+                        // closing whatever dialog is up by then.
+                        let _ = view.update(cx, |view, _| view.core_save_waiter = None);
+                    }
+                })
                 .on_ok(move |_, _, cx| {
+                    // A save is already out; the second press waits for the
+                    // answer rather than asking again.
+                    if core_editor.read(cx).checking() {
+                        return false;
+                    }
                     let editing = core_editor.read(cx).is_edit();
                     let name = core_editor.read(cx).name(cx);
                     let path = core_editor.read(cx).executable(cx);
@@ -612,43 +632,128 @@ impl AppView {
                         Ok(None)
                     };
 
-                    let saved: Result<(), String> = match built {
+                    // Only what can be seen without loading the binary is
+                    // refused here, on the form; the probe's own refusal comes
+                    // back through `AppView::settle_core_save`.
+                    let refusal = match built {
                         Ok(core) => view
                             .update(cx, |view, _| {
-                                let result = match core {
-                                    Some(core) => view.state.update_core(core),
-                                    None => view.state.add_core(name, path).map(|_| ()),
-                                };
-                                match result {
-                                    Ok(()) => Ok(()),
-                                    Err(error) => {
-                                        let message = error.to_string();
-                                        view.state.push_notice(message.clone(), true);
-                                        Err(message)
-                                    }
-                                }
+                                view.start_core_save(core, name, path, accepted.clone());
                             })
-                            .unwrap_or_else(|_| Err(t.window_gone.to_string())),
-                        Err(error) => Err(error),
+                            .err()
+                            .map(|_| t.window_gone.to_string()),
+                        Err(error) => Some(error),
                     };
-                    match saved {
-                        Ok(()) => {
-                            accepted.update(cx, |editor, cx| {
-                                editor.set_error(None);
-                                cx.notify();
-                            });
-                            true
-                        }
-                        Err(message) => {
-                            accepted.update(cx, |editor, cx| {
-                                editor.set_error(Some(message));
-                                cx.notify();
-                            });
-                            false
-                        }
+                    match refusal {
+                        None => accepted.update(cx, |editor, cx| {
+                            editor.set_error(None);
+                            editor.set_checking(true);
+                            cx.notify();
+                        }),
+                        Some(message) => accepted.update(cx, |editor, cx| {
+                            editor.set_error(Some(message));
+                            cx.notify();
+                        }),
                     }
+                    // Never through this door: a form that closed on Save
+                    // would take the reason with it. It closes when the
+                    // answer arrives instead.
+                    false
                 })
         });
+    }
+
+    /// Starts a core save on a worker and marks the form as waiting.
+    ///
+    /// The probe is the part that waits on a program this window did not
+    /// write, so it is the part that runs off this thread; what comes back
+    /// arrives through the maintenance channel and is applied by
+    /// [`AppView::settle_core_save`].
+    pub(super) fn start_core_save(
+        &mut self,
+        core: Option<BrowserCore>,
+        name: Option<String>,
+        path: PathBuf,
+        editor: Entity<CoreEditor>,
+    ) {
+        self.core_save_seq += 1;
+        let token = self.core_save_seq;
+        let sender = self.maintenance_tx.clone();
+        match core {
+            Some(core) => {
+                let job = self
+                    .state
+                    .begin_update_core(core, maintenance::CoreSaveOrigin::Form { token });
+                let origin = job.origin.clone();
+                std::thread::spawn(move || {
+                    let result = maintenance::run_update(job);
+                    let _ = sender.send(maintenance::Outcome::CoreUpdated { origin, result });
+                });
+            }
+            None => {
+                let job = self.state.begin_add_core(
+                    name,
+                    path,
+                    maintenance::CoreSaveOrigin::Form { token },
+                );
+                let origin = job.origin.clone();
+                std::thread::spawn(move || {
+                    let result = maintenance::run_add(job);
+                    let _ = sender.send(maintenance::Outcome::CoreAdded { origin, result });
+                });
+            }
+        }
+        self.core_save_waiter = Some((token, editor));
+    }
+
+    /// Applies a finished core save to the form that asked for it.
+    ///
+    /// The state has already said what happened in the banner. What the form
+    /// adds is the two places the answer belongs to: a refusal is shown on the
+    /// form, where the path that was refused still is, and a save that worked
+    /// closes it. An answer is only applied to the form still waiting for that
+    /// ask's number, so a form cancelled while its probe ran is not settled by
+    /// it - the banner is where that reader finds out - and a form opened
+    /// later never sees an older answer.
+    pub(super) fn settle_core_save(
+        &mut self,
+        cx: &mut Context<Self>,
+        origin: &maintenance::CoreSaveOrigin,
+        result: Result<BrowserCore, String>,
+    ) {
+        let maintenance::CoreSaveOrigin::Form { token } = origin else {
+            return;
+        };
+        let waiting = self
+            .core_save_waiter
+            .as_ref()
+            .is_some_and(|(asked, _)| asked == token);
+        if !waiting {
+            return;
+        }
+        let Some((_, waiter)) = self.core_save_waiter.take() else {
+            return;
+        };
+        match result {
+            Ok(_) => {
+                waiter.update(cx, |editor, cx| {
+                    editor.set_checking(false);
+                    cx.notify();
+                });
+                // The answer landed, so the form has nothing left to wait for.
+                // Closing needs a window - the answer came through a channel,
+                // where there is none - so every window this view is in is
+                // asked; a window with no dialog up does nothing.
+                for window in cx.windows() {
+                    let _ = cx.update_window(window, |_, window, cx| window.close_dialog(cx));
+                }
+            }
+            Err(message) => waiter.update(cx, |editor, cx| {
+                editor.set_checking(false);
+                editor.set_error(Some(message));
+                cx.notify();
+            }),
+        }
     }
 }
 

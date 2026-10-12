@@ -645,6 +645,8 @@ catalog! {
     version_field => "Version" => "版本";
     version_help => "Read from the binary. Saving a different executable re-reads it."
         => "从可执行文件读取。换成别的可执行文件保存时会重新读取。";
+    core_checking => "Checking the binary - it is asked for its version, and the window does not wait for the answer."
+        => "正在检查可执行文件——向它询问版本，窗口不会停下来等它回答。";
 
     // ---- the paste dialog ----
     import_link_title => "Import from a link" => "从链接导入";

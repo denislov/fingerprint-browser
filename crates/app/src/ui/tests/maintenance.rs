@@ -61,6 +61,9 @@ fn a_fresh_installation_can_be_walked_from_no_core_to_a_running_profile(cx: &mut
         });
     });
     cx.update(|window, cx| window.click("ok", cx));
+    // The form is settled - and closed - by the answer the worker's probe
+    // sends back, not by the click.
+    wait_for_core_save(cx, &view);
     settle(cx);
     let rows = view.read_with(cx, |view, _| view.state().core_rows().expect("rows"));
     assert_eq!(rows.len(), 1, "the installation has a core now");

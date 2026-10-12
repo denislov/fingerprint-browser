@@ -108,6 +108,8 @@ fn a_core_can_be_added_from_the_window(cx: &mut TestAppContext) {
         });
     });
     cx.update(|window, cx| window.click("ok", cx));
+    // The probe runs on a worker; the form closes when its answer lands.
+    wait_for_core_save(cx, &view);
     settle(cx);
 
     let rows = view.read_with(cx, |view, _| view.state().core_rows().expect("rows"));
@@ -149,6 +151,8 @@ fn a_refused_core_form_says_why_and_stays_open(cx: &mut TestAppContext) {
         });
     });
     cx.update(|window, cx| window.click("ok", cx));
+    // The refusal is the probe's, and the probe runs on a worker.
+    wait_for_core_save(cx, &view);
     settle(cx);
 
     assert!(

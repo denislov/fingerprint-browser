@@ -21,6 +21,15 @@ fn asset() -> CoreAsset {
     }
 }
 
+/// Runs the registration a finished download handed back, the way the window's
+/// worker does: the probe, then the same report a form's save gets.
+fn register(fixture: &mut Fixture, job: crate::maintenance::AddJob) -> Result<BrowserCore, String> {
+    let origin = job.origin.clone();
+    let result = crate::maintenance::run_add(job);
+    fixture.state.finish_add_core(&origin, &result);
+    result
+}
+
 #[test]
 fn a_fetched_list_is_what_the_dialog_shows() {
     let mut fixture = fixture();
@@ -166,14 +175,18 @@ fn a_downloaded_browser_is_registered_with_the_version_it_reports() {
         2048,
     );
 
-    fixture.state.finish_core_download(
-        "148.0.7778.215",
-        Ok(Downloaded {
-            file: binary.path_buf().with_extension("zip"),
-            unpacked: Some(binary.path_buf().parent().expect("a parent").to_path_buf()),
-            executable: Some(binary.path_buf()),
-        }),
-    );
+    let job = fixture
+        .state
+        .finish_core_download(
+            "148.0.7778.215",
+            Ok(Downloaded {
+                file: binary.path_buf().with_extension("zip"),
+                unpacked: Some(binary.path_buf().parent().expect("a parent").to_path_buf()),
+                executable: Some(binary.path_buf()),
+            }),
+        )
+        .expect("the executable is registered through a probe");
+    register(&mut fixture, job).expect("the probe reads the binary's version");
 
     assert!(fixture.state.download().is_none(), "the row is free again");
     let rows = fixture.state.core_rows().expect("rows");
@@ -195,13 +208,20 @@ fn a_downloaded_browser_that_reports_nothing_names_the_file() {
         .begin_core_download("148.0.7778.215", &asset)
         .expect("accepted");
 
-    fixture.state.finish_core_download(
-        "148.0.7778.215",
-        Ok(Downloaded {
-            file: binary.path_buf().with_extension("zip"),
-            unpacked: None,
-            executable: Some(binary.path_buf()),
-        }),
+    let job = fixture
+        .state
+        .finish_core_download(
+            "148.0.7778.215",
+            Ok(Downloaded {
+                file: binary.path_buf().with_extension("zip"),
+                unpacked: None,
+                executable: Some(binary.path_buf()),
+            }),
+        )
+        .expect("the executable is registered through a probe");
+    assert!(
+        register(&mut fixture, job).is_err(),
+        "a binary that answers nothing cannot be registered"
     );
 
     let notice = fixture.state.notice().expect("a refusal is shown");
@@ -243,7 +263,7 @@ fn a_file_that_is_not_a_core_says_where_it_is() {
         .release_dir("148.0.7778.215")
         .join(&asset.name);
 
-    fixture.state.finish_core_download(
+    let job = fixture.state.finish_core_download(
         "148.0.7778.215",
         Ok(Downloaded {
             file: file.clone(),
@@ -252,6 +272,10 @@ fn a_file_that_is_not_a_core_says_where_it_is() {
         }),
     );
 
+    assert!(
+        job.is_none(),
+        "a file with no browser in it is not registered"
+    );
     let notice = fixture.state.notice().expect("the reader is told");
     assert!(
         notice.message.contains(&file.display().to_string()),
@@ -276,7 +300,7 @@ fn an_archive_with_no_browser_says_where_it_was_unpacked() {
         .release_dir("148.0.7778.215")
         .join(crate::core_releases::UNPACK_DIR);
 
-    fixture.state.finish_core_download(
+    let job = fixture.state.finish_core_download(
         "148.0.7778.215",
         Ok(Downloaded {
             file: directory.join(&asset.name),
@@ -285,6 +309,10 @@ fn an_archive_with_no_browser_says_where_it_was_unpacked() {
         }),
     );
 
+    assert!(
+        job.is_none(),
+        "an archive with no browser in it is not registered"
+    );
     let notice = fixture.state.notice().expect("the reader is told");
     assert!(
         notice.message.contains(&directory.display().to_string()),
@@ -309,11 +337,12 @@ fn a_failed_download_is_reported_and_registers_nothing() {
         .begin_core_download("148.0.7778.215", &asset)
         .expect("accepted");
 
-    fixture.state.finish_core_download(
+    let job = fixture.state.finish_core_download(
         "148.0.7778.215",
         Err("could not download it: the connection was reset".to_string()),
     );
 
+    assert!(job.is_none(), "a failed download registers nothing");
     assert!(fixture.state.download().is_none());
     let notice = fixture.state.notice().expect("the failure is shown");
     assert!(notice.error);

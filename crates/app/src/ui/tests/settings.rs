@@ -472,6 +472,9 @@ fn re_detecting_from_the_window_reports_what_it_found(cx: &mut TestAppContext) {
         });
     });
     cx.update(|window, cx| window.click("ok", cx));
+    // The form closes when the worker's probe answers, and the click below
+    // needs it closed: an open dialog covers the page it would be clicking on.
+    wait_for_core_save(cx, &view);
     settle(cx);
 
     // The binary behind that path is replaced by an older build.
@@ -484,6 +487,15 @@ fn re_detecting_from_the_window_reports_what_it_found(cx: &mut TestAppContext) {
         .position(|row| row.core.executable == path)
         .expect("the added core is listed");
     cx.update(|window, cx| window.click(format!("redetect-core-{index}"), cx));
+    // This probe runs on a worker too: the row shows the new version when the
+    // answer lands.
+    wait_for_state(cx, &view, |state| {
+        state
+            .core_rows()
+            .expect("rows")
+            .iter()
+            .any(|row| row.core.executable == path && row.core.major == 128)
+    });
     settle(cx);
 
     let rows = view.read_with(cx, |view, _| view.state().core_rows().expect("rows"));

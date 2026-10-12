@@ -400,7 +400,7 @@ fn wait_for_state<C: gpui_kit::AppContext>(
             view.drain_proxy_tests();
             view.drain_open_results();
             view.drain_browser_data();
-            view.drain_maintenance();
+            view.drain_maintenance(cx);
             view.drain_releases(cx);
             view.drain_xray_releases(cx);
             cx.notify();
@@ -547,6 +547,27 @@ fn settle(cx: &mut gpui_kit::VisualTestContext) {
     cx.update(|window, cx| {
         window.draw(cx).clear(cx);
     });
+}
+
+/// Drives the maintenance queue until a core save has been answered.
+///
+/// A save - the Add Core form's, or an edit that re-reads a version - probes
+/// the binary on a worker, and the answer arrives through the channel the tick
+/// drains. This is that drain, run until nothing is waiting on the form: a
+/// refusal shows on the form, and a save that worked closes it.
+fn wait_for_core_save(cx: &mut gpui_kit::VisualTestContext, view: &gpui_kit::Entity<AppView>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while view.read_with(cx, |view, _| view.core_save_waiter.is_some()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the core save never came back"
+        );
+        view.update(cx, |view, cx| {
+            view.drain_maintenance(cx);
+            cx.notify();
+        });
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Types into the Settings page's import path field.

@@ -72,6 +72,19 @@ pub struct AppView {
     proxy_import: Option<Entity<ProxyImport>>,
     /// The browser-core editor behind the open dialog, if any.
     core_editor: Option<Entity<CoreEditor>>,
+    /// The form whose save is out with the worker, if one is, with the number
+    /// of the ask it made.
+    ///
+    /// Its own field rather than a read of [`AppView::core_editor`]: the form
+    /// is closed on a successful save, and what a cancelled form must not do is
+    /// leave the next answer to land on whatever dialog is open by then. This
+    /// one is cleared when the dialog goes away, so an answer for a form that
+    /// is gone is said in the banner and nowhere else - and it is matched by
+    /// the ask's number, so a form opened later never takes an older answer.
+    core_save_waiter: Option<(u64, Entity<CoreEditor>)>,
+    /// Numbers the core-save asks, one per submission; see
+    /// [`AppView::core_save_waiter`].
+    core_save_seq: u64,
     /// The Download Core dialog's body, while one is open.
     ///
     /// A second entity rather than reads of this view from the dialog's own
@@ -269,6 +282,8 @@ impl AppView {
             proxy_editor: None,
             proxy_import: None,
             core_editor: None,
+            core_save_waiter: None,
+            core_save_seq: 0,
             downloads: None,
             xray_downloads: None,
             setting_editor: None,

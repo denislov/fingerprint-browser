@@ -137,8 +137,10 @@ impl AppState {
     ///
     /// The one door the view's worker answers come through, so a new maintenance
     /// task cannot report its result anywhere the window does not hear it. Each
-    /// `finish_` clears the marker, which is what lets the next task run: a task
-    /// that never let go would refuse every task after it.
+    /// `finish_` of a task that took the marker clears it, which is what lets the
+    /// next task run: a task that never let go would refuse every task after it.
+    /// A core save never took it - one probe and one row is not the whole
+    /// installation - so it only says what it found.
     pub fn finish_maintenance(&mut self, outcome: maintenance::Outcome) {
         match outcome {
             maintenance::Outcome::Exported {
@@ -152,6 +154,10 @@ impl AppState {
                 self.finish_restore(&source, &result)
             }
             maintenance::Outcome::Redetected { id, result } => self.finish_redetect(id, &result),
+            maintenance::Outcome::CoreAdded { origin, result } => {
+                self.finish_add_core(&origin, &result)
+            }
+            maintenance::Outcome::CoreUpdated { result, .. } => self.finish_update_core(&result),
         }
     }
 

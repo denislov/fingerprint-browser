@@ -6,6 +6,10 @@
 //! A binary that does not answer is refused with the reason, and the form stays
 //! open with it.
 //!
+//! The read itself runs on a worker - it starts a program this window did not
+//! write and waits for it - so the form shows [`CoreEditor::checking`] while it
+//! is out and cannot be submitted again until the answer lands.
+//!
 //! Re-pointing an existing core at a different binary is the one edit that
 //! re-reads the version, for the same reason.
 
@@ -26,6 +30,8 @@ pub struct CoreEditor {
     base: Option<BrowserCore>,
     name: Entity<InputState>,
     executable: Entity<InputState>,
+    /// A save is out with the worker, waiting on the binary.
+    checking: bool,
     /// Why the last save attempt was refused.
     error: Option<String>,
 }
@@ -41,6 +47,7 @@ impl CoreEditor {
             base: None,
             name: field("", window, cx),
             executable: field("", window, cx),
+            checking: false,
             error: None,
         }
     }
@@ -60,6 +67,7 @@ impl CoreEditor {
             base: Some(core.clone()),
             name: field(&core.name, window, cx),
             executable: field(&core.executable.to_string_lossy(), window, cx),
+            checking: false,
             error: None,
         }
     }
@@ -116,6 +124,15 @@ impl CoreEditor {
 
     pub fn set_error(&mut self, error: Option<String>) {
         self.error = error;
+    }
+
+    /// Whether a save is waiting on the worker's probe.
+    pub fn checking(&self) -> bool {
+        self.checking
+    }
+
+    pub fn set_checking(&mut self, checking: bool) {
+        self.checking = checking;
     }
 
     #[cfg(test)]
@@ -194,7 +211,20 @@ impl Render for CoreEditor {
             );
         }
 
-        if let Some(error) = self.error.clone() {
+        if self.checking {
+            // A line rather than a block: the wait is short and the form is
+            // still the thing being read, so it sits where the refusal will.
+            form = form.footer(
+                div()
+                    .id("core-checking")
+                    .test_support()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(rgb(p.muted))
+                    .child(t.core_checking),
+            );
+        } else if let Some(error) = self.error.clone() {
             form = form.footer(
                 div()
                     .id("core-error")

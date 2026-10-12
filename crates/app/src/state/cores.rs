@@ -30,30 +30,107 @@ impl AppState {
     }
 
     /// Registers a browser binary, reading its version rather than trusting one.
-    pub fn add_core(&mut self, name: Option<String>, path: PathBuf) -> Result<CoreId, AppError> {
+    ///
+    /// The probe starts the binary and waits for it to answer, which is why the
+    /// window runs it on a worker: the job is built here, and what came back is
+    /// applied by [`AppState::finish_add_core`].
+    pub fn begin_add_core(
+        &mut self,
+        name: Option<String>,
+        path: PathBuf,
+        origin: maintenance::CoreSaveOrigin,
+    ) -> maintenance::AddJob {
+        maintenance::AddJob {
+            name,
+            path,
+            cores: Arc::clone(&self.cores),
+            origin,
+        }
+    }
+
+    /// What a registration found, said to the reader.
+    pub fn finish_add_core(
+        &mut self,
+        origin: &maintenance::CoreSaveOrigin,
+        result: &Result<BrowserCore, String>,
+    ) {
         let t = self.text();
-        let core = self.record(self.cores.add(name, path))?;
-        let id = core.id;
-        self.set_notice(Notice::info(t.core_added(
-            &core.name,
-            &core.version,
-            core.major,
-        )));
-        Ok(id)
+        match result {
+            Ok(core) => self.set_notice(Notice::info(t.core_added(
+                &core.name,
+                &core.version,
+                core.major,
+            ))),
+            Err(message) => {
+                let message = match origin {
+                    maintenance::CoreSaveOrigin::Form { .. } => message.clone(),
+                    maintenance::CoreSaveOrigin::Download {
+                        release,
+                        executable,
+                    } => {
+                        t.core_release_unusable(release, &executable.display().to_string(), message)
+                    }
+                };
+                self.set_notice(Notice::error(message));
+            }
+        }
+    }
+
+    /// Registers a binary, the same three steps in a row.
+    ///
+    /// For tests and for the seeders they build: the window runs the probe on a
+    /// worker, and a caller that wants the answer before returning gets the job,
+    /// the read and the report in one call.
+    #[cfg(test)]
+    pub(crate) fn add_core(
+        &mut self,
+        name: Option<String>,
+        path: PathBuf,
+    ) -> Result<CoreId, AppError> {
+        let origin = maintenance::CoreSaveOrigin::Form { token: 0 };
+        let job = self.begin_add_core(name, path, origin.clone());
+        let result = maintenance::run_add(job);
+        self.finish_add_core(&origin, &result);
+        result.map(|core| core.id).map_err(AppError::Other)
     }
 
     /// Saves a core, re-reading the version when its executable changed.
-    pub fn update_core(&mut self, core: BrowserCore) -> Result<(), AppError> {
+    pub fn begin_update_core(
+        &mut self,
+        core: BrowserCore,
+        origin: maintenance::CoreSaveOrigin,
+    ) -> maintenance::UpdateJob {
+        maintenance::UpdateJob {
+            core,
+            cores: Arc::clone(&self.cores),
+            origin,
+        }
+    }
+
+    /// What a save did, said to the reader, with the rows reloaded.
+    pub fn finish_update_core(&mut self, result: &Result<BrowserCore, String>) {
         let t = self.text();
-        let saved = self.record(self.cores.update(core))?;
-        self.set_notice(Notice::info(t.core_saved(
-            &saved.name,
-            &saved.version,
-            saved.major,
-        )));
-        // The rows carry display names that came from this core.
-        self.load_rows()?;
-        Ok(())
+        match result {
+            Ok(saved) => {
+                self.set_notice(Notice::info(t.core_saved(
+                    &saved.name,
+                    &saved.version,
+                    saved.major,
+                )));
+                // The rows carry display names that came from this core.
+                let _ = self.load_rows();
+            }
+            Err(message) => self.set_notice(Notice::error(message.clone())),
+        }
+    }
+
+    /// Saves a core, the same three steps in a row. See [`AppState::add_core`].
+    #[cfg(test)]
+    pub(crate) fn update_core(&mut self, core: BrowserCore) -> Result<(), AppError> {
+        let job = self.begin_update_core(core, maintenance::CoreSaveOrigin::Form { token: 0 });
+        let result = maintenance::run_update(job);
+        self.finish_update_core(&result);
+        result.map(|_| ()).map_err(AppError::Other)
     }
 
     /// Re-reads a core's version, for a binary that was replaced in place.

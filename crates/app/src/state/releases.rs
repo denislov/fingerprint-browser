@@ -145,17 +145,25 @@ impl AppState {
     ///
     /// A core the download produced is registered through the same probe the Add
     /// Core form uses, and announced the same way, so a downloaded core is not a
-    /// second kind of core. A file that is not a core - an installer, a disk
-    /// image, an archive this could not find a browser in - is reported as what
-    /// it is and where it is, because the reader can still use it by hand.
-    pub fn finish_core_download(&mut self, release: &str, result: Result<Downloaded, String>) {
+    /// second kind of core. The probe is a job: the file is on disk and the row
+    /// is stored when the answer arrives, so the window's worker reads the
+    /// version rather than the tick that applied this.
+    ///
+    /// A file that is not a core - an installer, a disk image, an archive this
+    /// could not find a browser in - is reported as what it is and where it is,
+    /// because the reader can still use it by hand.
+    pub fn finish_core_download(
+        &mut self,
+        release: &str,
+        result: Result<Downloaded, String>,
+    ) -> Option<maintenance::AddJob> {
         self.download = None;
         let t = self.text();
         let downloaded = match result {
             Ok(downloaded) => downloaded,
             Err(message) => {
                 self.set_notice(Notice::error(message));
-                return;
+                return None;
             }
         };
 
@@ -170,19 +178,16 @@ impl AppState {
             // and has a file they still have to do something with, and a toast
             // would be gone before they had read the second half.
             self.set_notice(Notice::error(message));
-            return;
+            return None;
         };
 
-        if let Err(error) = self.add_core(None, executable.clone()) {
-            // `add_core` has already said what the probe found; this replaces
-            // that with a sentence that also names the file, because the reader
-            // now has one on disk and needs to know which.
-            let message = t.core_release_unusable(
-                release,
-                &executable.display().to_string(),
-                &error.to_string(),
-            );
-            self.set_notice(Notice::error(message));
-        }
+        Some(self.begin_add_core(
+            None,
+            executable.clone(),
+            maintenance::CoreSaveOrigin::Download {
+                release: release.to_string(),
+                executable,
+            },
+        ))
     }
 }

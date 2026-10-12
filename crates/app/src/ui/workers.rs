@@ -25,7 +25,7 @@ impl AppView {
                     let tested = view.drain_proxy_tests();
                     let opened = view.drain_open_results();
                     let copied = view.drain_browser_data();
-                    let maintained = view.drain_maintenance();
+                    let maintained = view.drain_maintenance(cx);
                     let released = view.drain_releases(cx);
                     let engines = view.drain_xray_releases(cx);
                     if notified
@@ -143,10 +143,23 @@ impl AppView {
     /// Nothing is dropped for having gone stale: a task is about the whole
     /// installation rather than about a runtime state that can change under it,
     /// and its answer is the only record of what it did.
-    pub(super) fn drain_maintenance(&mut self) -> bool {
+    pub(super) fn drain_maintenance(&mut self, cx: &mut Context<Self>) -> bool {
         let mut received = false;
         while let Ok(outcome) = self.maintenance.try_recv() {
+            // A core save also has a form to settle - and the answer is taken
+            // by the form still waiting for that ask, not by whichever form is
+            // open. The rest are the state's alone.
+            let saved = match &outcome {
+                maintenance::Outcome::CoreAdded { origin, result }
+                | maintenance::Outcome::CoreUpdated { origin, result } => {
+                    Some((origin.clone(), result.clone()))
+                }
+                _ => None,
+            };
             self.state.finish_maintenance(outcome);
+            if let Some((origin, result)) = saved {
+                self.settle_core_save(cx, &origin, result);
+            }
             received = true;
         }
         received
@@ -178,7 +191,17 @@ impl AppView {
                     total,
                 } => self.state.update_download(&key, bytes, total),
                 ReleaseEvent::Downloaded { release, result } => {
-                    self.state.finish_core_download(&release, result);
+                    // The registration is a version probe, and the probe is the
+                    // part that waits on a program this window did not write, so
+                    // it runs where the download did not: on a worker.
+                    if let Some(job) = self.state.finish_core_download(&release, result) {
+                        let origin = job.origin.clone();
+                        let sender = self.maintenance_tx.clone();
+                        std::thread::spawn(move || {
+                            let result = maintenance::run_add(job);
+                            let _ = sender.send(maintenance::Outcome::CoreAdded { origin, result });
+                        });
+                    }
                 }
             }
             received = true;

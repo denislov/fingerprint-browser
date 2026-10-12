@@ -33,6 +33,17 @@ says nothing about, and the notes are that section rather than the whole file.
   opens - the probes run together, so the wait is the slowest core's rather than
   their sum.
 
+- **A core is registered without stopping the window** (Window): the Add Core
+  form, an edit that re-points a core, and a browser a finished download
+  unpacked all read the binary's `--version` before storing it - a process the
+  window does not control, started on the thread that draws it. That read runs
+  on a worker now, so a slow or hung binary no longer freezes the window: the
+  form says it is checking, a second press waits for the answer instead of
+  asking again, a refusal is written on the form where the path that was
+  refused still is, and a save that worked closes the form once its answer has
+  landed. The banner notices are unchanged, so a downloaded core is still
+  announced, and refused, exactly like one added by hand.
+
 ## [0.4.0] - 2026-10-04
 
 ### Added
