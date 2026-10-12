@@ -1,6 +1,6 @@
 # Implementation plan
 
-Updated 2026-09-20. This page describes current status and remaining work.
+Updated 2026-10-12. This page describes current status and remaining work.
 Original phased plans and batch notes are preserved in
 [implementation-history.md](implementation-history.md); historical next-batch
 statements there are not current TODOs.
@@ -22,6 +22,7 @@ statements there are not current TODOs.
 | Backup | Configuration export, import and restore are in, from the Settings page, along with the browser-data copy for stopped profiles - see below |
 | Delivery | The program is named and versioned where it is seen: `--version` (version, commit, platform), `--help` in the chosen language, and `--diagnostics`, which writes one report about the installation for a bug report - see [diagnostics.md](diagnostics.md) |
 | Validation | Linux/Windows CI configuration, native process tests, opt-in real Windows Chromium/Xray acceptance |
+| Distribution | Four releases published - `v0.1.0` (2026-09-22) through `v0.4.0` (2026-10-04); the workflow builds the Windows installer and both Linux artifacts and attaches them with their checksums |
 
 The desktop workflow is implemented. “Phase 5 has started” is outdated, and
 “only two proxy protocols” describes the manual form, not the importer/runtime.
@@ -552,12 +553,24 @@ needs no code - the page says so, and says what it does not buy.
 - [x] Failed reclamation retains records; stale records are removed.
 - [x] Real Chromium: simultaneous profiles, cookie isolation/persistence,
   cancellation, normal close, crashes, Xray failure, shutdown and manager crash.
-- [ ] Reproduce remote upstream forwarding on Windows.
+- [ ] Reproduce remote upstream forwarding on Windows. **The one open item:** it
+  needs a Windows machine and a reachable upstream, and no Windows machine is at
+  hand (2026-10-12). The cases above were measured on a real Windows 11 machine;
+  this one was not. See [windows-acceptance.md](windows-acceptance.md).
 - [x] Measure Windows fingerprint surfaces independently of Linux evidence.
 
 Commands and limits: [windows-acceptance.md](windows-acceptance.md).
 
-## Next bounded tasks
+## Bounded tasks
+
+Every task below has closed; the list is kept as the record of what each one did
+and why it was shaped that way. What is left is acceptance rather than
+construction, and it waits on machines this project does not have at hand:
+[Windows lifecycle acceptance](#windows-lifecycle-acceptance) has the one open
+item, the [UI plan](ui-beautification-plan.md) records the platform cases its own
+acceptance could not cover, and
+[limits and next steps](../README.md#limits-and-next-steps) has what is
+deliberately not planned.
 
 1. Profile search: a filter over the list, matching name, seed, core and proxy.
    Deliberately not selection or batch operations - see below. **Done.**
@@ -597,9 +610,10 @@ Commands and limits: [windows-acceptance.md](windows-acceptance.md).
    **Done:** the data directory is locked with the kernel's own lock, taken after
    the command-line questions and before the database opens, and a refused copy
    says who holds it and exits 3. See [One instance](#one-instance).
-5. **The first release.** **Done:** `v0.1.0` release workflow has been verified
-   end-to-end on GitHub Runner, producing and attaching the Windows installer and
-   Linux packages with their checksums.
+5. **The first release.** **Done, and released four times:** `v0.1.0` through
+   `v0.4.0` went out through the workflow, verified end-to-end on GitHub runners,
+   producing and attaching the Windows installer and Linux packages with their
+   checksums. `0.4.0` (2026-10-04) is the current version.
 
 
 ### Why distribution is a task and not a paragraph

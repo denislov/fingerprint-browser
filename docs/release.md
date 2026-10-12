@@ -107,8 +107,8 @@ git, because an artifact is built rather than committed. Every artifact has a
 
 ```sh
 packaging/linux/package.sh
-# dist/fp-browser-0.1.0-linux-x86_64.tar.gz
-# dist/fp-browser_0.1.0_amd64.deb
+# dist/fp-browser-0.4.0-linux-x86_64.tar.gz
+# dist/fp-browser_0.4.0_amd64.deb
 ```
 
 Two artifacts out of one staged set of files, because which files ship is not a
@@ -152,8 +152,8 @@ the binary does not claim.
 `packaging/windows/fp-browser.iss`:
 
 ```powershell
-pwsh -File packaging\windows\package.ps1 -Version 0.1.0
-# dist\fp-browser-0.1.0-windows-x86_64-setup.exe
+pwsh -File packaging\windows\package.ps1 -Version 0.4.0
+# dist\fp-browser-0.4.0-windows-x86_64-setup.exe
 ```
 
 Inno Setup 6, per-user by default (`PrivilegesRequired=lowest`, with the
@@ -191,17 +191,17 @@ Linux, including the archive, the install into a scratch home, running the
 installed binary and the checksum check. The package has been built and checked
 there too - `dpkg-deb --info` and `--contents`, every dependency resolved against
 the distribution's own database, the tree extracted, the extracted binary run and
-the checksum verified - and installing it with `dpkg --install` is the runner's
-step, which has not run anywhere yet. The Windows side has been run too - by
-hand first, then by the `v0.1.0` tag - which makes the runner the first Windows
-machine this project has had: the gate (`scripts/check.ps1`, so the Windows-only
-halves compile and their tests pass) and the packaging script (the
-resource-section check, then the installer build) both ran and passed, and the
-release was published from them.
+the checksum verified - and installing it with `dpkg --install`, the runner's
+step, has run there on every release since `v0.1.0`. The Windows side has been
+run too - by hand first, then by the `v0.1.0` tag, and by every release since -
+which makes the runner the first Windows machine this project has had: the gate
+(`scripts/check.ps1`, so the Windows-only halves compile and their tests pass)
+and the packaging script (the resource-section check, then the installer build)
+both ran and passed, and `v0.1.0` through `v0.4.0` were published from them.
 
 What a runner cannot do is still unverified: nothing has **run** the installer,
 and the program has never been started on Windows. So the two Windows-only paths
-`0.1.0` ships - the tray icon and the single-instance lock - are compiled,
+a release ships - the tray icon and the single-instance lock - are compiled,
 type-checked and tested where a test can run without a desktop, and not seen
 working. If something is wrong there, look in the Windows-only code or in
 `packaging/windows/`.

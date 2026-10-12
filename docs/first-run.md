@@ -130,7 +130,7 @@ copying it; see [backup and restore](backup-and-restore.md).
 
 The path is tested against the fake runtime, not against a real browser: a
 first run on a machine that has one is [acceptance](chromium-acceptance.md), and
-that remains opt-in. Packaging - an installer that puts the binary somewhere and
-a shortcut on the desktop - is the next step in
-[the plan](implementation-plan.md#next-bounded-tasks); today a first run means
-running the binary from a checkout or an unpacked archive.
+that remains opt-in. Packaging is done - a release carries an installer for
+Windows, and for Linux an archive with an installer of its own beside a Debian
+package - but nothing has run the Windows installer, so a first run there is
+still read rather than seen; see [releases](release.md).

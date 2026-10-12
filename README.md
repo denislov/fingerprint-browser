@@ -305,8 +305,11 @@ For a build to give to someone else, [releases](docs/release.md) has the version
 policy, what `[profile.release]` does and why, how the icon is generated, and the
 packaging scripts - a Windows installer, and for Linux an archive with an
 installer of its own beside a Debian package - with the workflow that drives
-them. Nothing has been released yet: there is no published artifact, and the
-Windows half of that path has not run anywhere.
+them. Four releases are published, `v0.1.0` through `v0.4.0`, and the workflow
+has run end to end for each of them; what a runner cannot do is still
+unverified - nothing has run the published Windows installer, and the tray icon
+and the single-instance lock have not been seen working. See the
+[changelog](CHANGELOG.md) for what each version carried.
 
 ## Validation
 
@@ -349,8 +352,10 @@ CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
 - Forced termination cannot guarantee cookie/state flushing. CDP close remains
   the normal stop path; job cleanup protects crash and forced-stop paths.
 - Windows real tests cover profile isolation, cookies, cancellation, normal close,
-  browser/Xray crashes, manager termination and stale-journal cleanup. Remote
-  upstream forwarding and Windows fingerprint measurements remain separate work.
+  browser/Xray crashes, manager termination and stale-journal cleanup, and the
+  fingerprint surfaces were measured on Windows 11 as well. Remote upstream
+  forwarding is the one acceptance case still outstanding, and it needs a Windows
+  machine; see [Windows acceptance](docs/windows-acceptance.md).
 - Four proxy protocols enter through links rather than complete form editors.
 - The X11 backend may keep the manager alive if another client destroys its window
   without the close protocol. Linux recovery handles leftovers on the next start;
@@ -368,15 +373,16 @@ CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
   a refused copy cannot raise the window that already exists - it says which
   process holds the directory and stops.
 
-Next: the first release. The installer, the Linux archive, the Debian package
-and the workflow that builds them are written and the Linux side has been run;
-nothing has been published, so cutting `v0.1.0` is what turns the Windows
-installer and the workflow from read into run. Windows fingerprint acceptance - measuring the
-surfaces on Windows rather than inferring them from Linux evidence, and
-reproducing remote upstream forwarding there - is the remaining acceptance work
-and needs a Windows machine. See the
-[current plan](docs/implementation-plan.md). Batch operations and multi-select are
-not planned, for the reasons recorded there.
+Next: acceptance, and what remains of it needs machines this project does not
+have at hand. Reproducing remote upstream forwarding on Windows is the one open
+item in the Windows checklist, and the window itself has never been seen there -
+the tray icon and the single-instance lock are tested, not observed. The
+lifecycle cases and the fingerprint surfaces were measured on a real Windows 11
+machine; what each covered is in [Windows acceptance](docs/windows-acceptance.md).
+Four releases, `v0.1.0` through `v0.4.0`, are published from the workflow in
+[releases](docs/release.md). See the [current plan](docs/implementation-plan.md).
+Batch operations and multi-select are not planned, for the reasons recorded
+there.
 
 ## Design and evidence
 
