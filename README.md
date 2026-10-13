@@ -305,7 +305,7 @@ For a build to give to someone else, [releases](docs/release.md) has the version
 policy, what `[profile.release]` does and why, how the icon is generated, and the
 packaging scripts - a Windows installer, and for Linux an archive with an
 installer of its own beside a Debian package - with the workflow that drives
-them. Four releases are published, `v0.1.0` through `v0.4.0`, and the workflow
+them. Five releases are published, `v0.1.0` through `v0.5.0`, and the workflow
 has run end to end for each of them; what a runner cannot do is still
 unverified - nothing has run the published Windows installer, and the tray icon
 and the single-instance lock have not been seen working. See the
@@ -379,7 +379,7 @@ item in the Windows checklist, and the window itself has never been seen there -
 the tray icon and the single-instance lock are tested, not observed. The
 lifecycle cases and the fingerprint surfaces were measured on a real Windows 11
 machine; what each covered is in [Windows acceptance](docs/windows-acceptance.md).
-Four releases, `v0.1.0` through `v0.4.0`, are published from the workflow in
+Five releases, `v0.1.0` through `v0.5.0`, are published from the workflow in
 [releases](docs/release.md). See the [current plan](docs/implementation-plan.md).
 Batch operations and multi-select are not planned, for the reasons recorded
 there.

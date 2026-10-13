@@ -22,7 +22,7 @@ statements there are not current TODOs.
 | Backup | Configuration export, import and restore are in, from the Settings page, along with the browser-data copy for stopped profiles - see below |
 | Delivery | The program is named and versioned where it is seen: `--version` (version, commit, platform), `--help` in the chosen language, and `--diagnostics`, which writes one report about the installation for a bug report - see [diagnostics.md](diagnostics.md) |
 | Validation | Linux/Windows CI configuration, native process tests, opt-in real Windows Chromium/Xray acceptance |
-| Distribution | Four releases published - `v0.1.0` (2026-09-22) through `v0.4.0` (2026-10-04); the workflow builds the Windows installer and both Linux artifacts and attaches them with their checksums |
+| Distribution | Five releases published - `v0.1.0` (2026-09-22) through `v0.5.0` (2026-10-13); the workflow builds the Windows installer and both Linux artifacts and attaches them with their checksums |
 
 The desktop workflow is implemented. “Phase 5 has started” is outdated, and
 “only two proxy protocols” describes the manual form, not the importer/runtime.
@@ -610,10 +610,10 @@ deliberately not planned.
    **Done:** the data directory is locked with the kernel's own lock, taken after
    the command-line questions and before the database opens, and a refused copy
    says who holds it and exits 3. See [One instance](#one-instance).
-5. **The first release.** **Done, and released four times:** `v0.1.0` through
-   `v0.4.0` went out through the workflow, verified end-to-end on GitHub runners,
+5. **The first release.** **Done, and released five times:** `v0.1.0` through
+   `v0.5.0` went out through the workflow, verified end-to-end on GitHub runners,
    producing and attaching the Windows installer and Linux packages with their
-   checksums. `0.4.0` (2026-10-04) is the current version.
+   checksums. `0.5.0` (2026-10-13) is the current version.
 
 
 ### Why distribution is a task and not a paragraph
