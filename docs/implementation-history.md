@@ -1,4 +1,4 @@
-> Historical implementation notes through 2026-09-20. Status statements below describe their original batch, not current support. See [the current plan](implementation-plan.md) and [README](../README.md).
+> Historical implementation notes through 2026-09-20. Status statements below describe their original batch, not current support. See [the open work](https://github.com/denislov/fingerprint-browser/issues) and [README](../README.md).
 
 # Implementation Plan v1
 

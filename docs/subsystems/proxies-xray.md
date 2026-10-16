@@ -147,14 +147,21 @@ starting a second engine.
 reaches the engine is what was checked, and refuses a local port of zero. The
 document has three sections: `log` at `warning`, one inbound, and the
 outbounds. The inbound is explicit loopback — `listen: 127.0.0.1`, the reserved
-port, `protocol: socks`, `auth: noauth`, `udp: true`. The profile's outbound is
-written under the engine's protocol name for that kind; credentials go where
-that protocol's engine code looks for them — `servers` for SOCKS5, HTTP,
+port, `protocol: socks`, `auth: noauth`, `udp: true`. The address is written
+out rather than left to the engine: the config does not rely on Xray's
+default listening behaviour. The profile's outbound is written under the
+engine's protocol name for that kind; credentials go where that protocol's
+engine code looks for them — `servers` for SOCKS5, HTTP,
 Shadowsocks and Trojan, `vnext[].users` for VMess and VLESS. The VMess
 `alterId` is omitted when zero (the engine's own default), and a flowless
 VLESS user gets an empty `flow` string rather than a missing field. The
 per-protocol field mapping is the [service contracts](../service-contracts.md)
-section 5.
+section 5. When the machine-proxy hop is added (see below), nothing else
+about the generated config changes. The two outbounds are written in the
+reader's order — the profile's outbound first, the hop second — even though
+the engine resolves `dialerProxy` by tag and does not require that order. The
+inbound keeps `udp: true` either way — with or without the hop — because a
+stream protocol can tunnel its own UDP.
 
 `stream_json` writes `streamSettings` only when the stream is not plain
 (`StreamSettings::is_plain`), renaming the model's fields to the ones the
@@ -174,7 +181,10 @@ the upstream credentials; the directory layout around it is owned by
 ### The machine's own proxy as a first hop
 
 When the "use system proxy" setting is on, the profile's outbound is dialled
-*through* the machine's proxy instead of directly. `with_system_proxy` switches
+*through* the machine's proxy instead of directly. The feature exists because
+a profile's proxy is often reachable only through the machine's own proxy:
+before this, such a profile could not start at all, and repointing that
+profile's proxy somewhere else was the only way out. `with_system_proxy` switches
 `DefaultXrayConfigBuilder` to read the machine when the config is written
 (`Source::Host`), so a machine whose proxy changed after the program started is
 still read as it is now; the reading is `system_proxy::detect`, called for each
@@ -194,7 +204,9 @@ non-empty one that parses), then the platform store — GNOME's `gsettings`
 (`mode: auto` is `Automatic`; manual reads SOCKS before HTTP), macOS
 `scutil --proxy` (HTTPS, then HTTP, then SOCKS, each gated on its enable key),
 or Windows `reg query` (the plain `ProxyServer` entry preferred over the legacy
-`socks=`; `AutoConfigURL` as `Automatic`). Only HTTP and SOCKS5 proxies are
+`socks=`; `AutoConfigURL` as `Automatic`). KDE's own store is deliberately
+not read — a file whose keys have changed shape between releases — and the
+environment is the answer there instead. Only HTTP and SOCKS5 proxies are
 read; other schemes are passed over and `https://` is read as a plain HTTP
 proxy on that port. Credentials are read only where the machine keeps them in
 the clear (URL userinfo, GNOME's own keys). Each source is a local process with
@@ -270,6 +282,13 @@ its config file as the thing an ordinary stop must remove.
   stranger's listener on the released port is not enough - the rule CDP
   readiness already applies by reading `/json/version`. It cannot say that a
   request would travel through the proxy; that is the diagnostic's question.
+- An unreachable machine-proxy hop resets the connection: nothing falls back
+  to dialling the profile's own proxy.
+- An HTTP machine-proxy hop cannot carry UDP: a Shadowsocks or SOCKS5 profile
+  that tunnels UDP loses it, per connection, rather than sending it around the
+  chain.
+- Not established, and deliberately not claimed: that a chain like this hides
+  anything, or that every protocol a profile uses survives the extra hop.
 - Deleting a proxy still assigned to any profile is refused twice: the service
   checks and names the profiles, and the schema keeps the reference
   `ON DELETE RESTRICT`, so a database written or edited outside the program
@@ -292,7 +311,9 @@ Unit tests live with the code:
   `the_machine_proxy_is_an_outbound_the_profile_dials_through`,
   `nothing_is_written_when_the_machine_has_no_proxy_or_chooses_one_by_script`.
 - The machine's proxy: `cargo test -p runtime --lib system_proxy` — e.g.
-  `a_variable_is_read_as_whatever_kind_of_proxy_it_names`.
+  `a_variable_is_read_as_whatever_kind_of_proxy_it_names`. The Windows and
+  macOS machine-proxy readers have not been run on those systems; they are
+  parsed from, and tested over, `reg query` and `scutil --proxy` output.
 - Engine lifetime: the supervisor's tests are Unix-only (`#[cfg(all(test,
   unix))]` in `crates/runtime/src/supervisor.rs`); on Linux,
   `cargo test -p runtime --lib supervisor` — e.g.
@@ -314,7 +335,9 @@ Opt-in suites, `#[ignore]`d and needing a real engine (never part of
   `every_shape_the_builder_makes_is_accepted_by_the_engine`.
 - `XRAY_BIN=/path/to/xray cargo test -p runtime --lib a_hop -- --ignored` —
   `a_hop_config_is_one_the_real_engine_accepts`, the system-proxy hop held
-  against the real engine's `xray run -test`.
+  against the real engine's `xray run -test`. The chain, the credentials, the
+  UDP case and the absent fallback were measured against Xray 26.2.6 with a
+  stand-in pair of proxies — the origin of this opt-in suite.
 - With `XRAY_BIN` and a reachable upstream, `cargo test -p runtime --test
   proxy_diag_real -- --ignored` also runs a temporary engine whose config comes
   from this builder; that suite is the diagnostic path, and the acceptance

@@ -325,14 +325,7 @@ HTTP success
 
 才进入 `Running`。
 
-建议：
-
-```text
-poll interval: 100-250 ms
-timeout: 10-15 s
-```
-
-这些值应进入 Settings，而不是 Profile。
+这些预算在实现中来自设置：`cdp_ready_timeout` 默认 12 s、`xray_ready_timeout` 默认 5 s（`crates/runtime/src/supervisor.rs`）。它们属于 Settings，而不是 Profile。
 
 ---
 

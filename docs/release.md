@@ -64,11 +64,40 @@ Xray, and neither is fetched without a click.
 
 Deliberately **not** in a release: Chromium, Xray, and any installer that offers
 to fetch them. They are the user's binaries; see
-[the plan](implementation-plan.md#why-distribution-is-a-task-and-not-a-paragraph).
+[why distribution is a task of its own](#why-distribution-is-a-task-and-not-a-paragraph).
 Nothing is fetched at first run, and nothing is fetched without a click: both
 engines are downloaded from the page that needs them, one release row per
 version, the build for this machine named as such, and the file unpacked only
 once the reader has asked for that one.
+
+## Why distribution is a task and not a paragraph
+
+Everything above describes a program that only its author can build. Making it
+something someone else can install was a task of its own, deliberately not "add
+an installer": each piece had a rule behind it, so the task was defined as
+rule-driven engineering rather than packaging alone. The rules, in one line
+each:
+
+- **The build describes itself** - the commit is injected by
+  `crates/app/build.rs`.
+- **The first question is answerable without the window** - `--version` reads
+  nothing, `--help` writes nothing, and `--diagnostics` writes the report.
+- **Nothing is installed for the user** - Chromium and Xray are the user's and
+  are fetched only by name.
+- **A report is safe to send** - the database is measured rather than read, and
+  the summary says what is in the file before anyone shares it.
+
+The detail behind each rule is written down on this page, in
+[diagnostics.md](diagnostics.md) and in [first-run.md](first-run.md).
+
+**Done means:** on a clean Windows machine, from an artifact this repository
+produced, a user can install it, see which build they have, be told what to
+supply when there is no browser core, and produce one file to attach to a report
+- and none of it required the program to decide anything on their behalf. This
+half is still unwitnessed: nothing has **run** the installer, and the program
+has never been started on Windows. The remaining item, reproducing remote
+upstream forwarding on Windows, is tracked as
+[issue #5](https://github.com/denislov/fingerprint-browser/issues/5).
 
 ## The build
 

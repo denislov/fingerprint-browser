@@ -6,7 +6,9 @@ a proxy's engine - starting a temporary one when nothing is already running -
 and reports the address the far end saw, or a fault classified by where the
 request stopped. The **read-back** asks a running browser to fetch an address
 endpoint in a tab of its own and reads the address back out of the page, so
-that "the browser was pointed at the proxy" is shown rather than assumed.
+that "the browser was pointed at the proxy" is shown rather than assumed. It
+does not read the command line or compare switch lists: the answer has to come
+from the far end.
 Neither is a fingerprint check: a profile can reproduce every fingerprint claim
 and still be leaking, because a fingerprint is what the page is told while the
 exit address is what the far end sees.
@@ -114,9 +116,13 @@ proxy is edited or deleted, or when no answer has come within `CHECK_LEASE`
    endpoint the settings show, and `expected` is the reading of the proxy's
    most recent test (`ProxyTest::exit_ip`) - nothing when the proxy was never
    tested in this session, when that test failed, or while it is still running.
+   A profile with no proxy makes no claim about the address, and the request
+   itself costs something (the endpoint sees the asking source); when there is
+   nothing to check, the cost is not paid.
 2. The worker runs `CdpFingerprintVerifier::verify`. The fingerprint question is
    settled first (`FingerprintProbe::read_fresh`); a browser that cannot be read
-   at all fails there, never as a path problem.
+   at all fails there, never as a path problem. The two problems are fixed in
+   different places, and the user pressed the fingerprint one.
 3. `EgressProbe::read` puts the address question to the browser:
    - `check_echo_url` refuses an endpoint that is not plain http before anything
      is dialled; `HttpCdpProbe::wait_ready` and `create_page` bound the CDP
@@ -131,7 +137,10 @@ proxy is edited or deleted, or when no answer has come within `CHECK_LEASE`
      and the tab is closed again on every path, best effort.
 4. `verify_egress(expected, &outcome)` turns the outcome into discrepancies. The
    report carries the address (`exit_ip`) or the reason it was not read
-   (`exit_unreadable`), shown by `VerificationReport::exit_label`.
+   (`exit_unreadable`), shown by `VerificationReport::exit_label`. The address
+   goes to the activity log rather than the profile row: there is no room for
+   it on the row, and it is the other half of the answer to "is the traffic
+   leaving the way I meant it to".
 
 ## State and transitions
 
@@ -144,7 +153,9 @@ on frees that profile's lease.
 **The engine a test chooses.** A profile running on the proxy means the test
 probes that profile's engine and records `live: true`; nothing running means a
 temporary engine is started and `live: false`. One is what is happening to a
-profile's traffic, the other a rehearsal, and the row's detail says which.
+profile's traffic, the other a rehearsal, and the row's detail says which. The
+temporary engine exists so that a proxy can be tested before any profile uses
+it.
 
 **The expectation.** `expected` for a read-back is the reading of the proxy's
 most recent test. It is absent when the proxy has not been tested in this
@@ -168,7 +179,9 @@ or never came up, or no loopback SOCKS endpoint accepted the connection),
 `Unreachable` (nothing carried the connection), `Timeout`, `Tls`, `Http(u16)`
 (the endpoint answered with a status that carries no reading, except 401/407
 which are `Auth`), `Reading` (the endpoint answered without an address), and
-`Other`, which carries the engine's own words instead of guessing a class.
+`Other`, which carries the engine's own words instead of guessing a class. The
+classes are kept apart because they are fixed in different places: a refused
+credential is not a network that does not answer.
 
 **Read-back outcomes.** `EgressOutcome` has six variants, kept apart because
 they are fixed in different places:
@@ -218,9 +231,11 @@ and the reading to 4 KiB, and a declared `Content-Length` is preferred over
 waiting for the close, because an endpoint that keeps the connection open would
 turn a good address into a timeout. The SOCKS5 conversation is written out
 rather than delegated because no timeout in a general-purpose client survived a
-peer that accepts a connection and goes silent, and because the protocol's
-reply codes are an exact account where a library's error strings would be a
-guess.
+peer that accepts a connection and goes silent - `ureq`'s SOCKS connector
+handshakes in a worker thread and joins it, so such a peer hangs the call for
+60 seconds however the timeouts are configured (measured) - and because the
+protocol's reply codes are an exact account where a library's error strings
+would be a guess.
 
 **The engine's log names the cause the transport cannot.** An upstream
 rejection does not fail the handshake to the local inbound, so the socket

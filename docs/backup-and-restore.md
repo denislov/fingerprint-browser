@@ -140,12 +140,19 @@ as its own name:
 ```
 
 - `format` and `version` come first so a reader can refuse before parsing
-  anything else. `version` is the version of **this document**, not of the
+  anything else. The reader parses the header on its own first:
+  `ConfigBackup::from_json` (`crates/application/src/config_backup.rs`) reads a
+  two-field `Header` (`format`, `version`) before the full parse, so a file that
+  is not one of ours is refused as foreign (`UnknownFormat`/`UnknownVersion`)
+  rather than as damaged (`Malformed`).
+  `version` is the version of **this document**, not of the
   program: it changes when the shape changes, which is what makes an old file
   readable by a newer build instead of by trusting that the domain types happen
   not to have moved.
 - An unknown `format` is refused, not guessed at - the same rule
   `settings::Stored` already applies with `deny_unknown_fields`.
+- The document is read with `deny_unknown_fields`, so a field this build does
+  not know is refused rather than dropped in silence.
 - `credentials` records what was actually written, so an import does not have to
   inspect every proxy to find out, and a reader can see it before reading.
 - `exported_at` and `source_data_dir` are informational. Nothing decides anything
@@ -169,7 +176,12 @@ Rules that apply either way:
   exhaustive `match`** (`ProxyOutbound::without_credentials`, next to the outbound
   types). A new protocol then cannot be added without deciding what its
   credentials are, because the `match` stops compiling, and there is one test per
-  protocol rather than one test for the protocols someone remembered.
+  protocol rather than one test for the protocols someone remembered. Two more
+  test properties pin the credential-stripping rule besides the per-protocol
+  tests: stripping twice is the same as stripping once (idempotent), and a
+  stripped proxy still names the same server (the transport survives) -
+  `stripping_twice_is_the_same_as_stripping_once` and
+  `a_stripped_proxy_still_names_the_same_server` in `crates/domain/src/proxy.rs`.
   REALITY's `public_key` is the server's public key rather than this client's
   secret, and stripping it is still the safer default: it can be re-entered, and
   a stripped file that over-removes is recoverable where one that under-removes
@@ -363,9 +375,9 @@ goes anywhere else.
 
 Neither verb is per profile: a configuration backup always carries all three
 lists, and a browser-data copy always gathers every profile. The profile list has
-no selection model by a deliberate decision recorded in
-[implementation-plan.md](implementation-plan.md#why-profile-search-stays-a-single-profile-feature),
-and a per-profile copy would need one.
+no selection model by a deliberate decision recorded in the
+[UI reference](subsystems/ui-shell.md#constraints-and-failure-behavior), and a
+per-profile copy would need one.
 
 ## Open questions
 
@@ -478,4 +490,4 @@ All six are in. Things about them worth knowing:
   the button without writing to the machine they run on.
 
 The gate is unchanged and applies to all of it - see
-[implementation-plan.md](implementation-plan.md#required-gate).
+[the code standard](code-standards.md#acceptance-criteria).
