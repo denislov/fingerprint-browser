@@ -15,7 +15,10 @@
 //!   cargo test -p runtime --test proxy_diag_real -- --ignored
 //! ```
 
-use domain::{ProxyId, ProxyOutbound, ProxyProfile, Socks5Outbound};
+mod common;
+
+use common::upstream;
+use domain::ProxyProfile;
 use runtime::diagnostic::{DIAGNOSTIC_CONFIG_FILE, DIAGNOSTIC_LOG_FILE};
 use runtime::{
     DefaultXrayConfigBuilder, DiagnosticRequest, Engine, FaultClass, SocksEchoClient,
@@ -27,53 +30,6 @@ use std::time::Duration;
 /// How long the probe may take. Longer than the shipped default: this runs over
 /// whatever the operator's upstream actually is, not over loopback.
 const PROBE: Duration = Duration::from_secs(30);
-
-/// The upstream to test, taken from the environment.
-///
-/// Either a share link, or the plain `host:port[:user:password]` of a SOCKS5
-/// upstream - which is what a self-hosted proxy usually is, and which no share
-/// link expresses.
-fn upstream() -> ProxyProfile {
-    if let Ok(uri) = std::env::var("PROXY_URI") {
-        let parsed = domain::parse_proxy_uri(&uri).expect("PROXY_URI should be a share link");
-        return ProxyProfile {
-            id: ProxyId::new(),
-            name: parsed.suggested_name(),
-            outbound: parsed.outbound,
-        };
-    }
-
-    let spec = std::env::var("DIAG_SOCKS5").expect(
-        "set PROXY_URI to a share link, or DIAG_SOCKS5 to host:port[:user:password] of a SOCKS5 \
-         upstream",
-    );
-    let mut parts = spec.splitn(3, ':');
-    let host = parts.next().filter(|h| !h.is_empty()).expect("a host");
-    let port: u16 = parts
-        .next()
-        .expect("a port")
-        .parse()
-        .expect("a port number");
-    let (username, password) = match parts.next() {
-        Some(credentials) => {
-            let (user, pass) = credentials
-                .split_once(':')
-                .expect("credentials as user:password");
-            (Some(user.to_string()), Some(pass.to_string()))
-        }
-        None => (None, None),
-    };
-    ProxyProfile {
-        id: ProxyId::new(),
-        name: format!("{host}:{port}"),
-        outbound: ProxyOutbound::Socks5(Socks5Outbound {
-            host: host.to_string(),
-            port,
-            username,
-            password,
-        }),
-    }
-}
 
 fn engine_executable() -> std::ffi::OsString {
     std::env::var_os("XRAY_BIN").expect("set XRAY_BIN to a real Xray executable")

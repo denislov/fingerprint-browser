@@ -355,8 +355,9 @@ CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
 - Windows real tests cover profile isolation, cookies, cancellation, normal close,
   browser/Xray crashes, manager termination and stale-journal cleanup, and the
   fingerprint surfaces were measured on Windows 11 as well. Remote upstream
-  forwarding is the one acceptance case still outstanding, and it needs a Windows
-  machine; see [Windows acceptance](docs/windows-acceptance.md).
+  forwarding was reproduced on Windows on 2026-10-17: a proxied profile started
+  against a real upstream, and the exit address read back out of the browser
+  matched the upstream's own; see [Windows acceptance](docs/windows-acceptance.md).
 - Four proxy protocols enter through links rather than complete form editors.
 - The X11 backend may keep the manager alive if another client destroys its window
   without the close protocol. Linux recovery handles leftovers on the next start;
@@ -374,19 +375,19 @@ CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
   a refused copy cannot raise the window that already exists - it says which
   process holds the directory and stops.
 
-Next: acceptance, and what remains of it needs machines this project does not
-have at hand. Reproducing remote upstream forwarding on Windows is the one open
-item in the Windows checklist (tracked as
-[issue #5](https://github.com/denislov/fingerprint-browser/issues/5)), and the
-window itself has never been seen there -
-the tray icon and the single-instance lock are tested, not observed. The
-lifecycle cases and the fingerprint surfaces were measured on a real Windows 11
-machine; what each covered is in [Windows acceptance](docs/windows-acceptance.md).
-Five releases, `v0.1.0` through `v0.5.0`, are published from the workflow in
-[releases](docs/release.md). Open work is tracked as
-[issues](https://github.com/denislov/fingerprint-browser/issues). Batch
-operations and multi-select are not planned, for the reasons recorded in the
-[UI reference](docs/subsystems/ui-shell.md#constraints-and-failure-behavior).
+Next: the parts of acceptance that still need something this project does not
+have at hand. The window itself has never been seen on Windows - the tray icon
+and the single-instance lock are tested, not observed - and the UI's platform
+surface (fonts, scaling, decorations, multi-display) is unverified, tracked as
+[issue #10](https://github.com/denislov/fingerprint-browser/issues/10). Nothing
+has run the installer. The lifecycle cases and the fingerprint surfaces were
+measured on a real Windows 11 machine, and remote upstream forwarding was
+reproduced there on 2026-10-17; what each covered is in
+[Windows acceptance](docs/windows-acceptance.md). Five releases, `v0.1.0`
+through `v0.5.0`, are published from the workflow in [releases](docs/release.md).
+Open work is tracked as [issues](https://github.com/denislov/fingerprint-browser/issues).
+Batch operations and multi-select are not planned, for the reasons recorded in
+the [UI reference](docs/subsystems/ui-shell.md#constraints-and-failure-behavior).
 
 ## Design and evidence
 
