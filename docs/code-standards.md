@@ -38,6 +38,7 @@ listed as not run, never left out.
    - `XRAY_BIN=... cargo test -p runtime --test xray_real -- --ignored`
    - `XRAY_BIN=... DIAG_SOCKS5='host:port[:user:password]' DIAG_ECHO_URL=http://... cargo test -p runtime --test proxy_diag_real -- --ignored` (`PROXY_URI` takes a share link - `ss://`, `vmess://`, `vless://`, `trojan://`; a plain SOCKS5 upstream goes in `DIAG_SOCKS5`)
    - `CHROMIUM_BIN=... ECHO_URL=http://api.ipify.org cargo test -p app real_chromium_reports_the_address -- --ignored`
+   - `CHROMIUM_BIN=... cargo test -p runtime --test status_page_real -- --ignored` (renders the identity page in a real browser; needs no network - the page is served over loopback)
    - Windows lifecycle: `CHROMIUM_BIN=... XRAY_BIN=... cargo test -p runtime --test windows_real -- --ignored --test-threads=1`
    - The ignored tests in `core_releases` and `xray_releases` dial the GitHub API and download a real core or engine over the network.
 4. **Packaging and workflow changes: the dry run.** Run `Release` from the Actions tab (`workflow_dispatch`): it runs `manifest`, `linux` and `windows` and skips `publish`. The `linux` job unpacks the archive, installs it into a scratch home, runs `--version` from the installed path, verifies every `.sha256` and installs the `.deb` with `dpkg --install`; the `windows` job builds the Inno Setup installer after the packaging script's resource-section check. Say which run proved it.

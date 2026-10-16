@@ -726,9 +726,9 @@ button:disabled { color:var(--soft); cursor:default; }
     return fetch("/api/status", { cache: "no-store" }).then(function (r) { return r.json(); })
       .then(function (s) {
         set("profile", s.profile + " (" + s.profile_id + ")");
-        set("core", s.core + (s.core_major === null ? "" : " \\u00b7 " + s.core_major));
-        set("proxy", s.proxy === null ? "\\u2014" : s.proxy);
-        set("socks", s.socks_port === null ? "\\u2014" : String(s.socks_port));
+        set("core", s.core + (s.core_major === null ? "" : " · " + s.core_major));
+        set("proxy", s.proxy === null ? "—" : s.proxy);
+        set("socks", s.socks_port === null ? "—" : String(s.socks_port));
         set("started", new Date(s.started_at * 1000).toLocaleString());
         if (s.warning) {
           set("warning", s.warning);
