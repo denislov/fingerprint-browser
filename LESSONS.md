@@ -1,4 +1,4 @@
-<!-- reviewed-through: 061b2ee (2026-10-16) -->
+<!-- reviewed-through: 5346151 (2026-10-17) -->
 # Lessons from merged work
 
 fp-browser's code is written, reviewed, merged and released by agents. What we learned is kept here. Read this before changing code. Each lesson is a rule, then why, then the evidence. "Seen" counts the days a review found it. A lesson seen on 3 or more separate days moves into [docs/code-standards.md](docs/code-standards.md).
@@ -27,11 +27,24 @@ After each release, and whenever unreleased work accumulates, the commits since 
 
 ## Verification
 
-**A check named for a guarantee is proved by breaking that guarantee by hand and watching it go red.**
-- A check that has never been seen red is a check of nothing: the failure it exists to catch can pass through it silently while the suite stays green.
-- The orphan-reclaim acceptance probe looked for the profile directory as a bare word, while the browser holds it as `--user-data-dir=<dir>`; "no browser left behind" was green while looking at nothing, and only asserted after the probe was rewritten to match the flag (2026-09-20).
-- The column-alignment test compared column boundaries but never whether a control was inside the window, so a proxies page that overflowed the window at 960 width stayed green until a size matrix test was written (2026-09-23).
-- Seen 2× (2026-09-20, 2026-09-23).
+**A test fixture keeps the identity the code under test reads, for the whole test.**
+- A fixture that can stop looking like what the code matches on races the assertion it exists for, and the test then fails or passes on timing rather than on the behavior.
+- The reclaim test's fixture was `/bin/sh -c "trap '' TERM; echo ready; sleep 60"`; after the `ready` marker, dash replaces itself with the final `sleep` (an execve) and a reader in that window sees an empty `cmdline`, which the inspector reports as `Unknown` by design - so reclaim left the record alone and the test failed 2 of 5 loaded runs (issue #3). The fixture is now a shell that cannot exec its last command (`while :; do sleep 1; done`), verified by hand: no empty-cmdline window over 200k samples, survives a group SIGTERM, gone after a group SIGKILL (17b59f4, 2026-10-16).
+- Seen 1× (2026-10-17).
+
+## Readiness
+
+**A readiness answer belongs to the program that must answer it; a port that opens is not a program that is ready.**
+- A readiness probe has to read an answer only the intended program can give. A bare connect proves an address is reachable, not that the child supposed to bind it is the thing that did.
+- `wait_ready` accepted any listener on the reserved SOCKS port. The port is reserved and released just before Xray is spawned, so a stranger holding it in between let an engine that never bound pass readiness, and the four-case startup test could end a failed case in `Running` (seen once on CI, run 38335769838; issue #2). It now waits for the SOCKS5 greeting the inbound is built to answer (`05 01 00` -> `05 00`) - the rule CDP readiness already applied by reading `/json/version` instead of accepting any listener. That rule was a concrete mechanism on one side of the engine and was never generalized, so the SOCKS path kept its documented bare connect; the new test fails on the old code (ffb1ee3, 2026-10-16).
+- Seen 1× (2026-10-17).
+
+## Documentation
+
+**A command written down is run before it merges.**
+- A documented command is a claim about the program, and an unrun command is a claim nobody has tested - it fails in front of the person the documentation was written for.
+- README documented `PROXY_URI='socks5://host:port'` for `proxy_diag_real`, but `parse_proxy_uri` accepts share links only (`ss://`, `vmess://`, `vless://`, `trojan://`), so the documented command panicked before reaching an engine; the documented form is now `DIAG_SOCKS5='host:port[:user:password]'` beside `DIAG_ECHO_URL`, and it was run before it was written down (ef787e0, 2026-10-16).
+- Seen 1× (2026-10-17).
 
 ## Operations that must not run twice
 
@@ -42,4 +55,6 @@ After each release, and whenever unreleased work accumulates, the commits since 
 
 ## Moved to the code standards
 
-These were seen on three or more days. The rules and their evidence are in [docs/code-standards.md](docs/code-standards.md); a review still checks each one. Nothing has moved yet.
+These were seen on three or more days. The rules and their evidence are in [docs/code-standards.md](docs/code-standards.md); a review still checks each one.
+
+- **A check named for a guarantee is proved by breaking that guarantee by hand and watching it go red** - seen 2026-09-20 (the orphan-reclaim probe matched a bare word while the browser holds `--user-data-dir=<dir>`), 2026-09-23 (the column-alignment test never checked a control was inside the window), 2026-10-17 (the readiness check accepted a stranger's listener where the engine had to answer); moved 2026-10-17.
