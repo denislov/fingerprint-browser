@@ -1,5 +1,10 @@
 # Crate 代码质量审阅与优化方案
 
+> 后续（2026-10-16 补记）：本审阅提出的行为修复已全部落地，逐阶段记录与验证在
+> [code-quality-remediation.md](code-quality-remediation.md)。末尾实施表里 D 阶段（规模基准、
+> 故障矩阵、URI fuzz、明确最低 Rust 版本）没有实施，之前也未在任何地方跟踪——现由
+> [issue #11](https://github.com/denislov/fingerprint-browser/issues/11) 记录，供决定取舍。
+
 审阅日期：2026-09-22。范围：workspace 中的 domain、storage、runtime、application、app；重点沿配置输入、持久化、启动/停止、备份/恢复及 UI 后台任务调用链检查。未修改业务实现。
 
 总体判断：已有清晰分层、较丰富的行为测试和认真设计的进程生命周期机制。主要短板不是格式或语法，而是破坏性操作的原子性、异步任务的互斥，以及跨层不变量没有统一执行。建议先修数据安全和生命周期正确性，再拆大模块；不建议立即增加 crate 或全面更换运行时。
