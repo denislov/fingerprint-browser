@@ -12,6 +12,24 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The architecture page points at the references instead of restating them**
+  (Docs): `docs/architecture.md` keeps the positioning, the architecture diagram,
+  the dependency direction and the principles; the design prose that duplicated
+  the subsystem references became links, and the reference pages gained the
+  rationale that previously lived only on this page (the appearance palette
+  rules, the profile filter, the Xray inbound, the argument order, and more).
+
+### Removed
+
+- **The implementation plan is drained** (Docs): `docs/implementation-plan.md`
+  is deleted. The facts that existed only there moved into the docs that own
+  them - exit modes, releases, UI shell, settings, diagnostics, backup and
+  restore, proxies and Xray, traffic verification - and its one open item,
+  reproducing remote upstream forwarding on Windows, is tracked as
+  [issue #5](https://github.com/denislov/fingerprint-browser/issues/5).
+
 ### Fixed
 
 - **A stranger's port can no longer pass for the engine** (Runtime): the

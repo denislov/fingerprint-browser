@@ -179,3 +179,33 @@ than committed twice.
   is the behaviour every existing record gets.
 - It does not make two data directories one installation. An adopted session
   belongs to the data directory whose runtime directory recorded it.
+
+## One window per data directory
+
+The program holds a kernel-level mutex on the data directory for its whole run:
+`flock(LOCK_EX | LOCK_NB)` on Unix, `LockFileEx` on Windows. The kernel releases
+it when the process ends however it ends - a clean exit, a panic, a `SIGKILL` -
+so there is no lock file whose staleness anyone has to judge. The lock file's
+presence says where the lock is, not that one is held.
+
+A second copy that cannot take the lock names the holder and exits with code 3:
+the holder writes its pid, build and start time into the lock file, and the
+refused run reads the line back before it gives up.
+
+- **What it prevents:** two copies opening the same database, and the second
+  one's startup reclaim reading the first one's session records, finding the
+  children they name alive, and stopping the browsers the first copy is running.
+- **Refusing, not handing over.** There is nothing to hand over - the arguments
+  would have to be rebuilt by someone who is not the caller - and raising the
+  existing window was rejected because that is window-manager code per platform,
+  for a menu item that is only ever clicked once.
+- **What it does not claim:** the lock does not make two copies on one data
+  directory safe - it makes the second one not start.
+- If the filesystem cannot hold a lock at all, the run refuses to start rather
+  than proceeding unguarded: an unopenable lock file ends as `Busy::Unavailable`
+  -> `instance_unavailable` -> exit 1, not a start.
+- The guard is bound as `let _instance` in `main.rs` on purpose: `let _ = ...`
+  would drop the lock on the spot.
+- The config read (and the legacy-config fold) happens before the lock is
+  taken - see [Settings](subsystems/settings.md); the exit code is in
+  [Diagnostics](diagnostics.md).

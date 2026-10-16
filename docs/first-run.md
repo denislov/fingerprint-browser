@@ -9,8 +9,8 @@ file.
 
 The test that walks it end to end is
 `ui::tests::a_fresh_installation_can_be_walked_from_no_core_to_a_running_profile`
-in `crates/app/src/ui.rs`. Each step is also covered on its own; what the walk
-pins is the handover between them.
+in `crates/app/src/ui/tests/maintenance.rs`. Each step is also covered on its
+own; what the walk pins is the handover between them.
 
 ## What the program needs, and where it comes from
 
@@ -32,7 +32,7 @@ browser for you and installs it; nothing here is unpacked until a button is
 pressed, and a core that arrives is registered through the same version probe as
 any binary the user points at, so the major a profile may rely on is read from
 the file rather than taken from the release tag. See
-[the plan](implementation-plan.md#why-distribution-is-a-task-and-not-a-paragraph).
+[why distribution is a task of its own](release.md#why-distribution-is-a-task-and-not-a-paragraph).
 
 ## The walk
 

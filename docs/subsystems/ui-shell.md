@@ -161,7 +161,14 @@ run it on a `std::thread`, send one answer into a channel the tick drains:
   notice saying it opened, or why it did not.
 - Export, import, restore, redetect and core save: a `maintenance::Outcome`
   through the `maintenance` channel; `drain_maintenance` applies it and
-  `settle_core_save` answers the form that asked, matched by its token.
+  `settle_core_save` answers the form that asked, matched by its token. Only one
+  configuration task may be in flight at a time. A second export, import,
+  restore or redetect requested while one is running is refused, and the refusal
+  is said through the notice path: `AppState::begin_maintenance` returns the
+  `maintenance_busy` sentence, "Another configuration task is still running;
+  wait for it to finish." The reason: the four read and write the same file and
+  the same rows, and the window has one button rather than two
+  (`maintenance::Kind` is exactly `Export`/`Import`/`Restore`/`Redetect`).
 - Browser data: `BrowserDataCopier` -> the `browser_data` channel.
 - The two release dialogs: the catalog lists on a worker when the dialog asks
   for it (the first open, or the Refresh button); a download reports `Progress`
@@ -179,8 +186,8 @@ can put it through. None of these fields is runtime state.
 | --- | --- |
 | `page` | The page in force. `set_page` switches it, and re-reads the rows when the page is Proxies or Cores (their usage lists come from the profiles). |
 | `selected`, `details_open` | `select` sets both, so choosing a profile opens the Runtime Details panel. `close_details` closes the panel and keeps the selection, which is why the row stays lit. A selection whose profile has gone is dropped by `load_rows`. |
-| `profile_filter` | The Profiles page's filter text. Narrowing affects the list only: a filtered-out profile keeps running and stays the panel's subject (`visible_rows`, `answers_to`). |
-| `details_tab` | Which of the panel's three views is shown (`DetailsTab::ALL`). |
+| `profile_filter` | The Profiles page's filter text. Narrowing affects the list only: a filtered-out profile keeps running and stays the panel's subject (`visible_rows`, `answers_to`). It matches case-insensitively (`answers_to` in `crates/app/src/state/rows.rs` is the one place the rule lives) against the name, the fingerprint seed, the brand, the platform, the core and the proxy - the seed because it is the one number that identifies a profile whose name has stopped meaning anything, and the core and the proxy because they are what someone scanning similar-looking profiles is looking for and neither is in the name. It matches what is stored, not what the row renders: a profile with no proxy cannot be found by typing the word the row prints for having none. |
+| `details_tab` | Which of the panel's three views is shown (`DetailsTab::ALL`). The effective launch-args view is kept from v1 on purpose: it is worth a lot when investigating version-compatibility problems. |
 | `log_filter`, `expanded_logs` | The Log page's level filter and the lines the reader has opened. A line is keyed by its timestamp, not its index, so new lines do not move it; the set is trimmed with the log's `LOG_CAPACITY`. |
 | `settings_group` | Which of the Settings page's four groups is on screen (`SettingGroup::ALL`: General, Runtime, Data, Diagnostics). Kept in state so leaving the page and returning does not move the reader. |
 | `theme`, `language`, `exit_mode`, `sidebar_collapsed` | Stored settings. Each is written before it is shown or applied; `sidebar_collapsed` and `theme` repaint in the same frame, `language` repaints the whole window (and restarts a live tray icon in the new language), and `exit_mode` only moves its chip because it is read when a window is closed. |
@@ -257,6 +264,58 @@ component theme through `palette(cx)`, so there is one switch, not two.
 - The view never draws what a page is not showing: each page's rows are
   gathered only when that page is drawn, so repainting one list does not read
   another page's tables out of storage.
+- The Profiles list gains a filter and nothing else: there is deliberately no
+  selection model, no multi-select and no batch verb. An earlier scope
+  ("search, selection and bounded batch start/stop/proxy assignment, with
+  per-profile results and cancellation") was dropped after reading the command
+  path, not for lack of room to build it.
+- The supervisor is serial, so a batch would only look parallel: commands
+  arrive on a `crossbeam_channel::bounded(256)` (the app's `EVENT_CAPACITY`),
+  `run()` handles them one at a time on one thread, and a start waits inline for
+  Xray readiness (5 s) and CDP readiness (`cdp_ready_timeout`, 12 s by default) -
+  N profiles cost up to N × 17 s no matter what the UI says.
+- A batch command cannot report per-profile success: `RuntimeService::start`
+  reads storage, sends and returns, the browser comes up later as an event, and
+  the only honest per-profile answer is a snapshot read, which is what the row
+  already shows.
+- Cancelling already works: a `Stop` for a starting profile aborts it and
+  `poll_start_commands` drops that profile's queued `Start`/`Restart`.
+- The scale does not call for it: this is a personal tool with a handful of
+  profiles, and a selection bar and a destructive batch verb are cost with no
+  matching benefit.
+- While a filter is on, the header reads "Showing N of M profiles." and its
+  accessible name also names the term - that is how the reader finds out the
+  list is not the whole list; with no filter it goes back to the sentence
+  explaining what a profile is. An empty list says which kind of empty it is,
+  and only the "all hidden" one offers to clear the filter, because only that
+  one can be undone from the list.
+- The filter field is built on the first render and kept, because an
+  `InputState` needs a window and neither `AppView::new` nor `boot` has one. It
+  is observed rather than subscribed to change events - the field notifies on
+  every edit and reading its value is what the listing needs, so there is no
+  event kind to match on - and `InputState::set_value` deliberately emits no
+  change event, so the field's own clear button and the empty state's button
+  both clear the filter themselves; a test pins that
+  (`a_filter_that_matches_nothing_offers_the_way_back`).
+- The two palettes are written as separate sets of values rather than derived
+  from each other: contrast is relative to the background, so a green that reads
+  on white is nearly invisible on near-black, and the light palette's status
+  colors are pressed darker instead of reusing the same hue. In the light
+  palette the `_strong` variants are darker rather than brighter - the opposite
+  of the dark palette's sense of "strong" - because the name means the role (a
+  status read on a tinted background, or a solid mark), not lightness.
+- The `Palette` fields are semantic names rather than the colors they happen to
+  be, so a light palette is a second set of values and not a second set of call
+  sites (`danger` is the color a failure reads in, whichever mode is on).
+- The Appearance card is first on the Settings page, leading the General group,
+  and its control is a pair of chips rather than a toggle: a toggle shows one
+  option and hides the other behind its label.
+- The refactor that introduced `Palette` replaced the six module-level constants
+  and the scattered hex literals of `crates/app/src/ui.rs` (before the file
+  became `crates/app/src/ui/`) at 96 call sites, and the four dialog forms
+  (`editor.rs`, `proxy_editor.rs`, `core_editor.rs`, `proxy_import.rs`) read the
+  palette the same way as the view: `palette(cx)` where there is a context,
+  `p: Palette` by value where there is not.
 
 ## Verification
 
@@ -290,7 +349,17 @@ Names worth naming, all in `crates/app/src/ui/tests/` and runnable as
 - In `crates/app/src/theme.rs`: `both_palettes_have_readable_contrast`,
   `the_palette_follows_the_component_theme` and
   `both_layers_carry_the_same_accent` - the window's colors and the component
-  theme moving together.
+  theme moving together. `both_palettes_have_readable_contrast` holds WCAG 2.1
+  ratios - 4.5:1 for body text and for supporting text (held to the body-text
+  floor, replacing the old 3:1), 2:1 for `dim` - and checks every status color
+  in both places it is read (on the window and on its paired tinted background
+  inside a badge) and the accent in the three places this window uses it (on the
+  window, on a selected row, as the label of a filled control); the light
+  palette was caught by it on the first run, when three status colors read at
+  3:1 or just under as text. Tests that assert on the component theme serialize
+  through `theme::testing::exclusive`, because the component theme is
+  process-wide state and two tests switching at once would each see the other's
+  palette.
 
 Opt-in suites (`#[ignore]`d; never part of the gate, per
 [code standards](../code-standards.md)):

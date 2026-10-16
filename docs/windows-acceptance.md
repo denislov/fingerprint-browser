@@ -92,7 +92,8 @@ it does not claim a manual GPUI window/Task Manager walkthrough.
 - The Xray lifecycle case uses a local upstream placeholder and does not claim
   remote proxy forwarding. Remote upstream acceptance is still outstanding: it
   needs a Windows machine and a reachable upstream, and no Windows machine is at
-  hand (2026-10-12), so it is the one open item in the plan's Windows checklist.
+  hand (2026-10-12), so it is the one open item, tracked as
+  [issue #5](https://github.com/denislov/fingerprint-browser/issues/5).
 - Controlled tests verify descendant cleanup; real-browser tests additionally
   verify session PIDs, state, configuration and cookie behavior.
 - Forced termination cannot guarantee persistence. Normal stop retains the CDP

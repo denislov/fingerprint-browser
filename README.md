@@ -53,7 +53,7 @@ this repository does not bundle or fork them.
   filter only narrows what is listed: a hidden profile keeps running and stays the
   one the details panel answers for. There is deliberately no multi-select or batch
   operation - see
-  [why](docs/implementation-plan.md#why-profile-search-stays-a-single-profile-feature).
+  [why](docs/subsystems/ui-shell.md#constraints-and-failure-behavior).
 - Export the configuration - cores, proxies and profiles - to a JSON file, and
   import one back, for another machine or for keeping. Proxy credentials are left
   out unless asked for, the export says which file it wrote and whether it carried
@@ -376,14 +376,17 @@ CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
 
 Next: acceptance, and what remains of it needs machines this project does not
 have at hand. Reproducing remote upstream forwarding on Windows is the one open
-item in the Windows checklist, and the window itself has never been seen there -
+item in the Windows checklist (tracked as
+[issue #5](https://github.com/denislov/fingerprint-browser/issues/5)), and the
+window itself has never been seen there -
 the tray icon and the single-instance lock are tested, not observed. The
 lifecycle cases and the fingerprint surfaces were measured on a real Windows 11
 machine; what each covered is in [Windows acceptance](docs/windows-acceptance.md).
 Five releases, `v0.1.0` through `v0.5.0`, are published from the workflow in
-[releases](docs/release.md). See the [current plan](docs/implementation-plan.md).
-Batch operations and multi-select are not planned, for the reasons recorded
-there.
+[releases](docs/release.md). Open work is tracked as
+[issues](https://github.com/denislov/fingerprint-browser/issues). Batch
+operations and multi-select are not planned, for the reasons recorded in the
+[UI reference](docs/subsystems/ui-shell.md#constraints-and-failure-behavior).
 
 ## Design and evidence
 
@@ -395,4 +398,4 @@ there.
   [fingerprint matrix](docs/fingerprint-matrix.md)
 - [Backup and restore](docs/backup-and-restore.md) - export, import, restore and
   the browser-data copy are all in
-- [Current plan](docs/implementation-plan.md), [historical batches](docs/implementation-history.md)
+- [Historical batches](docs/implementation-history.md), [open work](https://github.com/denislov/fingerprint-browser/issues)

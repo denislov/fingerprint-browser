@@ -68,7 +68,9 @@ reader of the config document in the running program, and tests build their own
 ### The layout
 
 One directory holds an installation: everything a run needs is under it, and the
-config file sits inside it rather than beside it.
+config file sits inside it rather than beside it. It is what to look at when
+something is wrong, what to copy when moving machines, and what to delete to
+start over.
 
 | Path under the data directory | What it holds |
 | --- | --- |
@@ -125,13 +127,19 @@ a phrase, so the window compares it and only then turns it into words: `DataDir`
 `Effect::Derived`; `EchoUrl`, `ChromiumBin`, `ChromiumMajor` and `ConfigFile`
 are `Effect::Now`. The data directory row is the one whose source is never
 `ConfigFile` - nothing in the file can decide it - and the Chromium rows can
-only be `Environment` or `Default`, because those values are not stored.
+only be `Environment` or `Default`, because those values are not stored. The
+data directory row is read-only, and its note says how to move the directory -
+set `FP_BROWSER_DATA_DIR` before a start - instead of offering an input that
+could not take effect.
 
 ### Writing
 
 Every stored change goes through the same path: check the file is readable, clone
 the stored document, change one field, `write_config` the whole document, and
-only then commit the change in memory. The entry points are:
+only then commit the change in memory. The theme choice is written before it is
+applied: a config file that cannot be written refuses the switch instead of
+repainting the window into a mode the next start will not keep - the "looks
+effective but is not" failure this page avoids. The entry points are:
 
 - `Settings::set` for the two typed values (`XrayExecutable`, `EchoUrl`);
 - `Settings::set_theme`, `set_language`, `set_exit_mode`,
@@ -189,6 +197,14 @@ the three won.
 | Exit mode | - | `exit_mode` (`"ask"`, `"background"`, `"keep-running"`, `"exit-all"`) | `ask` |
 | Sidebar | - | `sidebar` (`"collapsed"`) | expanded |
 
+`FP_BROWSER_CONFIG` is an override rather than a location: a test or a script
+needs to point at a file without inventing a data directory for it, and an
+explicitly set path is not ours to migrate into. An ignored `data_dir` value in
+a legacy file is reported on the data-directory row with the same sentence as
+the environment override - "the config file holds …, which this overrides" - so
+the row's wording covers "the environment is shadowing" and "the file's value is
+ignored" the same way.
+
 The standing choices (appearance, language, exit mode, sidebar) have no
 environment override: they are choices about the installation, not about what
 this process does, so a script cannot start the program with them.
@@ -207,6 +223,10 @@ this process does, so a script cannot start the program with them.
 
 ### The move from the old location
 
+The move exists because a config file outside the data directory meant two
+places to remember and two places a stale copy could hide. The old location is
+a migration source, never a write target: nothing is written there again.
+
 A config file written before the file moved into the data directory lives at
 `legacy_config_path` = `paths::config_dir(host).join(paths::CONFIG_FILE)` =
 `<platform config place>/fp-browser/config.json` - the platform's config place
@@ -223,9 +243,12 @@ the relative `fp-browser/config.json` when the host has no config directory.
   same way this run did.
 - **Left where it is** (`Migration::IgnoredDataDir`) - an old file that named a
   data directory other than the resolved one is not moved, because it is the only
-  record of where that directory is. The banner names the old directory and the
-  one way back: set `FP_BROWSER_DATA_DIR` to it, and the next start resolves that
-  directory and moves the file there.
+  record of where that directory is. It is not the only ending that leaves the
+  old file in place: `Migration::NotWritten` (the new location could not be
+  written) leaves it too, and a legacy file that cannot be read is left where it
+  is as well. The banner names the old directory and the one way back: set
+  `FP_BROWSER_DATA_DIR` to it, and the next start resolves that directory and
+  moves the file there.
 - **Read but not written** (`Migration::NotWritten`) - the values are in force
   and the old file stays and keeps being read, but the next start will not find
   them at the new location; the banner says so rather than leaving a page that
@@ -252,10 +275,11 @@ the relative `fp-browser/config.json` when the host has no config directory.
 - **Writing is all-or-nothing.** `write_config` creates the parent directory,
   serializes the whole `Stored` as pretty JSON, and replaces the file through
   `storage::atomic_file::write`, so a crash cannot leave half a document.
-  `data_dir` is never written back (`skip_serializing`), and the two switches'
-  default states are stored as absence: `set_use_system_proxy(false)` and an
-  expanded sidebar both write `null`, the spelling a config file from before
-  those switches existed already had. The
+  `data_dir` is never written back (`skip_serializing`), because storing a
+  second copy of the answer is how the two answers start to disagree. The two
+  switches' default states are stored as absence: `set_use_system_proxy(false)`
+  and an expanded sidebar both write `null`, the spelling a config file from
+  before those switches existed already had. The
   standing choices are not like that - `set_theme`, `set_language` and
   `set_exit_mode` write their code even when it is the default, so `"dark"` and
   `null` both mean dark, `"en"` and `null` both mean English, and `"ask"` and
@@ -280,7 +304,12 @@ the relative `fp-browser/config.json` when the host has no config directory.
 - **One file, one writer.** The program writes the config file only through
   `Settings`, and the window is the only caller; a second copy of the program on
   the same data directory is refused the instance lock instead of racing this
-  one ([Exit modes](../exit-modes.md)).
+  one ([Exit modes](../exit-modes.md)). The lock is taken after `Settings::load`,
+  the call that reads the config file and resolves the data directory being
+  locked. A legacy config file is therefore folded into the data directory
+  before the lock exists - a one-time write of the same bytes, upstream of the
+  database and the children the lock protects - and the refusal of a second copy
+  happens after that read.
 
 ## Verification
 

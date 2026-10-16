@@ -70,7 +70,12 @@ fp-browser [option]
 With no option the window opens. Exit codes: `0` for an answer, `1` for a report
 that could not be written, `2` for an argument that was refused, `3` for a second
 copy finding the data directory already locked (`--diagnostics` is answered
-before the lock, so it works either way).
+before the lock, so it works either way). `1` also covers a run that cannot take
+the instance lock at all - an unopenable lock file (`Busy::Unavailable`, reported
+by `instance_unavailable`): it refuses to start rather than proceed unguarded.
+
+A report about a running installation is the thing someone asks for when the
+window will not open, so it must not need the lock.
 
 Two rules are worth stating because they are the difference between a tool you
 can put in a script and one you cannot:

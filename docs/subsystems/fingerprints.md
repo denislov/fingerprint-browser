@@ -78,7 +78,9 @@ draws a fresh seed for the copy, and the profile editor's reroll button uses the
 same function (`profile_seed` in `crates/app/src/editor.rs`). The seed is the
 value the browser expands into the spoofed surfaces; the other profile fields
 (platform, locale, brand, versions, WebRTC policy, exclusions) are explicit
-values, gated by the capability table below. The editor validates the seed as a
+values, gated by the capability table below. The model keeps only the surfaces
+that genuinely need to be controlled explicitly; everything else is either left
+to the seed to expand or not modelled. The editor validates the seed as a
 `u32` before the profile is written.
 
 ### Launch: classify, report, serialize
@@ -107,6 +109,11 @@ values, gated by the capability table below. The editor validates the seed as a
    this list, not the profile.
 
 ### What a profile field becomes
+
+The launch arguments are emitted in a fixed order - a standing convention so
+that logs and debugging have a predictable layout; the numbered order lives in
+`DefaultLaunchPlanner::build`, and the fingerprint block's internal order in
+`serialize_fingerprint_args` follows the layout the upstream browser expects.
 
 - `--fingerprint=<seed>` is emitted first and always.
 - The brand and its version are one claim: `--fingerprint-brand` is emitted only
