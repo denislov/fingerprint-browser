@@ -62,13 +62,14 @@ name="fp-browser-$version-linux-$arch"
 stage="dist/$name"
 
 rm -rf "$stage"
-install -d "$stage/docs" "$stage/assets"
+install -d "$stage/docs" "$stage/docs/subsystems" "$stage/assets"
 install -m 0755 "$binary" "$stage/fp-browser"
 install -m 0755 packaging/linux/install.sh "$stage/install.sh"
 install -m 0644 packaging/linux/fp-browser.desktop "$stage/"
 install -m 0644 assets/icon.png assets/icon.svg "$stage/assets/"
 install -m 0644 README.md CHANGELOG.md LICENSE "$stage/"
 install -m 0644 docs/*.md "$stage/docs/"
+install -m 0644 docs/subsystems/*.md "$stage/docs/subsystems/"
 
 tar -czf "dist/$name.tar.gz" -C dist "$name"
 # One line, the hash first: what `sha256sum -c` reads.
@@ -118,7 +119,8 @@ install -d "$deb_dir/DEBIAN" \
     "$deb_dir/usr/share/applications" \
     "$deb_dir/usr/share/icons/hicolor/512x512/apps" \
     "$deb_dir/usr/share/icons/hicolor/scalable/apps" \
-    "$deb_doc"
+    "$deb_doc" \
+    "$deb_doc/subsystems"
 
 install -m 0755 "$binary" "$deb_dir/usr/bin/fp-browser"
 install -m 0644 packaging/linux/fp-browser.desktop \
@@ -132,6 +134,7 @@ install -m 0644 README.md "$deb_doc/"
 # name for the same file.
 install -m 0644 LICENSE "$deb_doc/copyright"
 install -m 0644 docs/*.md "$deb_doc/"
+install -m 0644 docs/subsystems/*.md "$deb_doc/subsystems/"
 # Policy wants the changelog compressed and named `changelog.gz`. The markdown is
 # the same text and is not installed beside it: one copy of the changelog in the
 # package, which is also the copy `apt changelog` reads.
