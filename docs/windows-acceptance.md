@@ -63,6 +63,9 @@ Six substantive cases plus one subprocess fixture:
 ```powershell
 $env:CHROMIUM_BIN = 'C:\tools\fingerprint-chromium\chrome.exe'
 $env:XRAY_BIN = 'C:\tools\xray\xray.exe'
+# For the remote-upstream case, the operator's own upstream and endpoint:
+$env:DIAG_SOCKS5 = 'host:port[:user:password]'   # or $env:PROXY_URI for a share link
+$env:DIAG_ECHO_URL = 'http://api.ipify.org'
 cargo test -p runtime --test windows_real -- --ignored --test-threads=1
 ```
 
@@ -89,11 +92,16 @@ it does not claim a manual GPUI window/Task Manager walkthrough.
   PIDs, state, configuration and cookie behavior. Real fingerprint measurements
   on Windows (11 tests in `fingerprint_real`) were also verified against local
   Chromium 148, confirming canvas, audio, clientrects, WebRTC and font exclusions.
-- The Xray lifecycle case uses a local upstream placeholder and does not claim
-  remote proxy forwarding. Remote upstream acceptance is still outstanding: it
-  needs a Windows machine and a reachable upstream, and no Windows machine is at
-  hand (2026-10-12), so it is the one open item, tracked as
-  [issue #5](https://github.com/denislov/fingerprint-browser/issues/5).
+- The Xray lifecycle case uses a local upstream placeholder; remote forwarding is
+  a separate case. Remote upstream forwarding was reproduced on Windows on
+  2026-10-17: `windows_profile_carries_traffic_through_a_remote_upstream` starts
+  a profile against the operator's real upstream, and the address the browser's
+  traffic left from - asked back out of the running browser over CDP - matched
+  the address the same upstream was measured at through a temporary engine. The
+  check was proved red by hand first: a browser told to bypass the proxy read
+  back the machine's own address instead. The upstream and the endpoint are the
+  operator's, supplied through `DIAG_SOCKS5`/`PROXY_URI` and `DIAG_ECHO_URL`;
+  no address from the run is recorded here.
 - The UI side of this machine is only partly seen: Windows fonts, icon alignment
   and window decorations, and 125%/150%/200% scaling were never verified, nor
   were multi-display or Wayland. The tooltip-on-focus deviation and an

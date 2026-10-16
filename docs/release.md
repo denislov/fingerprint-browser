@@ -95,9 +95,10 @@ produced, a user can install it, see which build they have, be told what to
 supply when there is no browser core, and produce one file to attach to a report
 - and none of it required the program to decide anything on their behalf. This
 half is still unwitnessed: nothing has **run** the installer, and the program
-has never been started on Windows. The remaining item, reproducing remote
-upstream forwarding on Windows, is tracked as
-[issue #5](https://github.com/denislov/fingerprint-browser/issues/5).
+has never been started on Windows. The remote-upstream case was reproduced on
+Windows on 2026-10-17 ([Windows acceptance](windows-acceptance.md)); the UI
+side of that machine is tracked as
+[issue #10](https://github.com/denislov/fingerprint-browser/issues/10).
 
 ## The build
 

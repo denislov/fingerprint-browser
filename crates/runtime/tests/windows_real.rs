@@ -1,11 +1,14 @@
 //! Opt-in Windows lifecycle acceptance using local Chromium and Xray binaries.
 #![cfg(windows)]
+mod common;
+
 use ::runtime::*;
+use common::upstream;
 use domain::*;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 struct HeadlessPlanner;
@@ -144,6 +147,82 @@ fn windows_profiles_preserve_cookies_and_fail_closed() {
     h.wait(first.id, RuntimeState::Stopped);
     h.thread.take().unwrap().join().unwrap();
     gone(restarted.browser_pid.unwrap());
+}
+
+/// A profile whose proxy is a reachable *remote* upstream: the profile starts,
+/// the browser's request is carried through the upstream, and the address the
+/// endpoint sees is the one the upstream leaves from. The local case above
+/// proves the engine starts; this proves the traffic leaves - the same claim
+/// `chromium_real` and `proxy_diag_real` make.
+///
+/// The upstream comes from the environment the way `proxy_diag_real` takes it:
+/// `PROXY_URI` for a share link (`ss://`, `vmess://`, `vless://`, `trojan://`),
+/// or `DIAG_SOCKS5` for the plain `host:port[:user:password]` of a SOCKS5
+/// upstream, plus `DIAG_ECHO_URL` for the plain-http endpoint that reports the
+/// address it was reached from.
+#[test]
+#[ignore = "requires CHROMIUM_BIN, XRAY_BIN, a reachable remote upstream and DIAG_ECHO_URL"]
+fn windows_profile_carries_traffic_through_a_remote_upstream() {
+    let echo_url = std::env::var("DIAG_ECHO_URL").expect(
+        "set DIAG_ECHO_URL to a plain-http endpoint that reports the address it was reached from",
+    );
+    let proxy = upstream();
+
+    // What this upstream leaves from, measured the way the diagnostic measures
+    // it: one real request through a temporary engine built from the same
+    // config shape a profile's engine gets. Reading it first is what turns the
+    // browser's later answer from "an address" into "the upstream's address".
+    let directory = std::env::temp_dir().join(format!("fp-windows-egress-{}", ProfileId::new()));
+    let executable = std::env::var_os("XRAY_BIN").expect("set XRAY_BIN");
+    let expected = match diagnose_proxy(
+        &SocksEchoClient,
+        &DefaultXrayConfigBuilder::new(),
+        &proxy,
+        &DiagnosticRequest {
+            engine: Engine::Temporary {
+                executable: Path::new(&executable),
+                directory: &directory,
+                ready_timeout: Duration::from_secs(10),
+            },
+            echo_url: &echo_url,
+            probe_timeout: Duration::from_secs(30),
+        },
+    ) {
+        Ok(diagnosis) => diagnosis.exit_ip.trim().to_string(),
+        Err(fault) => panic!("the upstream itself did not carry a request: {fault}"),
+    };
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let h = Harness::new();
+    let mut profile = h.profile(707);
+    profile.proxy_id = Some(proxy.id);
+    h.facade
+        .start(StartParams::with_proxy(
+            profile.clone(),
+            h.core.clone(),
+            proxy,
+        ))
+        .unwrap();
+    let running = h.wait(profile.id, RuntimeState::Running);
+
+    // Ask the browser itself, in a tab of its own, where the endpoint saw it.
+    let outcome =
+        EgressProbe::new(Duration::from_secs(30)).read(running.cdp_port.unwrap(), &echo_url);
+    assert_eq!(
+        outcome.exit_ip().map(str::trim),
+        Some(expected.as_str()),
+        "the browser's traffic has to leave from the upstream the profile was built on: {outcome}"
+    );
+    let discrepancies = verify_egress(Some(&expected), &outcome);
+    assert!(
+        discrepancies.is_empty(),
+        "the reading has to support the claim the profile makes: {discrepancies:?}"
+    );
+
+    h.facade.stop(profile.id).unwrap();
+    h.wait(profile.id, RuntimeState::Stopped);
+    gone(running.browser_pid.unwrap());
+    gone(running.xray_pid.unwrap());
 }
 
 #[test]
