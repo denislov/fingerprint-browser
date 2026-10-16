@@ -39,6 +39,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new(browser: bool, cdp: bool, script: &str) -> Self {
+        Self::with_planner(Box::new(Planner(browser)), cdp, script)
+    }
+
+    /// The same fixture, for a test that has to watch what the plan was built
+    /// from rather than only what the run did with it.
+    fn with_planner(planner: Box<dyn LaunchPlanner>, cdp: bool, script: &str) -> Self {
         // Avoid fork/exec races with another test writing its executable
         // and immediate port-rebind assertions racing sibling fixtures.
         static FIXTURES: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -50,7 +56,7 @@ impl Fixture {
         std::fs::write(&executable, script).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let components = SupervisorComponents {
-            planner: Box::new(Planner(browser)),
+            planner,
             cdp_probe: Box::new(Probe(cdp)),
             xray_executable: executable,
             runtime_dir: dir.clone(),
@@ -126,6 +132,74 @@ fn a_running_session_writes_a_record_and_stopping_it_removes_it() {
 /// A start that rolls back has to take its record with it: a record naming
 /// processes that are already gone would be reported as a leftover at the
 /// next start.
+/// The identity page is served for as long as the session is, and no longer.
+///
+/// The address the browser is sent to holds a port that is nothing but a runtime
+/// value - it is not stored against the profile and nothing reuses it. What this
+/// checks is the part that cannot be seen in a command line: that something is
+/// answering on that port while the session runs, and that stopping the profile
+/// takes the port back with it rather than leaving a listener behind.
+#[test]
+fn a_session_serves_its_identity_page_and_stopping_it_takes_the_port_back() {
+    use std::io::{Read as _, Write as _};
+
+    let seen: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    struct Watching(Arc<std::sync::Mutex<Option<String>>>);
+    impl LaunchPlanner for Watching {
+        fn build(&self, ctx: LaunchContext<'_>) -> Result<LaunchPlan, LaunchPlanError> {
+            *self.0.lock().unwrap() = ctx.status_url.clone();
+            let mut plan = DefaultLaunchPlanner.build(ctx)?;
+            plan.browser_executable = "/bin/sleep".into();
+            plan.browser_args = vec!["60".into()];
+            Ok(plan)
+        }
+    }
+
+    let mut f = Fixture::with_planner(Box::new(Watching(Arc::clone(&seen))), true, XRAY);
+    f.params.status = Some(crate::status::StatusLaunch {
+        // Never dialled by this test: only the session's own report is asked for,
+        // and an endpoint that would refuse is the honest one to leave here.
+        echo_url: "http://127.0.0.1:1/".to_string(),
+        lang: "en",
+    });
+    f.start();
+
+    let url = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a launch that asked for a page was given its address");
+    let port: u16 = url
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|rest| rest.strip_suffix('/'))
+        .expect("the address is a loopback page")
+        .parse()
+        .expect("a port");
+
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("a listener");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(format!("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes())
+        .unwrap();
+    let mut answer = String::new();
+    let _ = stream.read_to_string(&mut answer);
+    assert!(answer.starts_with("HTTP/1.1 200 OK"), "{answer}");
+    assert!(answer.contains("\"profile\":\"test\""), "{answer}");
+    // The proxy's name is all the page is told about it, never the secret the
+    // fixture stores beside it.
+    assert!(answer.contains("\"proxy\":\"test\""), "{answer}");
+    assert!(!answer.contains("secret"), "{answer}");
+
+    f.supervisor.stop_profile(f.params.profile.id);
+    assert_eq!(f.snapshot().state, RuntimeState::Stopped);
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        "the status page outlived the session it was serving"
+    );
+}
+
 #[test]
 fn a_start_that_never_reaches_readiness_leaves_no_record() {
     // The browser starts (it is `/bin/sleep`) but its debugging endpoint

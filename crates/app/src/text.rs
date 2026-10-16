@@ -286,6 +286,7 @@ catalog! {
     setting_data_dir => "Data directory" => "数据目录";
     setting_xray_executable => "Xray executable" => "Xray 可执行文件";
     setting_system_proxy => "Use system proxy" => "使用系统代理";
+    setting_status_page => "Identity page" => "身份页";
     setting_echo_url => "Proxy test endpoint" => "代理测试端点";
     setting_chromium_bin => "Chromium binary" => "Chromium 可执行文件";
     setting_chromium_major => "Chromium major override" => "Chromium 主版本号覆盖";
@@ -352,6 +353,8 @@ catalog! {
         => "档案使用代理时会用到它。正在运行的进程仍使用它启动时的那一个。";
     help_system_proxy => "Xray reaches a profile's proxy through this machine's proxy, when this machine has one it can read. Profiles without a proxy are unaffected."
         => "本机存在可读取的代理时，Xray 经过它去连接档案的代理。不用代理的档案不受影响。";
+    help_status_page => "A started profile opens a local page, served by this program, that says which profile the session is and where one request leaves from. The page asks the endpoint above, so an endpoint that cannot be reached is what it will report."
+        => "档案启动时，先打开一个由本程序提供的本地页面，说明这次会话是哪个档案、以及一次请求从哪里出去。页面会询问上面的端点，因此端点不通时页面会如实报告。";
     // Why the switch did nothing visible. The two are different answers and are
     // worded apart: one machine has no proxy, the other has one chosen by a
     // script, and only the second is a limitation worth naming.

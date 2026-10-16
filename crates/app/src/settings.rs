@@ -22,6 +22,7 @@ use crate::exit::ExitMode;
 use crate::paths;
 use crate::text::{Lang, Text, text};
 use crate::theme::ThemeChoice;
+use runtime::StatusLaunch;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,7 @@ pub enum SettingKey {
     DataDir,
     XrayExecutable,
     UseSystemProxy,
+    StatusPage,
     EchoUrl,
     ChromiumBin,
     ChromiumMajor,
@@ -72,10 +74,11 @@ pub enum SettingKey {
 impl SettingKey {
     /// Every key, in the order the page shows them.
     #[cfg(test)]
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::DataDir,
         Self::XrayExecutable,
         Self::UseSystemProxy,
+        Self::StatusPage,
         Self::EchoUrl,
         Self::ChromiumBin,
         Self::ChromiumMajor,
@@ -89,6 +92,7 @@ impl SettingKey {
             Self::DataDir => "data-dir",
             Self::XrayExecutable => "xray-executable",
             Self::UseSystemProxy => "system-proxy",
+            Self::StatusPage => "status-page",
             Self::EchoUrl => "echo-url",
             Self::ChromiumBin => "chromium-bin",
             Self::ChromiumMajor => "chromium-major",
@@ -102,6 +106,7 @@ impl SettingKey {
             Self::DataDir => t.setting_data_dir,
             Self::XrayExecutable => t.setting_xray_executable,
             Self::UseSystemProxy => t.setting_system_proxy,
+            Self::StatusPage => t.setting_status_page,
             Self::EchoUrl => t.setting_echo_url,
             Self::ChromiumBin => t.setting_chromium_bin,
             Self::ChromiumMajor => t.setting_chromium_major,
@@ -133,6 +138,10 @@ impl SettingKey {
             // way it is handed the executable: a profile started now would
             // otherwise dial through a proxy the reader has just turned off.
             Self::UseSystemProxy => Effect::NextStart,
+            // Read when Start is pressed rather than when the program started,
+            // so turning it off is enough to leave the page out of the next
+            // launch: nothing about a running session depends on it.
+            Self::StatusPage => Effect::Now,
             Self::RuntimeDir => Effect::Derived,
             _ => Effect::Now,
         }
@@ -198,6 +207,7 @@ impl SettingGroup {
         match key {
             SettingKey::XrayExecutable
             | SettingKey::UseSystemProxy
+            | SettingKey::StatusPage
             | SettingKey::EchoUrl
             | SettingKey::ChromiumBin
             | SettingKey::ChromiumMajor => Self::Runtime,
@@ -311,6 +321,10 @@ struct Stored {
     /// Absent means off, which is also what a file written before the switch
     /// existed means.
     system_proxy: Option<String>,
+    /// Whether a launch opens the identity page first, the same way - with the
+    /// difference that this one is **on** unless the file says otherwise, so it
+    /// is the off state that is named here. See [`STATUS_PAGE_OFF`].
+    status_page: Option<String>,
 }
 
 /// The name the switch being on is stored under.
@@ -322,6 +336,15 @@ struct Stored {
 /// that never had this setting did - a profile went straight to its own proxy -
 /// and because a config file that turns something on has to be a deliberate one.
 const SYSTEM_PROXY_ON: &str = "on";
+
+/// The name the identity page being **off** is stored under.
+///
+/// The other direction from [`SYSTEM_PROXY_ON`], and deliberately: this switch is
+/// on unless the file says otherwise, because the page is what this program is
+/// for - a reader who never touched the setting should still get it. So absent
+/// has to keep meaning "on", which is what it meant before the setting existed,
+/// and the state that needs a name in the file is the one a reader asked for.
+const STATUS_PAGE_OFF: &str = "off";
 
 /// The name a collapsed sidebar is stored under.
 ///
@@ -402,6 +425,9 @@ pub struct Settings {
     /// program starts, and a profile started from this window was built with the
     /// value this run began with.
     use_system_proxy: bool,
+    /// Whether a launch opens the identity page as its first tab. Read when the
+    /// reader presses Start, so the switch is live rather than pending.
+    status_page: bool,
 }
 
 impl Settings {
@@ -441,6 +467,7 @@ impl Settings {
             .as_deref()
             .is_some_and(|code| code.trim().eq_ignore_ascii_case(SIDEBAR_COLLAPSED));
         let use_system_proxy = resolve_use_system_proxy(&stored, &env);
+        let status_page = resolve_status_page(&stored);
 
         // An error is worth more than the migration note, and only one of them
         // can be set: the move either read the old file or it did not.
@@ -481,6 +508,7 @@ impl Settings {
             exit_mode,
             sidebar_collapsed,
             use_system_proxy,
+            status_page,
         };
         (settings, notice)
     }
@@ -593,6 +621,41 @@ impl Settings {
         write_config(&self.config_path, &stored, self.text())?;
         self.stored = stored;
         self.exit_mode = mode;
+        Ok(())
+    }
+
+    /// Whether a launch opens the identity page as its first tab.
+    pub fn status_page(&self) -> bool {
+        self.status_page
+    }
+
+    /// The page a launch should open, or `None` when the reader turned it off.
+    ///
+    /// One value rather than a flag and two lookups, because the two things it
+    /// carries - the endpoint to ask and the language to write in - are both
+    /// read at the same moment and must be from the same moment.
+    pub fn status_launch(&self) -> Option<StatusLaunch> {
+        self.status_page().then(|| StatusLaunch {
+            echo_url: self.echo_url.clone(),
+            lang: self.lang.code(),
+        })
+    }
+
+    /// Stores whether a launch opens the identity page first.
+    ///
+    /// The off state is what is written, not the on state: see
+    /// [`STATUS_PAGE_OFF`].
+    pub fn set_status_page(&mut self, open_it: bool) -> Result<(), String> {
+        if let Some(error) = &self.config_error {
+            return Err(self
+                .text()
+                .settings_cannot_write(&self.config_path.display().to_string(), error));
+        }
+        let mut stored = self.stored.clone();
+        stored.status_page = (!open_it).then(|| STATUS_PAGE_OFF.to_string());
+        write_config(&self.config_path, &stored, self.text())?;
+        self.stored = stored;
+        self.status_page = resolve_status_page(&self.stored);
         Ok(())
     }
 
@@ -732,6 +795,22 @@ impl Settings {
                         }
                     }),
                 note: Some(t.help_system_proxy.to_string()),
+            },
+            SettingRow {
+                key: SettingKey::StatusPage,
+                switch: Some(self.status_page),
+                value: if self.status_page {
+                    t.value_switch_on
+                } else {
+                    t.value_switch_off
+                }
+                .to_string(),
+                // No environment override, so nothing else can be the source:
+                // the file either says off or has nothing to say.
+                source: self.source_of(false, self.stored.status_page.is_some()),
+                env: None,
+                shadowed: None,
+                note: Some(t.help_status_page.to_string()),
             },
             SettingRow {
                 key: SettingKey::EchoUrl,

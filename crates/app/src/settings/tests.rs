@@ -357,6 +357,74 @@ fn the_proxy_test_endpoint_is_stored_and_takes_effect_immediately() {
     );
 }
 
+/// The identity page is on for a reader who never touched the setting, and what
+/// the file carries is the **off** state - the opposite direction from every
+/// other switch stored here, which is why it is the one that needs saying.
+#[test]
+fn the_identity_page_is_on_until_the_file_says_otherwise() {
+    let config = TempConfig::new("status-page");
+    let (mut settings, _) = Settings::load(env(&config));
+
+    assert!(
+        settings.status_page(),
+        "on by default: a page that says which profile this is, is what this program is for"
+    );
+    let launch = settings.status_launch().expect("a page is asked for");
+    assert!(
+        launch.echo_url.starts_with("http://"),
+        "the page asks the same plain-http endpoint a proxy test does: {}",
+        launch.echo_url
+    );
+    assert_eq!(launch.lang, "en");
+
+    // The language is read at the same moment, so the page a launch opens is
+    // written in the language in force and not in the one before it.
+    settings.set_language(Lang::Zh).expect("switch language");
+    assert_eq!(
+        settings.status_launch().expect("a page").lang,
+        "zh",
+        "the page is written in the language the window is in"
+    );
+
+    settings
+        .set_status_page(false)
+        .expect("store the off state");
+    assert!(!settings.status_page());
+    assert_eq!(
+        settings.status_launch(),
+        None,
+        "a launch with the switch off has no page to open"
+    );
+    let written = config.read();
+    assert!(
+        written.contains("status_page") && written.contains("off"),
+        "the off state is what is written, because absent already means on: {written}"
+    );
+
+    // And it is the stored value that decides, not the running process's copy.
+    let (reloaded, _) = Settings::load(env(&config));
+    assert!(!reloaded.status_page());
+}
+
+/// A file written before this setting existed still gets the page.
+///
+/// This is the whole reason the off state is the one with a name in the file:
+/// absent has to keep meaning what it meant to a build that had never heard of
+/// the switch, which is a reader who got the page.
+#[test]
+fn a_config_file_written_before_the_page_existed_still_opens_it() {
+    let config = TempConfig::new("status-page-old");
+    config.write(r#"{"echo_url": "http://stored.example/ip"}"#);
+    let (settings, _) = Settings::load(env(&config));
+
+    assert!(settings.status_page());
+    assert_eq!(
+        settings.status_launch().expect("a page").echo_url,
+        "http://stored.example/ip",
+        "and the page asks the endpoint the file names"
+    );
+}
+
 /// The row has to say that the endpoint learns the address it is asked from,
 /// because that is the one thing about this setting a user cannot infer.
 #[test]

@@ -432,6 +432,7 @@ fn a_browser_left_by_a_killed_run_is_reclaimed() {
             capabilities: &capabilities,
             cdp_port,
             socks_port: None,
+            status_url: None,
             xray_executable: None,
             xray_config_dir: None,
         })

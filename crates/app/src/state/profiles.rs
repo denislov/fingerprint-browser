@@ -321,9 +321,12 @@ impl AppState {
     /// asked, or the proxy has just answered. Fails only when the command itself
     /// does, and the caller is what gives the lease back in that case.
     pub(super) fn queue_opening(&mut self, id: ProfileId, how: Opening) -> Result<(), AppError> {
+        // Read here rather than stored anywhere, so the switch is live: pressing
+        // Start is what asks which page this launch opens.
+        let status = self.status_launch();
         let result = match how {
-            Opening::Start => self.runtime.start(id),
-            Opening::Restart => self.runtime.restart(id),
+            Opening::Start => self.runtime.start(id, status),
+            Opening::Restart => self.runtime.restart(id, status),
         };
         let request = self.record(result)?;
         self.queued_starts.insert(id, request);

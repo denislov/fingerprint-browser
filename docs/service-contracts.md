@@ -97,6 +97,9 @@ pub struct LaunchContext<'a> {
     pub capabilities: &'a CoreCapabilities,
     pub cdp_port: u16,
     pub socks_port: Option<u16>,
+    /// 本次启动要首先打开的 identity page 地址，未要求时为 `None`。
+    /// URL 里的端口是运行期值，与 CDP/SOCKS 端口同一条规则：不写回 Profile。
+    pub status_url: Option<String>,
 }
 
 pub trait LaunchPlanner: Send + Sync {
@@ -158,7 +161,13 @@ pub trait RuntimeFacade: Send + Sync {
 ```
 
 `StartParams` 带一个单调递增的 `request_id`：启动/重启的完成或取消按请求确认，超时不能
-代替确认。形状以 `crates/runtime/src/facade.rs` 与 `crates/runtime/src/events.rs` 为准。
+代替确认。它另带一个 `status: Option<StatusLaunch>`——本次启动要首先打开的 identity page
+（端点与语言）。这一项属于**本次启动**而不是 supervisor 配置：语言和端点都是读者可以在
+两次启动之间改动的设置，用上一次启动的值渲染页面会在没人会想到去查的地方出错。形状以
+`crates/runtime/src/facade.rs` 与 `crates/runtime/src/events.rs` 为准。
+
+`RuntimeService::start` / `restart`（`crates/application/src/runtime_service.rs`）接收
+该值并放进 `StartParams`；App 层在按下 Start 的那一刻从设置读取（`AppState::status_launch`）。
 
 调用 `start()` 的语义是“命令已接受”，不是“浏览器已经 ready”。
 
@@ -276,6 +285,11 @@ pub trait PortAllocator: Send + Sync {
 
 `reserve_loopback` 返回的 `PortReservation` 在 drop 之前一直持有绑定的监听套接字：端口从
 分配起就被占住，spawn 失败或启动回滚时也不会被别的进程抢走。以
+`crates/runtime/src/ports.rs` 为准。
+
+`PortReservation::into_listener` 交出套接字而不是释放它，供**本程序自己**要绑该端口的
+唯一一处使用：identity page 服务。Chromium/Xray 自己绑端口，所以存在释放到绑定之间的
+窗口；这个服务直接在被预留的套接字上 accept，没有该窗口。以
 `crates/runtime/src/ports.rs` 为准。
 
 端口一定是 RuntimeSession 数据，不写回 Profile。

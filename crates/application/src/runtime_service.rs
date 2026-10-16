@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use domain::ProfileId;
-use runtime::{RuntimeFacade, RuntimeSnapshot, StartParams};
+use runtime::{RuntimeFacade, RuntimeSnapshot, StartParams, StatusLaunch};
 use std::sync::Arc;
 use storage::{CoreRepository, ProfileRepository, ProxyRepository};
 
@@ -46,7 +46,16 @@ impl RuntimeService {
     /// Its own function also because it is the part worth testing: no runtime is
     /// involved in resolving a reference, and the failure says which record was
     /// missing rather than that something was.
-    fn launch_params(&self, profile_id: ProfileId) -> Result<StartParams, AppError> {
+    /// The three records a launch needs, and what kind of start it is.
+    ///
+    /// `status` is the page this launch opens first, and it comes from the
+    /// caller rather than from a repository: it is the reader's setting in force
+    /// at the moment Start was pressed, not something stored against a profile.
+    fn launch_params(
+        &self,
+        profile_id: ProfileId,
+        status: Option<StatusLaunch>,
+    ) -> Result<StartParams, AppError> {
         let profile = self
             .profile_repo
             .get(profile_id)?
@@ -71,11 +80,16 @@ impl RuntimeService {
             profile,
             core,
             proxy,
+            status,
         })
     }
 
-    pub fn start(&self, profile_id: ProfileId) -> Result<u64, AppError> {
-        let params = self.launch_params(profile_id)?;
+    pub fn start(
+        &self,
+        profile_id: ProfileId,
+        status: Option<StatusLaunch>,
+    ) -> Result<u64, AppError> {
+        let params = self.launch_params(profile_id, status)?;
         let request = params.request_id;
         self.runtime.start(params)?;
         Ok(request)
@@ -86,8 +100,12 @@ impl RuntimeService {
         Ok(())
     }
 
-    pub fn restart(&self, profile_id: ProfileId) -> Result<u64, AppError> {
-        let params = self.launch_params(profile_id)?;
+    pub fn restart(
+        &self,
+        profile_id: ProfileId,
+        status: Option<StatusLaunch>,
+    ) -> Result<u64, AppError> {
+        let params = self.launch_params(profile_id, status)?;
         let request = params.request_id;
         self.runtime.restart(params)?;
         Ok(request)
@@ -129,6 +147,7 @@ mod tests {
                     profile: profile(profile_id, CoreId::new()),
                     core: core(CoreId::new()),
                     proxy: None,
+                    status: None,
                 },
             ));
             Ok(())
@@ -281,8 +300,8 @@ mod tests {
         work.proxy_id = Some(proxy.id);
         f.profiles.insert(&work).expect("save the profile");
 
-        f.service.start(work.id).expect("start");
-        f.service.restart(work.id).expect("restart");
+        f.service.start(work.id, None).expect("start");
+        f.service.restart(work.id, None).expect("restart");
 
         let sent = f.sent.sent.lock().expect("recorded");
         assert_eq!(
@@ -308,7 +327,7 @@ mod tests {
         // No profile at all.
         let f = fixture();
         let missing = ProfileId::new();
-        let error = f.service.start(missing).expect_err("no such profile");
+        let error = f.service.start(missing, None).expect_err("no such profile");
         assert!(error.to_string().contains(&missing.to_string()), "{error}");
         assert!(f.sent.sent.lock().expect("recorded").is_empty());
 
@@ -316,7 +335,10 @@ mod tests {
         let absent_core = CoreId::new();
         let orphan = profile(ProfileId::new(), absent_core);
         let f = dangling(orphan.clone(), None, None);
-        let error = f.service.restart(orphan.id).expect_err("no such core");
+        let error = f
+            .service
+            .restart(orphan.id, None)
+            .expect_err("no such core");
         assert!(
             error.to_string().contains(&absent_core.to_string()),
             "{error}"
@@ -329,7 +351,7 @@ mod tests {
         let mut orphan = profile(ProfileId::new(), stored_core.id);
         orphan.proxy_id = Some(absent_proxy);
         let f = dangling(orphan.clone(), Some(stored_core), None);
-        let error = f.service.start(orphan.id).expect_err("no such proxy");
+        let error = f.service.start(orphan.id, None).expect_err("no such proxy");
         assert!(
             error.to_string().contains(&absent_proxy.to_string()),
             "{error}"
@@ -347,7 +369,7 @@ mod tests {
         let work = profile(ProfileId::new(), core.id);
         f.profiles.insert(&work).expect("save the profile");
 
-        f.service.start(work.id).expect("start");
+        f.service.start(work.id, None).expect("start");
 
         let sent = f.sent.sent.lock().expect("recorded");
         assert_eq!(sent.len(), 1);

@@ -15,6 +15,7 @@ use crate::ports::{PortAllocator, TcpPortAllocator};
 use crate::process::{
     DefaultProcessInspector, DefaultProcessTreeController, ProcessInspector, ProcessTreeController,
 };
+use crate::status::{StatusReport, StatusService, StatusSession};
 use crate::xray::{DefaultXrayConfigBuilder, XrayConfigBuilder};
 use crossbeam_channel::{Receiver, Sender};
 use domain::{ProfileId, RuntimeState};
@@ -174,6 +175,11 @@ impl RuntimeSupervisor {
                 xray_config,
                 _cdp_port: adopted.cdp_port,
                 _socks_port: adopted.socks_port,
+                // An adopted session serves no status page: the one the previous
+                // run opened died with that run, and the tab it left in the
+                // browser is a page that now answers nothing. Re-opening one
+                // would mean navigating a browser this run did not start.
+                _status: None,
                 // What the previous run launched it with is not in the record:
                 // only the browser's own arguments are, and those are the ones
                 // Chromium was told. Nothing reads this for an adopted session.

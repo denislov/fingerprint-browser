@@ -14,6 +14,12 @@ pub struct LaunchContext<'a> {
     pub capabilities: &'a CoreCapabilities,
     pub cdp_port: u16,
     pub socks_port: Option<u16>,
+    /// The status page this launch opens first, when one was asked for.
+    ///
+    /// A URL rather than a flag, because the port in it is a runtime value that
+    /// belongs to the session and not to the profile - the same rule the CDP and
+    /// SOCKS ports follow.
+    pub status_url: Option<String>,
     pub xray_executable: Option<PathBuf>,
     pub xray_config_dir: Option<PathBuf>,
 }
@@ -86,7 +92,26 @@ impl LaunchPlanner for DefaultLaunchPlanner {
         // before that rule existed is still a browser switch waiting for a start,
         // and a launch plan is not the place to find that out from Chromium.
         ctx.profile.start_target.validate()?;
+        // The status page is the first tab when there is one, and the profile's
+        // own target follows it. A blank target is dropped rather than opened
+        // behind the page: `about:blank` is the absence of a page, and a reader
+        // who asked for the identity page did not ask for an empty tab beside it.
+        //
+        // This argument is not passed through `StartTarget::validate`, and the
+        // reason is the rule above rather than an exemption from it: the value is
+        // built by `StatusService::url` out of a port this program reserved, so
+        // there is no reader-supplied text here to become a switch. Anything that
+        // ever carries a URL from somewhere else into this field has to be
+        // validated where it is built, the way a profile's start page is.
+        let blank_replaced = match ctx.status_url {
+            Some(url) => {
+                args.push(url.into());
+                true
+            }
+            None => false,
+        };
         match &ctx.profile.start_target {
+            StartTarget::Blank if blank_replaced => {}
             StartTarget::Blank => args.push("about:blank".into()),
             StartTarget::Url(url) => args.push(url.as_str().into()),
         }

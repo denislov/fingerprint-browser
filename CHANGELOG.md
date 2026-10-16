@@ -12,6 +12,38 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
 
+### Added
+
+- **A started profile shows what it is** (Runtime/Window): a profile now opens a
+  local page first, served by this program on a loopback port for as long as the
+  profile runs. It says which profile the session is - the name, the core's
+  version and major, the proxy's name, the ports, when it started, and any
+  fingerprint switch this core cannot honour - and it answers where one request
+  leaves from: one request through that profile's engine to the configured
+  endpoint, the same reading the Proxies page's **Test** takes, reported as an
+  address or as the class of fault that stopped it. That is the engine's exit
+  address and the page says so; whether the browser itself was pointed at the
+  engine is still the window's **Verify** question, and a profile with no proxy is
+  told that nothing was asked rather than shown a number it did not earn.
+
+  The page talks to nothing but this program: every number reaches it over
+  loopback, and the policy it is served under (`default-src 'none'` with
+  `connect-src 'self'`) is what keeps that true. It is read-only - no endpoint
+  changes anything, none takes a parameter, and a request that names another
+  `Host` is refused, so no other page in the browser can read it and none can
+  make the machine ask about an address of its choosing. Nothing the request
+  carried is echoed back and the proxy appears only as its name.
+
+  The page holds the port it was reserved rather than releasing it, which is the
+  one place in this program with no release-to-bind window: the browser is sent
+  to an address something is already answering on. It ends with the session - a
+  stop, a crash and a reclaim all drop it - and a session adopted from a previous
+  run has none, because that run's page died with it.
+
+  **Identity page** on the Settings page turns it off and on; it is on unless the
+  reader says otherwise, and turning it off is enough to leave it out of the next
+  launch. See [identity page](docs/subsystems/identity-page.md).
+
 ### Changed
 
 - **The architecture page points at the references instead of restating them**

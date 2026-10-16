@@ -12,6 +12,9 @@ use storage::{MemCoreRepository, MemProfileRepository};
 pub struct FakeRuntime {
     requests: Mutex<HashMap<ProfileId, u64>>,
     snapshots: RwLock<HashMap<ProfileId, RuntimeSnapshot>>,
+    /// The page each launch asked to open, in the order the launches were sent:
+    /// the one part of a `StartParams` a test cannot read back from a snapshot.
+    statuses: Mutex<Vec<Option<runtime::StatusLaunch>>>,
     pub commands: Mutex<Vec<String>>,
     /// Whether a start publishes the state it produces.
     ///
@@ -79,6 +82,12 @@ impl FakeRuntime {
         snapshot.last_warning = Some(message.to_string());
     }
 
+    /// The page each launch asked for, oldest first.
+    #[cfg(test)]
+    pub fn statuses(&self) -> Vec<Option<runtime::StatusLaunch>> {
+        self.statuses.lock().expect("status lock").clone()
+    }
+
     /// The snapshot a test wants to inspect without going through the UI.
     #[cfg(test)]
     pub fn snapshot_of(&self, id: ProfileId) -> Option<RuntimeSnapshot> {
@@ -113,6 +122,7 @@ fn snapshot(id: ProfileId, state: RuntimeState) -> RuntimeSnapshot {
 impl RuntimeFacade for FakeRuntime {
     fn start(&self, params: StartParams) -> Result<(), RuntimeCommandError> {
         let id = params.profile_id();
+        self.statuses.lock().unwrap().push(params.status.clone());
         self.requests.lock().unwrap().insert(id, params.request_id);
         if !self.silent.load(std::sync::atomic::Ordering::SeqCst) {
             self.set_state(id, RuntimeState::Running);
@@ -129,6 +139,7 @@ impl RuntimeFacade for FakeRuntime {
 
     fn restart(&self, params: StartParams) -> Result<(), RuntimeCommandError> {
         let id = params.profile_id();
+        self.statuses.lock().unwrap().push(params.status.clone());
         self.requests.lock().unwrap().insert(id, params.request_id);
         if !self.silent.load(std::sync::atomic::Ordering::SeqCst) {
             self.set_state(id, RuntimeState::Running);

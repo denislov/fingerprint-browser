@@ -149,6 +149,11 @@ pub(super) struct StartAttempt {
     /// the port.
     pub(super) cdp: Option<crate::ports::PortReservation>,
     pub(super) socks: Option<crate::ports::PortReservation>,
+    /// The status page this launch serves, when it was asked for one. Unlike the
+    /// children it is this program's own, so it is held from the moment it is up
+    /// until the session that owns it ends - and dropping it stops the thread and
+    /// frees the port on every path out of the start.
+    pub(super) status: Option<crate::status::StatusService>,
     pub(super) browser: Option<crate::process::ManagedChild>,
     pub(super) xray: Option<crate::process::ManagedChild>,
     /// The ports the children were given, and the arguments the browser was
@@ -179,6 +184,7 @@ impl StartAttempt {
             tree,
             cdp: None,
             socks: None,
+            status: None,
             browser: None,
             xray: None,
             cdp_port: 0,
@@ -235,6 +241,15 @@ impl StartAttempt {
 
     pub(super) fn release_socks(&mut self) {
         drop(self.socks.take());
+    }
+
+    /// Holds the status page this launch serves until the session takes it.
+    pub(super) fn hold_status(&mut self, service: crate::status::StatusService) {
+        self.status = Some(service);
+    }
+
+    pub(super) fn take_status(&mut self) -> Option<crate::status::StatusService> {
+        self.status.take()
     }
 
     pub(super) fn hold_browser(&mut self, child: crate::process::ManagedChild) {
@@ -407,6 +422,10 @@ pub(super) struct ActiveSession {
     pub(super) xray_config: Option<std::path::PathBuf>,
     pub(super) _cdp_port: u16,
     pub(super) _socks_port: Option<u16>,
+    /// The status page, alive exactly as long as this session: a stop, a crash
+    /// and a reclaim all end it by dropping this, which stops its thread and
+    /// frees its port.
+    pub(super) _status: Option<crate::status::StatusService>,
     pub(super) _effective_args: Vec<String>,
     pub(super) stopping: bool,
     /// Why the last attempt to stop this session failed, if one did.
