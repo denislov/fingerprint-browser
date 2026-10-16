@@ -173,25 +173,12 @@ pub struct BrowserCore {
 
 ## 7. CoreCapabilities
 
-```rust
-#[derive(Debug, Clone)]
-pub struct CoreCapabilities {
-    pub major: u32,
-    pub supports_disable_spoofing: bool,
-    pub supports_explicit_gpu: bool,
-    pub supports_canvas_noise_flag: bool,
-}
-```
+以 `crates/domain/src/core.rs` 为准：`major`、`generation`（`FingerprintGeneration::Legacy` /
+`Chrome144Plus`）与各能力开关字段。字段为 `false` 表示“该 major 上未经验证”，序列化器省略
+该开关，兼容性检查把它报告为不支持，而不是静默声称。
 
-v1 可以先支持：
-
-```text
-KnownSupported
-Unsupported
-Unknown
-```
-
-未知 major 不应静默假定兼容。
+未知 major（读不到版本，major 0）没有 generation：它被拒绝，而不是被分类为 Unknown。
+子系统参考见 [Fingerprints](subsystems/fingerprints.md)。
 
 ---
 

@@ -174,7 +174,7 @@ than committed twice.
   the window list ever becomes empty, which is the safety net that has always been
   there: a program managing browsers with nothing on screen and nothing in the tray
   would be a program with no way to reach it. A desktop that refuses the tray icon
-  is warned about in the log rather than refused - the window still goes away.
+  keeps the window - hiding it would leave no way back - and the banner says why.
 - It does not adopt what a crash left. That is still reclaimed, on purpose, and it
   is the behaviour every existing record gets.
 - It does not make two data directories one installation. An adopted session

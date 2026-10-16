@@ -148,12 +148,17 @@ Trojan 用 `servers`（`password`）；带 `StreamSettings` 的四种再按选�
 
 ```rust
 pub trait RuntimeFacade: Send + Sync {
-    fn start(&self, profile_id: ProfileId) -> Result<(), RuntimeCommandError>;
+    fn start(&self, params: StartParams) -> Result<(), RuntimeCommandError>;
     fn stop(&self, profile_id: ProfileId) -> Result<(), RuntimeCommandError>;
-    fn restart(&self, profile_id: ProfileId) -> Result<(), RuntimeCommandError>;
+    fn restart(&self, params: StartParams) -> Result<(), RuntimeCommandError>;
+    /// 结束本次运行，把所有运行中的会话留作下一次启动的接纳对象。
+    fn release_all(&self) -> Result<(), RuntimeCommandError>;
     fn snapshot(&self, profile_id: ProfileId) -> Option<RuntimeSnapshot>;
 }
 ```
+
+`StartParams` 带一个单调递增的 `request_id`：启动/重启的完成或取消按请求确认，超时不能
+代替确认。形状以 `crates/runtime/src/facade.rs` 与 `crates/runtime/src/events.rs` 为准。
 
 调用 `start()` 的语义是“命令已接受”，不是“浏览器已经 ready”。
 
@@ -165,9 +170,12 @@ pub trait RuntimeFacade: Send + Sync {
 
 ```rust
 pub enum RuntimeCommand {
-    Start(ProfileId),
+    Start(StartParams),
     Stop(ProfileId),
-    Restart(ProfileId),
+    Restart(StartParams),
+    /// 结束本次运行，把所有运行中的会话留作下一次运行的接纳对象。
+    ReleaseAll,
+    /// 结束本次运行并停止它启动的一切。
     ShutdownAll,
 }
 ```
@@ -259,11 +267,16 @@ v1 只需要访问 loopback 的 CDP `/json/version` 或等价 readiness endpoint
 
 ```rust
 pub trait PortAllocator: Send + Sync {
+    fn reserve_loopback(&self) -> Result<PortReservation, PortError>;
+
+    /// 只探测一个端口；launcher 必须用 reserve_loopback。
     fn allocate_loopback(&self) -> Result<u16, PortError>;
 }
 ```
 
-v1 允许“探测空闲端口 -> 立即 spawn -> 失败重试”的简单策略。
+`reserve_loopback` 返回的 `PortReservation` 在 drop 之前一直持有绑定的监听套接字：端口从
+分配起就被占住，spawn 失败或启动回滚时也不会被别的进程抢走。以
+`crates/runtime/src/ports.rs` 为准。
 
 端口一定是 RuntimeSession 数据，不写回 Profile。
 

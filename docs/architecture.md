@@ -130,7 +130,6 @@ fp-browser/
 
 - SQLite schema / migrations；
 - repository 实现；
-- settings；
 - runtime history（可选）。
 
 ### `runtime`
@@ -170,6 +169,7 @@ fp-browser/
 - views；
 - dialogs；
 - state binding；
+- settings（配置文件、解析顺序与持久化，见 [Settings](subsystems/settings.md)）；
 - 单实例（`instance`）：数据目录上的内核级互斥锁——Unix 用 `flock`、Windows 用
   `LockFileEx`。第二个副本拿不到锁就报出持有者并以退出码 3 结束，因此不会打开同一个数据
   库，也不会把第一个副本正在运行的浏览器当成遗留进程回收。锁由内核在进程结束时释放，所以
@@ -301,17 +301,10 @@ webgl_renderer
 
 不要让 Chromium 版本判断散落在启动代码中。
 
-定义：
-
-```rust
-pub struct CoreCapabilities {
-    pub major: u32,
-    pub supports_disable_spoofing: bool,
-    pub supports_explicit_gpu: bool,
-    pub supports_canvas_noise_flag: bool,
-    pub supported_brands: Vec<BrowserBrand>,
-}
-```
+当前的 `CoreCapabilities` 以 `crates/domain/src/core.rs` 为准：`major`、`generation`
+（`FingerprintGeneration::Legacy` / `Chrome144Plus`，以 `PIVOT_MAJOR` = 144 为分界）与各
+能力开关字段；字段为 `false` 表示“该 major 上未经验证”，序列化器会省略该开关，而不是假定
+引擎支持。
 
 由：
 
@@ -325,7 +318,9 @@ CoreCapabilities
 LaunchPlanner
 ```
 
-决定最终参数。
+决定最终参数。读不到版本的核心（major 0）被 `DefaultCapabilityResolver` 拒绝，而不是被
+归类为 Unknown（`crates/runtime/src/capability.rs`）。子系统参考见
+[Fingerprints](subsystems/fingerprints.md)。
 
 v1 可以只重点支持一个经过验证的 Chromium major；capability 层仍保留，以免未来升级时重写 runtime。
 
@@ -367,7 +362,7 @@ Xray 负责将其转发到真实 outbound。
 ## 10b. 代理诊断
 
 “本地端口在监听”与“流量真的出去了”是两件事。启动路径只验证前者
-（`wait_ready` 连一次 `127.0.0.1:<port>`），因此一个凭据被上游拒绝、域名解析
+（`wait_ready` 连一次 `127.0.0.1:<port>`，其边界见 [Proxies and Xray](subsystems/proxies-xray.md)），因此一个凭据被上游拒绝、域名解析
 失败、或者干脆什么都不转发的代理可以通过启动检查——那个 Profile 之后就会
 泄漏：它宣称的指纹与它被看到的地址互相矛盾。
 
@@ -554,6 +549,8 @@ Unusable(reason)               端点本身不可问（不是明文 HTTP）
 - `FP_BROWSER_CONFIG` 仍然可以指定一个明确的文件路径。它是覆盖而不是位置：测试和脚本
   需要指向某个文件而不必为它造一个数据目录，而明确的路径不该被迁移。
 
+迁移行为的完整定义（三种结局与各自的横幅）在 [Settings](subsystems/settings.md)。
+
 ---
 
 ## 11. RuntimeSupervisor
@@ -705,12 +702,13 @@ about:blank
 
 ## 15. v1 UI
 
-只做 4 个主区域：
+只做 5 个主区域（与 `crates/app/src/ui/mod.rs` 的 `PAGES` 一致）：
 
 ```text
 Profiles
 Proxies
-Browser Cores
+Cores
+Log
 Settings
 ```
 

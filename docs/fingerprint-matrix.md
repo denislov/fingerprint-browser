@@ -286,16 +286,9 @@ The measurement also settled two things about the exclusion itself:
 
 ## Version detection
 
-`BrowserCore.major` comes from the binary: `runtime::version::VersionReport`
-runs `<executable> --version` under a deadline (5s) and parses the first digit
-run (`Chromium 148.0.7778.215` -> 148). `FP_BROWSER_CHROMIUM_MAJOR` overrides it
-for a binary that does not answer usefully.
-
-The catalogue is reconciled on every start (`app::core_detect::maintain`):
-a replaced binary is re-detected and the stored major/name are refreshed, so the
-capability table cannot go stale. A missing executable is reported; a core whose
-version cannot be re-read keeps its stored major instead of being silently
-downgraded to "unknown".
+The major a measurement is keyed to is read from the binary, never from a tag or
+a stored claim; how that happens, and how the catalogue is kept current across
+starts, is owned by [Browser cores](subsystems/browser-cores.md).
 
 ## Not implemented yet
 
