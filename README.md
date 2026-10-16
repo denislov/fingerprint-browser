@@ -387,6 +387,8 @@ there.
 
 ## Design and evidence
 
+- [Subsystem references](docs/subsystems/README.md) - current responsibilities,
+  runtime paths and contracts for each subsystem; start here before changing one.
 - [Architecture](docs/architecture.md), [domain model](docs/domain-model.md),
   [service contracts](docs/service-contracts.md), [lifecycle](docs/lifecycle.md)
 - [Linux acceptance](docs/chromium-acceptance.md), [Windows acceptance](docs/windows-acceptance.md),
