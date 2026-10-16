@@ -6,13 +6,18 @@ These pages describe current responsibilities, runtime paths, state, and contrac
 | --- | --- |
 | Runtime lifecycle: profile launch, start/stop/restart, crash handling, reclaim and adoption | [Runtime lifecycle](../lifecycle.md) |
 | Domain model: profile, fingerprint, proxy, core, launch-plan and session types | [Domain model](../domain-model.md) |
+| Fingerprints: persona switches, capability table and browser read-back | [Fingerprints](fingerprints.md) |
+| Proxies and Xray: outbound model, share-link import, per-profile engine and the machine's proxy | [Proxies and Xray](proxies-xray.md) |
+| Proxy tests and the exit address a browser's traffic leaves from | [Traffic verification](traffic-verification.md) |
+| Browser cores: discovery, version probe and published-build downloads | [Browser cores](browser-cores.md) |
+| Storage: schema, migrations, repositories and the configuration transaction | [Storage](storage.md) |
 | Configuration backup, import, restore and browser-data copy | [Backup and restore](../backup-and-restore.md) |
+| The window: pages, dialogs, view state and appearance | [UI shell](ui-shell.md) |
+| Settings, files and effective configuration | [Settings](settings.md) |
 | Interface text and the catalog's translation rules | [Interface text](../i18n.md) |
 | Closing the window, the tray and one window per data directory | [Exit modes](../exit-modes.md) |
 | The diagnostics report and the activity log | [Diagnostics](../diagnostics.md) |
 | Packaging and releases | [Releases](../release.md) |
-
-Fingerprints, proxies and Xray, traffic verification, browser cores, storage, the window and settings have no reference page yet. Until one is written, the closest descriptions are [architecture](../architecture.md) and [service contracts](../service-contracts.md); both are partly out of date.
 
 A subsystem can span several packages or repositories. Its reference describes the behavior those parts provide together; it does not need to list every function.
 
