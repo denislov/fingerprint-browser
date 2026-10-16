@@ -1059,3 +1059,72 @@ fn the_system_proxy_row_switches_and_stores_the_choice(cx: &mut TestAppContext) 
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The page switch stores its own setting - not the one on the row above it.
+///
+/// A page with one switch per row can be wired with a handler that assumes which
+/// row it was on, and that is what this page had until the second switch
+/// arrived: the click would have stored the reader's answer against the wrong
+/// setting, with the page showing the state they asked for either way.
+#[gpui_kit::test]
+fn the_identity_page_row_switches_and_stores_its_own_choice(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = std::env::temp_dir().join(format!("fp-ui-status-page-{}", std::process::id()));
+    let (view, _) = view_with_config(cx, &dir.join("config.json"));
+    let cx = window(cx, &view);
+
+    cx.update(|window, cx| window.click("nav-Settings", cx));
+    settle(cx);
+    scroll_settings_to(cx, "switch-setting-status-page");
+
+    let row = |cx: &mut gpui_kit::VisualTestContext, key: crate::settings::SettingKey| {
+        view.read_with(cx, |view, _| {
+            view.state()
+                .setting_rows()
+                .into_iter()
+                .find(|row| row.key == key)
+                .expect("a row for the switch")
+        })
+    };
+
+    assert_eq!(
+        row(cx, crate::settings::SettingKey::StatusPage).switch,
+        Some(true),
+        "on until the reader turns it off, because the page is what this program is for"
+    );
+    assert_eq!(
+        row(cx, crate::settings::SettingKey::StatusPage)
+            .key
+            .effect()
+            .label(en()),
+        "now",
+        "the switch is read when Start is pressed, not when the program starts"
+    );
+
+    cx.update(|window, cx| window.click("switch-setting-status-page", cx));
+    settle(cx);
+
+    assert_eq!(
+        row(cx, crate::settings::SettingKey::StatusPage).switch,
+        Some(false)
+    );
+    // The file carries every key, with `null` where the reader has not chosen
+    // one, so what the click stored is the value and not the presence of a name.
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("config.json")).expect("the file it wrote"),
+    )
+    .expect("a config file");
+    assert_eq!(written["status_page"], "off");
+    assert_eq!(
+        written["system_proxy"],
+        serde_json::Value::Null,
+        "the click was stored against the row above it: {written}"
+    );
+    assert_eq!(
+        row(cx, crate::settings::SettingKey::UseSystemProxy).switch,
+        Some(false),
+        "and the other switch is where it was"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

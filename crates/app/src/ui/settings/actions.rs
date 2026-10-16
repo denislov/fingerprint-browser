@@ -220,8 +220,27 @@ impl AppView {
     /// Repainted on a refusal as well as on a success: the box has already moved
     /// under the pointer by the time this runs, and a refusal that left it there
     /// would be claiming a state that was not stored.
-    pub(in crate::ui) fn on_set_use_system_proxy(&mut self, use_it: bool, cx: &mut Context<Self>) {
-        let _ = self.state.set_use_system_proxy(use_it);
+    /// Stores whichever switch was clicked, by the key its row carries.
+    ///
+    /// Every row's switch comes through here rather than each having a handler of
+    /// its own, so a row added to the page cannot end up wired to the switch
+    /// above it. A key with no switch is a bug in the page, not something a
+    /// reader can reach: nothing draws one.
+    pub(in crate::ui) fn on_set_switch(
+        &mut self,
+        key: SettingKey,
+        checked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match key {
+            SettingKey::UseSystemProxy => {
+                let _ = self.state.set_use_system_proxy(checked);
+            }
+            SettingKey::StatusPage => {
+                let _ = self.state.set_status_page(checked);
+            }
+            other => debug_assert!(false, "{other:?} has no switch to store"),
+        }
         cx.notify();
     }
 

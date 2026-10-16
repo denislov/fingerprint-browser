@@ -37,7 +37,9 @@ use domain::{
 };
 pub use releases::{ReleaseDownload, ReleaseStatus};
 use runtime::system_proxy::{self, Reading};
-use runtime::{Diagnosis, Discrepancy, Fault, RuntimeComponent, RuntimeEvent, RuntimeSnapshot};
+use runtime::{
+    Diagnosis, Discrepancy, Fault, RuntimeComponent, RuntimeEvent, RuntimeSnapshot, StatusLaunch,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -803,6 +805,35 @@ impl AppState {
     /// times a second. That is also why the sentence says more than "saved" - a
     /// switch that is on while the machine has no proxy it can read would
     /// otherwise look like it had done something.
+    /// The page a launch should open first, when the reader asked for one.
+    ///
+    /// Read at the moment Start is pressed rather than kept anywhere: what the
+    /// switch means is "the next launch", and the next launch is what is being
+    /// built right now.
+    pub(super) fn status_launch(&self) -> Option<StatusLaunch> {
+        self.settings.status_launch()
+    }
+
+    /// Stores whether a launch opens the identity page first.
+    ///
+    /// Nothing is refused here, unlike the system proxy: this switch has no
+    /// environment override to lose to, so there is no click that would move
+    /// back under the reader's hand.
+    pub fn set_status_page(&mut self, open_it: bool) -> Result<(), AppError> {
+        let t = self.text();
+        let result = self
+            .settings
+            .set_status_page(open_it)
+            .map_err(AppError::Conflict);
+        match &result {
+            Ok(()) => self.set_notice(Notice::info(
+                t.setting_saved(t.setting_status_page, SettingKey::StatusPage.effect()),
+            )),
+            Err(error) => self.set_notice(Notice::error(error.to_string())),
+        }
+        result
+    }
+
     pub fn set_use_system_proxy(&mut self, use_it: bool) -> Result<(), AppError> {
         let t = self.text();
         // The variable outranks the file, so a click that stored the other

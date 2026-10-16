@@ -1,3 +1,4 @@
+use crate::status::StatusLaunch;
 use domain::{BrowserCore, BrowserProfile, ProfileId, ProxyProfile, RuntimeState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7,6 +8,13 @@ pub struct StartParams {
     pub profile: BrowserProfile,
     pub core: BrowserCore,
     pub proxy: Option<ProxyProfile>,
+    /// The status page this launch opens first, when the reader asked for one.
+    ///
+    /// Part of the launch rather than of the supervisor's configuration, because
+    /// the language and the endpoint behind it are settings a reader can change
+    /// between two starts: a page that answered in the language of the previous
+    /// start would be wrong in a way nobody would think to check.
+    pub status: Option<StatusLaunch>,
 }
 
 impl StartParams {
@@ -20,6 +28,7 @@ impl StartParams {
             profile,
             core,
             proxy: None,
+            status: None,
         }
     }
 
@@ -29,7 +38,14 @@ impl StartParams {
             profile,
             core,
             proxy: Some(proxy),
+            status: None,
         }
+    }
+
+    /// The same launch, opening a status page as its first tab.
+    pub fn with_status(mut self, status: StatusLaunch) -> Self {
+        self.status = Some(status);
+        self
     }
 
     pub fn profile_id(&self) -> ProfileId {

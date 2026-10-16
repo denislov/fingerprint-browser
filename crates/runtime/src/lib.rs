@@ -119,6 +119,7 @@ mod tests {
             capabilities: &capabilities,
             cdp_port: 9222,
             socks_port: None,
+            status_url: None,
             xray_executable: None,
             xray_config_dir: None,
         };
@@ -174,6 +175,7 @@ mod tests {
             capabilities: &capabilities,
             cdp_port: 9222,
             socks_port: Some(51234),
+            status_url: None,
             xray_executable: Some(PathBuf::from("bin/xray.exe")),
             xray_config_dir: Some(PathBuf::from("data/runtime/test")),
         };
@@ -214,6 +216,7 @@ mod tests {
             capabilities: &capabilities,
             cdp_port: 9222,
             socks_port: None,
+            status_url: None,
             xray_executable: None,
             xray_config_dir: None,
         };
@@ -257,6 +260,7 @@ mod tests {
             capabilities: &capabilities,
             cdp_port: 9222,
             socks_port: None,
+            status_url: None,
             xray_executable: None,
             xray_config_dir: None,
         };
@@ -280,6 +284,7 @@ mod tests {
             capabilities: &capabilities,
             cdp_port: 9222,
             socks_port: None,
+            status_url: None,
             xray_executable: None,
             xray_config_dir: None,
         };
@@ -288,6 +293,82 @@ mod tests {
             plan.browser_args.last().expect("arguments"),
             "https://example.com"
         );
+    }
+
+    /// The identity page is the first tab, and the profile's own page follows it.
+    ///
+    /// The order is the whole of what this adds to a command line: a reader who
+    /// asked for the page should be looking at it when the window opens, not
+    /// behind whatever the profile was already set to open.
+    #[test]
+    fn the_identity_page_is_the_first_tab_and_the_start_page_follows_it() {
+        let planner = DefaultLaunchPlanner::new();
+        let core = test_core();
+        let capabilities = core.capabilities().expect("a detected core");
+        let url = "http://127.0.0.1:41000/".to_string();
+
+        let mut profile = test_profile();
+        profile.start_target = StartTarget::Url("https://example.com".to_string());
+        let plan = planner
+            .build(LaunchContext {
+                profile: &profile,
+                core: &core,
+                proxy: None,
+                capabilities: &capabilities,
+                cdp_port: 9222,
+                socks_port: None,
+                status_url: Some(url.clone()),
+                xray_executable: None,
+                xray_config_dir: None,
+            })
+            .expect("a plan");
+        let args: Vec<&std::ffi::OsStr> = plan.browser_args.iter().map(|a| a.as_os_str()).collect();
+        let page = args.iter().position(|arg| *arg == url.as_str());
+        let own = args.iter().position(|arg| *arg == "https://example.com");
+        assert!(page.is_some() && own.is_some(), "{args:?}");
+        assert!(page < own, "the identity page was not first: {args:?}");
+
+        // A blank target is replaced rather than opened beside the page: a reader
+        // who asked for the identity page did not ask for an empty tab with it.
+        profile.start_target = StartTarget::Blank;
+        let plan = planner
+            .build(LaunchContext {
+                profile: &profile,
+                core: &core,
+                proxy: None,
+                capabilities: &capabilities,
+                cdp_port: 9222,
+                socks_port: None,
+                status_url: Some(url.clone()),
+                xray_executable: None,
+                xray_config_dir: None,
+            })
+            .expect("a plan");
+        assert!(
+            !plan
+                .browser_args
+                .iter()
+                .any(|arg| arg == std::ffi::OsStr::new("about:blank")),
+            "{:?}",
+            plan.browser_args
+        );
+
+        // And without the page, a blank target is still an argument: the one
+        // case that changes is the one the switch adds.
+        let plan = planner
+            .build(LaunchContext {
+                profile: &profile,
+                core: &core,
+                proxy: None,
+                capabilities: &capabilities,
+                cdp_port: 9222,
+                socks_port: None,
+                status_url: None,
+                xray_executable: None,
+                xray_config_dir: None,
+            })
+            .expect("a plan");
+        assert_eq!(plan.browser_args.last().expect("arguments"), "about:blank");
     }
 
     #[test]
@@ -304,6 +385,7 @@ mod tests {
             capabilities: &capabilities,
             cdp_port: 9222,
             socks_port: None,
+            status_url: None,
             xray_executable: None,
             xray_config_dir: None,
         };
@@ -315,6 +397,7 @@ mod tests {
             capabilities: &capabilities,
             cdp_port: 9222,
             socks_port: None,
+            status_url: None,
             xray_executable: None,
             xray_config_dir: None,
         };

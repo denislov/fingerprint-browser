@@ -117,15 +117,17 @@ opens, and the resolved settings decide what this run does:
 
 `Settings::rows` builds one `SettingRow` per key - `SettingKey::id` is the id
 the window and the tests address a row by - and `AppState::setting_rows` renders
-them in the language in force. `SettingGroup::of` places five rows in `Runtime`
+them in the language in force. `SettingGroup::of` places six rows in `Runtime`
 and three in `Data` (`General` and `Diagnostics` hold cards rather than rows;
 `SettingGroup::ALL` is the order of the chips). Each row carries the value in
 force, its `Source`, the environment variable behind it when one decided it, any
 stored value the environment is shadowing, and a note. `Effect` is an enum, not
 a phrase, so the window compares it and only then turns it into words: `DataDir`,
 `XrayExecutable` and `UseSystemProxy` are `Effect::NextStart`; `RuntimeDir` is
-`Effect::Derived`; `EchoUrl`, `ChromiumBin`, `ChromiumMajor` and `ConfigFile`
-are `Effect::Now`. The data directory row is the one whose source is never
+`Effect::Derived`; `EchoUrl`, `StatusPage`, `ChromiumBin`, `ChromiumMajor` and
+`ConfigFile` are `Effect::Now` - the identity page's switch is read when Start is
+pressed rather than when the program starts, so turning it off is enough to leave
+the page out of the next launch. The data directory row is the one whose source is never
 `ConfigFile` - nothing in the file can decide it - and the Chromium rows can
 only be `Environment` or `Default`, because those values are not stored. The
 data directory row is read-only, and its note says how to move the directory -
@@ -188,6 +190,7 @@ the three won.
 | Config file | `FP_BROWSER_CONFIG` | not read | `<data dir>/config.json` |
 | Xray executable | `FP_BROWSER_XRAY_BIN` | `xray_executable` | `bin/xray.exe` on Windows, `bin/xray` elsewhere (`default_xray`) |
 | Use system proxy | `FP_BROWSER_SYSTEM_PROXY` | `system_proxy: "on"` | off |
+| Identity page | - | `status_page: "off"` | **on** (the stored name is the off state) |
 | Echo endpoint | `FP_BROWSER_ECHO_URL` | `echo_url` | `runtime::DEFAULT_ECHO_URL` |
 | Chromium binary | `FP_BROWSER_CHROMIUM_BIN` | not stored | not set; `core_detect::discover` finds one on disk |
 | Chromium major | `FP_BROWSER_CHROMIUM_MAJOR` | not stored | not set; the major is read from each binary (`core_detect::env_major` parses the override) |
@@ -279,7 +282,10 @@ the relative `fp-browser/config.json` when the host has no config directory.
   second copy of the answer is how the two answers start to disagree. The two
   switches' default states are stored as absence: `set_use_system_proxy(false)`
   and an expanded sidebar both write `null`, the spelling a config file from
-  before those switches existed already had. The
+  before those switches existed already had. The identity page is the one switch
+  that runs the other way - it is **on** by default, so what it writes down is
+  the off state (`status_page: "off"`), and `null` keeps meaning what it meant to
+  a build that had never heard of the switch: a reader who gets the page. The
   standing choices are not like that - `set_theme`, `set_language` and
   `set_exit_mode` write their code even when it is the default, so `"dark"` and
   `null` both mean dark, `"en"` and `null` both mean English, and `"ask"` and

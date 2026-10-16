@@ -93,6 +93,14 @@ goes `Starting` -> `Running`, and the Runtime Details panel has the pid, the CDP
 port, the SOCKS port when there is one, and the exact arguments the browser was
 given (*Args* tab).
 
+The browser opens on a page of its own first: a local page, served by this
+program for as long as that profile runs, saying which profile the session is and
+where one request leaves from. It is the same reading the Proxies page's **Test**
+takes, so a proxied profile that carries nothing says so here in the same words.
+A profile with no proxy is told that nothing was asked. **Identity page** on the
+Settings page turns it off, and turning it off is enough for the next launch -
+see [identity page](subsystems/identity-page.md).
+
 **6. Verify the fingerprint.** **Verify fingerprint** asks the running browser
 what it reports and compares that against what the profile claims, one claim at a
 time. The result is either the confirmation that every claim was read back, or a

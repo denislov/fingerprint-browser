@@ -281,6 +281,10 @@ fn setting_row(
 /// The checkbox carries no visible label: the row's own label names it, and the
 /// value line beside it says the state. It does carry the accessible one, which
 /// is a name a screen reader reads rather than a second copy on the page.
+///
+/// The click carries its row's key, because the page has more than one switch
+/// and a handler that assumed which one it was would store the reader's answer
+/// against the wrong setting - with nothing on the page to show for it.
 fn switch_control(
     row: &crate::settings::SettingRow,
     cx: &mut Context<AppView>,
@@ -294,7 +298,7 @@ fn switch_control(
         .accessibility_label(key.label(t))
         .on_change(move |&checked, _, cx: &mut App| {
             if let Some(view) = view.upgrade() {
-                view.update(cx, |view, cx| view.on_set_use_system_proxy(checked, cx));
+                view.update(cx, |view, cx| view.on_set_switch(key, checked, cx));
             }
         })
 }

@@ -103,6 +103,7 @@ impl RuntimeSupervisor {
                 debug_assert!(!cancelled, "a cancelled start never reports readiness");
                 let browser = attempt.take_browser();
                 let xray = attempt.take_xray();
+                let status = attempt.take_status();
                 let xray_config = attempt.config().map(std::path::Path::to_path_buf);
                 let (cdp_port, socks_port, effective_args) = (
                     attempt.cdp_port,
@@ -122,6 +123,7 @@ impl RuntimeSupervisor {
                     xray_config,
                     _cdp_port: cdp_port,
                     _socks_port: socks_port,
+                    _status: status,
                     _effective_args: effective_args.clone(),
                     stopping: false,
                     stop_failed: None,
@@ -238,6 +240,48 @@ impl RuntimeSupervisor {
             });
         }
 
+        // 3c. The status page, when this launch was asked for one.
+        //
+        // Started before the plan is built, because the browser is sent to its
+        // address; and it keeps the port it reserved rather than releasing it, so
+        // the address written into the plan is one something is already answering
+        // on - the one place in this program with no release-to-bind window.
+        let status_url = match &params.status {
+            Some(status) => {
+                let reservation = self.port_allocator.reserve_loopback().map_err(|e| {
+                    StartFailure::failed(format!("status port allocation failed: {e}"))
+                })?;
+                let session = Arc::new(StatusSession {
+                    report: StatusReport {
+                        profile: params.profile.name.clone(),
+                        profile_id: profile_id.to_string(),
+                        core: params.core.version.clone(),
+                        core_major: (params.core.major > 0).then_some(params.core.major),
+                        // The name, never the URI: this page is one a reader may
+                        // leave open where somebody else can read it.
+                        proxy: params.proxy.as_ref().map(|proxy| proxy.name.clone()),
+                        cdp_port,
+                        socks_port,
+                        started_at: SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|since| since.as_secs())
+                            .unwrap_or(0),
+                        warning: compatibility.message(),
+                        echo_url: status.echo_url.clone(),
+                    },
+                    socks_port,
+                    lang: status.lang,
+                });
+                let service = StatusService::start(reservation, session).map_err(|e| {
+                    StartFailure::failed(format!("the status page did not start: {e}"))
+                })?;
+                let url = service.url();
+                attempt.hold_status(service);
+                Some(url)
+            }
+            None => None,
+        };
+
         // 4. Build LaunchPlan
         let ctx = LaunchContext {
             profile: &params.profile,
@@ -246,6 +290,7 @@ impl RuntimeSupervisor {
             capabilities: &capabilities,
             cdp_port,
             socks_port,
+            status_url,
             xray_executable: Some(self.xray_executable.clone()),
             xray_config_dir: Some(self.runtime_dir.join(profile_id.to_string())),
         };

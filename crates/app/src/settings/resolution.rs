@@ -179,3 +179,17 @@ pub(super) fn resolve_use_system_proxy(stored: &Stored, env: &Environment) -> bo
         .or_else(|| stored.system_proxy.as_deref().and_then(switch_on))
         .unwrap_or(false)
 }
+
+/// Whether a launch opens the identity page as its first tab.
+///
+/// On unless the file says off, which is the opposite direction from every other
+/// switch stored here and is why the stored name is the off state. There is no
+/// environment override: which page a browser opens is a choice about what the
+/// reader is looking at, not about what this process does, and the two settings
+/// that have one are read when the program starts because a script starts it.
+pub(super) fn resolve_status_page(stored: &Stored) -> bool {
+    !stored
+        .status_page
+        .as_deref()
+        .is_some_and(|code| code.trim().eq_ignore_ascii_case(STATUS_PAGE_OFF))
+}

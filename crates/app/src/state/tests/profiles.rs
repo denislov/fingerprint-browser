@@ -359,6 +359,44 @@ fn create_lists_the_profile_and_selects_it() {
     assert!(!row.can_stop());
 }
 
+/// A launch carries the page the settings ask for at the moment Start is pressed.
+///
+/// The switch is live rather than pending, so what this checks is the wiring a
+/// reader cannot see: the setting reaches the launch that is being built, and
+/// turning it off leaves the page out of the next one.
+#[test]
+fn a_launch_asks_for_the_identity_page_the_settings_describe() {
+    let mut fixture = fixture();
+    seed_core(&fixture);
+    fixture.state.load().expect("load");
+    let first = fixture.state.create_profile("Shown").expect("create");
+    let second = fixture.state.create_profile("Hidden").expect("create");
+
+    fixture.state.start(first).expect("start");
+    let asked = fixture.runtime.statuses();
+    let page = asked
+        .last()
+        .expect("a launch was sent")
+        .clone()
+        .expect("a reader who never touched the switch still gets the page");
+    assert_eq!(page.lang, "en");
+    assert!(
+        page.echo_url.starts_with("http://"),
+        "the page asks the stored endpoint: {}",
+        page.echo_url
+    );
+
+    // Turned off between two launches, so the difference is the switch and not
+    // the profile.
+    fixture.state.set_status_page(false).expect("stored");
+    fixture.state.start(second).expect("start the second");
+    assert_eq!(
+        fixture.runtime.statuses().last().expect("a launch").clone(),
+        None,
+        "the page was asked for with the switch already off"
+    );
+}
+
 #[test]
 fn start_and_stop_update_the_row_from_the_snapshot() {
     let mut fixture = fixture();

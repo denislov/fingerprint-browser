@@ -52,6 +52,12 @@ RuntimeSupervisor
  │
  ├─ 3. resolve core capabilities
  │
+ ├─3b. compatibility check (emit warning)
+ │
+ ├─3c. start the identity page (if the launch asked for one)
+ │     reserve a loopback port, take it rather than releasing it,
+ │     serve the session on it
+ │
  ├─ 4. build Xray config
  │
  ├─ 5. build immutable LaunchPlan
@@ -122,7 +128,8 @@ Running
   -> stop Xray
   -> delete temp Xray config
   -> delete session record
-  -> clear RuntimeSession
+  -> clear RuntimeSession (the identity page ends here: dropping the session
+     stops its thread and frees its port)
   -> Stopped
 ```
 
@@ -402,3 +409,4 @@ Windows 进程身份使用 PID + GetProcessTimes 创建时间（FILETIME）；�
 7. UI 状态以 Supervisor snapshot 为准；event 仅作非阻塞更新通知，需定期和重连时读取快照。
 8. 事件队列满或断开时允许丢弃通知，快照保留最后错误、警告、启动参数和累计 dropped_events；停止不清空诊断，下次启动清空诊断。
 9. session record 中的 pid 只有在进程身份（同一 `start_time`，或无该信息时命令行尾部匹配）成立时才可被发信号；无法识别时保留记录并上报。
+10. identity page 与 ActiveSession 同生命周期：它由 session 持有，session 被丢弃（stop / crash / reclaim / release_all）即关闭线程并释放端口；被 adopt 的 session 没有页面，因为上一条运行留下的页面随那次运行一起结束了。它监听的是预留后**直接接管**的 loopback 端口（`PortReservation::into_listener`），是本程序唯一没有 release-to-bind 窗口的服务。详见 [identity page](subsystems/identity-page.md)。

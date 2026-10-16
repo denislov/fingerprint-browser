@@ -46,6 +46,13 @@ this repository does not bundle or fork them.
   back the address that browser's own traffic leaves from.
   Linux builds 142, 144 and 148 were measured; 145–147 remain inferred.
   See the [fingerprint matrix](docs/fingerprint-matrix.md).
+- Open a started profile on a page that says what it is: the profile, its core,
+  its proxy and its ports, and one request's exit address read through that
+  profile's engine. The page is served by this program on a loopback port for as
+  long as the profile runs, talks to nothing but this program, and is read-only;
+  a request that names another `Host` is refused, so no other page can read it.
+  **Identity page** on the Settings page turns it off. See
+  [identity page](docs/subsystems/identity-page.md).
 - Show runtime details, effective arguments, per-profile logs and notifications.
   Logs persist to logs/activity.log, rotating at 512 KiB to one backup. In-memory
   history is capped at 500 lines.

@@ -304,7 +304,7 @@ mod tests {
 
         // Start through runtime service
         runtime_service
-            .start(profile.id)
+            .start(profile.id, None)
             .expect("start via runtime service");
 
         // Verify supervisor received and processed start

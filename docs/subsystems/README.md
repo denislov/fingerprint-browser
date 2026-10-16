@@ -9,6 +9,7 @@ These pages describe current responsibilities, runtime paths, state, and contrac
 | Fingerprints: persona switches, capability table and browser read-back | [Fingerprints](fingerprints.md) |
 | Proxies and Xray: outbound model, share-link import, per-profile engine and the machine's proxy | [Proxies and Xray](proxies-xray.md) |
 | Proxy tests and the exit address a browser's traffic leaves from | [Traffic verification](traffic-verification.md) |
+| The local page a session can serve about itself, and what each number on it proves | [Identity page](identity-page.md) |
 | Browser cores: discovery, version probe and published-build downloads | [Browser cores](browser-cores.md) |
 | Storage: schema, migrations, repositories and the configuration transaction | [Storage](storage.md) |
 | Configuration backup, import, restore and browser-data copy | [Backup and restore](../backup-and-restore.md) |
