@@ -340,7 +340,8 @@ CHROMIUM_BIN=/path/chrome \
   cargo test -p runtime --test fingerprint_real -- --ignored
 XRAY_BIN=/path/xray cargo test -p runtime --test xray_real -- --ignored
 # Reaches a real endpoint through a real Xray; needs a working proxy and network.
-XRAY_BIN=/path/xray PROXY_URI='socks5://host:port' \
+# PROXY_URI takes a share link; a plain SOCKS5 upstream goes in DIAG_SOCKS5.
+XRAY_BIN=/path/xray DIAG_SOCKS5='host:port' DIAG_ECHO_URL=http://api.ipify.org \
   cargo test -p runtime --test proxy_diag_real -- --ignored
 # Reads a real browser's own exit address back; needs a browser and network.
 CHROMIUM_BIN=/path/chrome ECHO_URL=http://api.ipify.org \
