@@ -159,6 +159,14 @@ number it did not earn, which is the rule the rest of the program applies.
   answered without dialling anything.
 - **The page works offline.** Every number comes over loopback, so a machine with
   no route to the endpoint shows the endpoint's fault rather than a blank page.
+- **A proxied profile still reaches its own page, because Chromium bypasses the
+  proxy for loopback by default.** This is load-bearing rather than incidental: a
+  launch that added `--proxy-bypass-list=<-loopback>` - the flag that takes that
+  default away, which `chromium_real`'s test planner does - would send the browser
+  to its identity page through an engine that cannot reach it, and every proxied
+  profile would open on an error page. Measured on fingerprint-chromium 148: the
+  same page behind the same dead proxy loads by default and does not load with
+  `<-loopback>` added (`crates/runtime/tests/status_page_real.rs`).
 
 ## Verification
 
@@ -180,7 +188,23 @@ the browser was sent to has nothing listening; with the switch's click stored
 without looking at its row, the identity-page row keeps the state it had while
 the other one moves.
 
-Not run: the opt-in browser suites. Nothing here needs a browser to be verified -
-the page is read over a socket - and the suites that do
-(`chromium_real`, `fingerprint_real`) need a browser binary this environment does
-not have. A real window opening the page is likewise unverified here.
+The page itself is rendered by a real browser in an opt-in suite, because a
+socket read cannot say whether a browser will run the script, honour the policy
+or escape a profile's name:
+
+```sh
+CHROMIUM_BIN=/path/to/chrome cargo test -p runtime --test status_page_real -- --ignored
+```
+
+Run against fingerprint-chromium 148 on Linux: the page loaded behind a dead
+proxy, every field was filled in by the page's own script - including the
+compatibility warning and the fault the reading came back as - and the same page
+did not load once `--proxy-bypass-list=<-loopback>` was added, which is how the
+loopback-bypass constraint above was measured rather than assumed. That run also
+found a real defect: the two separator characters were written into the script
+with a doubled backslash, so the page showed `·` where the middle dot
+belongs; the escapes are the characters now, and the test reads the element
+rather than the document, which is what let it see the difference.
+
+Not run here: the `chromium_real`, `fingerprint_real` and `proxy_diag_real`
+suites, and no real window has opened the page - the browser was driven headless.
