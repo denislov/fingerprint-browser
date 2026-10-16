@@ -262,6 +262,50 @@ fn a_failed_download_leaves_the_setting_alone() {
     );
 }
 
+/// The state the shared config file left behind on CI, pinned: a fixture whose
+/// config file cannot be read refuses the write, so the engine on disk does not
+/// become the one in force and the reader is told why instead of the download
+/// being reported as installed (run 38852760218 is where this state showed up;
+/// the fixture can no longer collide with another test, but the refusal is a
+/// designed behaviour of its own).
+#[test]
+fn an_unreadable_config_keeps_the_engine_and_says_the_download_was_not_recorded() {
+    let broken = std::env::temp_dir().join(format!("fp-xray-unreadable-{}", CoreId::new()));
+    let _ = std::fs::remove_dir_all(&broken);
+    std::fs::create_dir_all(&broken).expect("temp dir");
+    // A directory where the config file should be, so reading it fails.
+    let config = broken.join("config.json");
+    std::fs::create_dir(&config).expect("the breaker");
+    let mut fixture = fixture_with_config(&config);
+    let before = fixture.state.xray_executable().to_path_buf();
+    let asset = asset("v26.3.27", Platform::host(), Architecture::host().unwrap());
+    let directory = fixture.state.xray_release_dir("v26.3.27");
+    let downloaded = downloaded_in(&directory);
+
+    fixture
+        .state
+        .begin_xray_download("v26.3.27", &asset)
+        .expect("accepted");
+    fixture
+        .state
+        .finish_xray_download("v26.3.27", Ok(downloaded));
+
+    assert_eq!(
+        fixture.state.xray_executable(),
+        before,
+        "the write was refused, so the engine in force is the one that was"
+    );
+    let notice = fixture.state.notice().expect("the refusal is said");
+    assert!(notice.error, "this is not a success: {}", notice.message);
+    assert!(
+        notice.message.contains("v26.3.27"),
+        "and which build it concerns: {}",
+        notice.message
+    );
+
+    let _ = std::fs::remove_dir_all(&broken);
+}
+
 /// Which release is on disk is read back out of the path, so a reader who points
 /// the row at their own binary stops being told about a downloaded one.
 #[test]

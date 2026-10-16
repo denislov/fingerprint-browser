@@ -17,14 +17,35 @@ struct Fixture {
     cores: Arc<MemCoreRepository>,
     profiles: Arc<MemProfileRepository>,
     proxies: Arc<MemProxyRepository>,
+    /// The directory this fixture was given for its config file, when it made
+    /// one of its own; removed with the fixture.
+    owned_config_dir: Option<PathBuf>,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if let Some(dir) = self.owned_config_dir.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// A config directory of its own for one fixture.
+///
+/// The tests in this binary run on parallel threads. A file they all share is
+/// one that gets replaced while another fixture is reading it, and on Windows
+/// a read that lands in the replacement window fails outright: the fixture's
+/// `Settings` then carries the refusal, its next write is refused on purpose,
+/// and the test observes a default it never chose (issue #7, run 38852760218).
+fn fixture_config_dir(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("fp-app-{name}-{}", CoreId::new()))
 }
 
 fn fixture() -> Fixture {
-    fixture_with_config(
-        &std::env::temp_dir()
-            .join("fp-app-settings-fixture")
-            .join("config.json"),
-    )
+    let dir = fixture_config_dir("settings-fixture");
+    let mut fixture = fixture_with_config(&dir.join("config.json"));
+    fixture.owned_config_dir = Some(dir);
+    fixture
 }
 
 /// The same fixture, with the settings file somewhere the test can read.
@@ -39,11 +60,9 @@ fn fixture_with_config(config: &std::path::Path) -> Fixture {
 /// `FP_BROWSER_XRAY_BIN` is set is a path no run will read. `Settings` reads its
 /// environment once, at load, so the fixture is rebuilt rather than adjusted.
 fn fixture_with_env_xray(path: &std::path::Path) -> Fixture {
-    let mut fixture = fixture_with_config(
-        &std::env::temp_dir()
-            .join("fp-app-xray-env-fixture")
-            .join("config.json"),
-    );
+    let dir = fixture_config_dir("xray-env-fixture");
+    let mut fixture = fixture_with_config(&dir.join("config.json"));
+    fixture.owned_config_dir = Some(dir);
     let (settings, _) = Settings::load(crate::settings::Environment {
         config: Some(fixture.state.settings.config_path().display().to_string()),
         xray_executable: Some(path.display().to_string()),
@@ -59,27 +78,19 @@ fn fixture_with_env_xray(path: &std::path::Path) -> Fixture {
 /// the data directory, so a test of that has to know which directory the
 /// settings believe in.
 fn fixture_with_data_dir(data_dir: &std::path::Path) -> Fixture {
-    fixture_full(
-        &std::env::temp_dir()
-            .join("fp-app-settings-fixture")
-            .join("config.json"),
-        Some(data_dir),
-        None,
-        None,
-    )
+    let dir = fixture_config_dir("settings-fixture");
+    let mut fixture = fixture_full(&dir.join("config.json"), Some(data_dir), None, None);
+    fixture.owned_config_dir = Some(dir);
+    fixture
 }
 
 /// The same fixture, with an activity log on disk in `log_dir`.
 fn fixture_with_log(log_dir: &std::path::Path) -> Fixture {
     let file = crate::log_file::LogFile::open(log_dir).expect("open the log file");
-    fixture_full(
-        &std::env::temp_dir()
-            .join("fp-app-settings-fixture")
-            .join("config.json"),
-        None,
-        Some(file),
-        None,
-    )
+    let dir = fixture_config_dir("settings-fixture");
+    let mut fixture = fixture_full(&dir.join("config.json"), None, Some(file), None);
+    fixture.owned_config_dir = Some(dir);
+    fixture
 }
 
 fn fixture_full(
@@ -138,6 +149,7 @@ fn fixture_full(
         cores: core_repo,
         profiles: profile_repo,
         proxies: proxy_repo,
+        owned_config_dir: None,
     }
 }
 
