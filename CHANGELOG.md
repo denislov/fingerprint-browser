@@ -12,6 +12,18 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stranger's port can no longer pass for the engine** (Runtime): the
+  SOCKS port is reserved and released just before Xray is spawned, so
+  another process can hold it in between; readiness accepted any listener
+  there, which let an engine that never bound pass on the strength of a
+  stranger's socket. The launch path now waits for the SOCKS5 greeting the
+  inbound is built to answer - the rule CDP readiness already applies by
+  reading `/json/version` instead of accepting any listener. What readiness
+  proves is otherwise unchanged: not that traffic flows, which remains the
+  diagnostic's question.
+
 ## [0.5.0] - 2026-10-13
 
 ### Changed

@@ -362,7 +362,7 @@ Xray 负责将其转发到真实 outbound。
 ## 10b. 代理诊断
 
 “本地端口在监听”与“流量真的出去了”是两件事。启动路径只验证前者
-（`wait_ready` 连一次 `127.0.0.1:<port>`，其边界见 [Proxies and Xray](subsystems/proxies-xray.md)），因此一个凭据被上游拒绝、域名解析
+（`wait_ready` 与入站完成一次 SOCKS5 问候，其边界见 [Proxies and Xray](subsystems/proxies-xray.md)），因此一个凭据被上游拒绝、域名解析
 失败、或者干脆什么都不转发的代理可以通过启动检查——那个 Profile 之后就会
 泄漏：它宣称的指纹与它被看到的地址互相矛盾。
 

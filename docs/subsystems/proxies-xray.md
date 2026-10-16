@@ -130,9 +130,10 @@ and sends `StartParams` through `RuntimeFacade`. In the supervisor:
 3. `XrayConfigBuilder::build` writes the config (next paragraph); the SOCKS
    reservation is released just before the child is spawned so Xray can bind
    the port.
-4. Xray is spawned with stdio nulled, then `wait_ready` polls; only after it
-   succeeds is the CDP reservation released and Chromium spawned, so the
-   browser is not started against a SOCKS endpoint nothing is listening on.
+4. Xray is spawned with stdio nulled, then `wait_ready` waits for the inbound
+   to answer its SOCKS5 greeting; only after it succeeds is the CDP
+   reservation released and Chromium spawned, so the browser is not started
+   against a SOCKS endpoint nothing is listening on.
 
 One engine per profile: the config path is
 `<runtime dir>/<profile id>/xray.json` (`XRAY_CONFIG_FILE`), the socks port is
@@ -263,9 +264,12 @@ its config file as the thing an ordinary stop must remove.
   start was cancelled by a Stop/Shutdown. Every one of them rolls the whole
   attempt back — children ended, config and record removed — and the profile is
   not reported `Running`.
-- `wait_ready` proves only that something answers on `127.0.0.1:<socks_port>`:
-  a live child and a listening TCP endpoint. It cannot say that a request would
-  travel through the proxy; that is the diagnostic's question.
+- `wait_ready` proves the engine is the one answering on
+  `127.0.0.1:<socks_port>`: a live child whose inbound answers the SOCKS5
+  greeting (`05 01 00` -> `05 00`, the `auth: noauth` the config builds). A
+  stranger's listener on the released port is not enough - the rule CDP
+  readiness already applies by reading `/json/version`. It cannot say that a
+  request would travel through the proxy; that is the diagnostic's question.
 - Deleting a proxy still assigned to any profile is refused twice: the service
   checks and names the profiles, and the schema keeps the reference
   `ON DELETE RESTRICT`, so a database written or edited outside the program

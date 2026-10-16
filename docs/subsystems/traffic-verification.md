@@ -203,11 +203,12 @@ read for every test, because it sees the exit address; `DEFAULT_ECHO_URL` is
 accepts a document that arrived over `https:` as an arrival - the endpoint's own
 scheme is what is constrained, not where the browser ended up.
 
-**Readiness is not carrying.** `xray::wait_ready` only proves the engine bound
-its loopback inbound (the definition and its bounds are owned by
-[Proxies and Xray](proxies-xray.md)). A port that accepts a connection and then says nothing
-looks exactly like a working proxy, and the difference is whether the profile
-leaks - which is why the pre-flight sends a real request instead.
+**Readiness is not carrying.** `xray::wait_ready` proves the engine bound its
+loopback inbound and answered the SOCKS5 greeting there (the definition and its
+bounds are owned by [Proxies and Xray](proxies-xray.md)); it says nothing about
+whether a request would travel through the proxy. An engine that carries
+nothing looks exactly like a working proxy to it, and the difference is whether
+the profile leaks - which is why the pre-flight sends a real request instead.
 
 **Every wait is bounded.** `PROBE_TIMEOUT` (10 s) bounds one request and
 `ENGINE_READY_TIMEOUT` (5 s, the launch path's own budget) bounds a temporary

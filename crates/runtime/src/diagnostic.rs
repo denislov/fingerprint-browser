@@ -1,8 +1,9 @@
 //! Asking a proxy whether traffic actually leaves through it.
 //!
 //! [`crate::xray::wait_ready`] answers a different question. It proves the
-//! engine bound its loopback inbound, and says nothing about whether the
-//! upstream took the credentials, resolved the target name or carried a byte.
+//! engine bound its loopback inbound and answered the SOCKS5 greeting there,
+//! and says nothing about whether the upstream took the credentials, resolved
+//! the target name or carried a byte.
 //! The difference matters more here than anywhere else in this project: a
 //! profile whose proxy silently carries nothing is a profile that leaks, and
 //! the fingerprint it presents then contradicts the address it is seen from.

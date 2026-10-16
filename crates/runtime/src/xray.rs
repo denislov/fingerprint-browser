@@ -344,7 +344,13 @@ fn stream_json(stream: &StreamSettings) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(settings))
 }
 
-/// Require a live child and a listening loopback endpoint before launching Chromium.
+/// Require a live child and its SOCKS5 inbound before launching Chromium.
+///
+/// The port is reserved and released just before the engine is spawned, so
+/// between the two another process can hold it. A bare connect would take that
+/// stranger's listener for the engine; the greeting is what tells them apart.
+/// The CDP side already applies the same rule by reading `/json/version`
+/// instead of accepting any listener.
 pub(crate) fn wait_ready(
     child: &mut crate::process::ManagedChild,
     port: u16,
@@ -367,16 +373,35 @@ pub(crate) fn wait_ready(
         if remaining.is_zero() {
             return Err(ProxyError::Other("Xray SOCKS readiness timed out".into()));
         }
-        if TcpStream::connect_timeout(
-            &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-            remaining.min(Duration::from_millis(100)),
-        )
-        .is_ok()
+        let budget = remaining.min(Duration::from_millis(100));
+        if let Ok(mut stream) =
+            TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), budget)
+            && the_inbound_answers_the_greeting(&mut stream, budget)
         {
             return Ok(());
         }
         std::thread::sleep(remaining.min(Duration::from_millis(25)));
     }
+}
+
+/// One SOCKS5 method negotiation with the inbound.
+///
+/// The inbound is built with `auth: noauth` (see `DefaultXrayConfigBuilder`), so
+/// the engine answers `05 00`. No answer, a close, or another protocol's bytes
+/// mean the listener on the port is not the engine, and the caller keeps
+/// waiting for its deadline.
+fn the_inbound_answers_the_greeting(
+    stream: &mut std::net::TcpStream,
+    budget: std::time::Duration,
+) -> bool {
+    use std::io::{Read, Write};
+    let _ = stream.set_read_timeout(Some(budget));
+    let _ = stream.set_write_timeout(Some(budget));
+    if stream.write_all(&[0x05, 0x01, 0x00]).is_err() {
+        return false;
+    }
+    let mut reply = [0u8; 2];
+    stream.read_exact(&mut reply).is_ok() && reply == [0x05, 0x00]
 }
 
 #[cfg(test)]
@@ -387,6 +412,44 @@ mod tests {
         StreamNetwork, StreamSecurity, StreamSettings, TlsSettings, TrojanOutbound, VlessOutbound,
         VmessOutbound, WsSettings,
     };
+
+    /// A port that is not the engine is not readiness.
+    ///
+    /// The port was reserved and released before the engine was spawned, so
+    /// another process can hold it. A bare connect would take that stranger's
+    /// listener for the engine and start a launch against nothing; the greeting
+    /// is what tells them apart.
+    #[cfg(unix)]
+    #[test]
+    fn a_listener_that_is_not_the_engine_is_not_ready() {
+        use std::net::TcpListener;
+        use std::process::Command;
+        use std::time::Duration;
+
+        // Bound, but never accepting and never answering: the kernel completes
+        // the handshake into its backlog, so a bare connect succeeds.
+        let stranger = TcpListener::bind(("127.0.0.1", 0)).expect("bind the stranger");
+        let port = stranger.local_addr().expect("the stranger's port").port();
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = crate::process::spawn_managed(&mut command).expect("spawn the stand-in");
+
+        let ready = wait_ready(&mut child, port, Duration::from_millis(300), || true);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(stranger);
+
+        assert!(
+            ready.is_err(),
+            "a listener that never answers for the port must not be reported ready"
+        );
+    }
 
     fn config_for(outbound: ProxyOutbound) -> serde_json::Value {
         let proxy = ProxyProfile {
