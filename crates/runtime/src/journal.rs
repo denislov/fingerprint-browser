@@ -855,11 +855,15 @@ mod tests {
     fn a_process_that_ignores_the_request_is_killed() {
         let dir = runtime_dir("forced");
         let profile_id = ProfileId::new();
-        // A shell that installs a SIGTERM trap and keeps sleeping. The marker on
+        // A shell that installs a SIGTERM trap and keeps working. The marker on
         // stdout is what makes the test wait for the trap: signalling before it
-        // is installed would prove nothing about ignoring it.
+        // is installed would prove nothing about ignoring it. The loop is what
+        // keeps the shell - not an exec'd stand-in - the process the record
+        // names: dash replaces itself with a final `sleep 60`, and a reader
+        // that lands in that execve window sees no command line and leaves the
+        // record alone.
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "trap '' TERM; echo ready; sleep 60"]);
+        command.args(["-c", "trap '' TERM; echo ready; while :; do sleep 1; done"]);
         let mut child = spawn_with(&mut command, Stdio::piped());
         let mut line = String::new();
         use std::io::BufRead;
