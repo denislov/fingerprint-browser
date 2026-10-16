@@ -64,6 +64,7 @@ Source: "{#SourceRoot}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceRoot}\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceRoot}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceRoot}\docs\*.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "{#SourceRoot}\docs\subsystems\*.md"; DestDir: "{app}\docs\subsystems"; Flags: ignoreversion
 Source: "{#SourceRoot}\assets\icon.png"; DestDir: "{app}\assets"; Flags: ignoreversion
 Source: "{#SourceRoot}\assets\icon.svg"; DestDir: "{app}\assets"; Flags: ignoreversion
 
