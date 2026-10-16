@@ -269,7 +269,7 @@ resolved core = 144.x
 socks port = 53122
 cdp port = 53123
 launch args = [...]
-xray config path = runtime/sessions/<profile>/xray.json
+xray config path = data/runtime/<profile-id>/xray.json
 ```
 
 两者必须分开。

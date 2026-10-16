@@ -52,8 +52,8 @@ Measured from the code, not assumed:
 | `<data dir>/app.db` | SQLite: `cores`, `proxies`, `profiles`, `schema_migrations` | The configuration. `proxies.outbound_json` is `serde_json` of the outbound, so credentials sit in it as plain text. |
 | `<data dir>/profiles/<profile uuid>/` | One Chromium user-data directory per profile: cookies, Local Storage, IndexedDB, caches | The browser data. Large, session-bearing, and locked while the profile runs. |
 | `<data dir>/logs/activity.log` (+ `.log.1`) | The activity log, rotating at 512 KiB | Not part of any backup. |
-| `<data dir>/runtime/<profile id>/config.json` | The Xray config written at start, holding upstream credentials | **Never exported.** See below. |
-| `<data dir>/config.json` | `xray_executable`, `echo_url`, plus the appearance and language | Machine-local, and inside the data directory with everything else. |
+| `<data dir>/runtime/<profile id>/xray.json` | The Xray config written at start, holding upstream credentials | **Never exported.** See below. |
+| `<data dir>/config.json` | The stored settings - engine path, endpoint, proxy-bypass switch, exit mode, sidebar, appearance, language (every key and its resolution order is in [settings](subsystems/settings.md)) | Machine-local, and inside the data directory with everything else. |
 
 Two consequences follow from the layout rather than from taste:
 
@@ -64,7 +64,8 @@ Two consequences follow from the layout rather than from taste:
   what keeps "one directory" true rather than aspirational. A file left in the old
   location (`<config dir>/fp-browser/config.json`) is carried across on the first
   start and then removed; if it named a data directory of its own it is left where
-  it is and the banner says how to get back to it. What none of this changes is
+  it is and the banner says how to get back to it (the move's endings are owned by
+  [settings](subsystems/settings.md)). What none of this changes is
   that "settings" are not part of a backup at all.
 - `profiles.user_data_dir` is stored as an **absolute path**, and profile, core
   and proxy identifiers are UUIDv4. A backup restored on the same machine can line
@@ -336,8 +337,9 @@ which is the file's own context, not its content.
 - `<data dir>/logs/` - a record, not configuration.
 - `<data dir>/config.json` - machine-local by design, and not configuration in
   the sense this document means: it says where this machine keeps things.
-- `xray_executable`, `echo_url`, the appearance and the language - settings, as
-  above.
+- The settings file's keys (engine path, endpoint, proxy-bypass switch, exit mode,
+  sidebar, appearance, language) - settings, as above; every key is listed in
+  [settings](subsystems/settings.md).
 - `schema_migrations` - a property of the database, not of the user's
   configuration. The document's own `version` is what a reader checks.
 
