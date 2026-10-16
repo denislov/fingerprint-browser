@@ -320,3 +320,23 @@ fn a_click_is_refused_while_the_environment_decides_the_system_proxy() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Two fixtures in one binary must not share a config file.
+///
+/// The tests here run on parallel threads, and a file they all share is one
+/// that gets replaced while another fixture is reading it; on Windows a read
+/// that lands in the replacement window fails, the fixture's `Settings` keeps
+/// the refusal, and its next write is refused on purpose - which is how a CI
+/// run came to observe a default it never chose (run 38852760218). One
+/// directory per fixture is what this pins: on the shared file the two paths
+/// are equal and this is red.
+#[test]
+fn the_default_fixtures_do_not_share_a_config_file() {
+    let first = fixture();
+    let second = fixture();
+    assert_ne!(
+        first.state.settings.config_path(),
+        second.state.settings.config_path(),
+        "two fixtures were given the same file to rewrite"
+    );
+}
