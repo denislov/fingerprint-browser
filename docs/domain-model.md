@@ -227,17 +227,18 @@ pub struct StreamSettings {
 所以这类矛盾由 `validate_proxy` 拒绝，见 [service-contracts](service-contracts.md) 第 5 节。
 没有 `allowInsecure` 字段：Xray 26.2.6 已移除它，模型里就没有能变成它的东西。
 
-v1 实现顺序建议：
+v1 的协议入口（按当时实现顺序）：
 
 ```text
-1. Socks5          配置 + 表单（已完成）
-2. Http            配置 + 表单（已完成）
-3. Shadowsocks     配置已实现；表单待做
-4. Vless           配置已实现；表单待做
-5. Vmess / Trojan  配置已实现；表单待做
+1. Socks5          配置 + 表单
+2. Http            配置 + 表单
+3. Shadowsocks     配置 + 分享链接导入（无表单，按设计）
+4. Vless           配置 + 分享链接导入（无表单，按设计）
+5. Vmess / Trojan  配置 + 分享链接导入（无表单，按设计）
 ```
 
-不是一次把所有 Xray 协议 UI 做完；“配置先行、表单随后”就是按这个顺序落的。
+只有 Socks5 与 Http 有表单；其余四种按设计不设表单，靠分享链接创建
+（见 [Proxies and Xray](subsystems/proxies-xray.md) 与 `crates/app/src/proxy_import.rs`）。
 分享链接（`ss://` / `vmess://` / `vless://` / `trojan://`）由 `domain::uri` 读成上面这套模型：
 它认识的字段若模型装不下就**点名拒绝**（`plugin`、`type=xhttp|raw`、`headerType=http`、
 `mode=multi`），完全不认识的 query 参数则放过。解析完还会跑同一份 `validate_stream`，

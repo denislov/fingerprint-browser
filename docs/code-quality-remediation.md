@@ -1,7 +1,8 @@
 # Code quality remediation
 
-The September 2026 review is being addressed in independently validated commits.
-Behavioral fixes precede structural cleanup.
+The [September 2026 review](code-quality-review-2026-09-22.md) was addressed in
+independently validated commits; every stage below is closed. Behavioral fixes
+preceded structural cleanup.
 
 ## Stages
 

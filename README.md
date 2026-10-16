@@ -398,4 +398,5 @@ operations and multi-select are not planned, for the reasons recorded in the
   [fingerprint matrix](docs/fingerprint-matrix.md)
 - [Backup and restore](docs/backup-and-restore.md) - export, import, restore and
   the browser-data copy are all in
-- [Historical batches](docs/implementation-history.md), [open work](https://github.com/denislov/fingerprint-browser/issues)
+- [Historical batches](docs/implementation-history.md), [code-quality
+  remediation](docs/code-quality-remediation.md), [open work](https://github.com/denislov/fingerprint-browser/issues)

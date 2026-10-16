@@ -8,6 +8,9 @@ owns no runtime state (the runtime facade's snapshots are the single source of
 truth), and the work that would block the window is injected as a port and run
 off the drawing thread. The window's close question and the tray are
 [exit modes](../exit-modes.md); the words are [interface text](../i18n.md).
+The layout's design history is the [UI beautification plan](../ui-beautification-plan.md)
+(2026-09); what it left unverified is tracked as
+[issue #10](https://github.com/denislov/fingerprint-browser/issues/10).
 
 ## Responsibilities and boundaries
 

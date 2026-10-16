@@ -94,6 +94,12 @@ it does not claim a manual GPUI window/Task Manager walkthrough.
   needs a Windows machine and a reachable upstream, and no Windows machine is at
   hand (2026-10-12), so it is the one open item, tracked as
   [issue #5](https://github.com/denislov/fingerprint-browser/issues/5).
+- The UI side of this machine is only partly seen: Windows fonts, icon alignment
+  and window decorations, and 125%/150%/200% scaling were never verified, nor
+  were multi-display or Wayland. The tooltip-on-focus deviation and an
+  unresolved XIM input problem are recorded in the beautification plan's
+  "尚未实施 / 未验证"; all of it is tracked as
+  [issue #10](https://github.com/denislov/fingerprint-browser/issues/10).
 - Controlled tests verify descendant cleanup; real-browser tests additionally
   verify session PIDs, state, configuration and cookie behavior.
 - Forced termination cannot guarantee persistence. Normal stop retains the CDP
