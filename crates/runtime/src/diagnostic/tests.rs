@@ -612,10 +612,11 @@ mod engine_lifetime {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
-    /// Binds the inbound the config names, then does nothing with it. It
-    /// records its own pid so the test can ask whether it outlived the
-    /// diagnostic.
-    const LISTENING: &str = "#!/usr/bin/env python3\nimport json,os,socket,sys,time\nc=json.load(open(sys.argv[3]))\nopen(os.path.join(os.path.dirname(sys.argv[3]),'engine.pid'),'w').write(str(os.getpid()))\ns=socket.socket()\ns.bind(('127.0.0.1',c['inbounds'][0]['port']))\ns.listen()\ntime.sleep(60)\n";
+    /// Binds the inbound the config names, answers the SOCKS5 greeting and
+    /// then does nothing with the request - a bound, speaking engine that
+    /// carries nothing. It records its own pid so the test can ask whether it
+    /// outlived the diagnostic.
+    const LISTENING: &str = "#!/usr/bin/env python3\nimport json,os,socket,sys,time\nc=json.load(open(sys.argv[3]))\nopen(os.path.join(os.path.dirname(sys.argv[3]),'engine.pid'),'w').write(str(os.getpid()))\ns=socket.socket()\ns.bind(('127.0.0.1',c['inbounds'][0]['port']))\ns.listen()\nwhile True:\n    c2,_=s.accept()\n    c2.recv(3)\n    c2.sendall(b'\\x05\\x00')\n";
 
     /// Never binds anything, so readiness has to give up on its own.
     const SILENT: &str = "#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n";
@@ -702,7 +703,7 @@ mod engine_lifetime {
         let outcome = run(&dir, LISTENING);
         let took = started.elapsed();
 
-        // Readiness passed, because the port was open; the request did not.
+        // Readiness passed, because the greeting was answered; the request did not.
         let fault = outcome.expect_err("a bound port that carries nothing is not a reading");
         assert_eq!(fault.class, FaultClass::Timeout, "got {fault}");
         assert!(

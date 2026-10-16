@@ -92,7 +92,7 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
-const XRAY: &str = "#!/usr/bin/env python3\nimport json,socket,sys,time\nc=json.load(open(sys.argv[3]))\ns=socket.socket()\ns.bind(('127.0.0.1',c['inbounds'][0]['port']))\ns.listen()\ntime.sleep(60)\n";
+const XRAY: &str = "#!/usr/bin/env python3\nimport json,socket,sys,time\nc=json.load(open(sys.argv[3]))\ns=socket.socket()\ns.bind(('127.0.0.1',c['inbounds'][0]['port']))\ns.listen()\nwhile True:\n    c2,_=s.accept()\n    c2.recv(3)\n    c2.sendall(b'\\x05\\x00')\n";
 
 #[test]
 fn a_running_session_writes_a_record_and_stopping_it_removes_it() {
