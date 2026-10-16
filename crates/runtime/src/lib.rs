@@ -11,6 +11,7 @@ pub mod journal;
 pub mod planner;
 pub mod ports;
 pub mod process;
+pub mod status;
 pub mod supervisor;
 pub mod system_proxy;
 pub mod verify;
@@ -42,6 +43,9 @@ pub use ports::{PortAllocator, PortReservation, TcpPortAllocator};
 pub use process::{
     DefaultProcessInspector, DefaultProcessTreeController, ProcessIdentity, ProcessInspector,
     ProcessReading, ProcessTreeController,
+};
+pub use status::{
+    LANGS as STATUS_LANGS, StatusEgress, StatusLaunch, StatusReport, StatusService, StatusSession,
 };
 pub use supervisor::{
     ChannelRuntimeFacade, RuntimeSupervisor, RuntimeSupervisorChannels, SupervisorComponents,

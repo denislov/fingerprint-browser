@@ -13,7 +13,7 @@ pub trait PortAllocator: Send + Sync {
 /// Keeps a TCP port bound until dropped, including on startup rollback.
 #[derive(Debug)]
 pub struct PortReservation {
-    _listener: TcpListener,
+    listener: TcpListener,
     port: u16,
 }
 
@@ -22,16 +22,26 @@ impl PortReservation {
         self.port
     }
 
+    /// Gives up the reservation and hands back the socket it was holding.
+    ///
+    /// Every other holder of a reservation is holding it for someone else: the
+    /// browser and Xray bind their own ports, so their reservation is released
+    /// immediately before the child starts, and what is left is the release-to-bind
+    /// window that readiness exists to cover. The status service is the exception -
+    /// it is this program's own listener - so it takes the socket instead of
+    /// letting it go, and answers on the very port that was reserved. There is no
+    /// window for a stranger to take.
+    pub fn into_listener(self) -> TcpListener {
+        self.listener
+    }
+
     /// Binds one explicit loopback port instead of asking the OS for an
     /// ephemeral one. Tests use this to observe release semantics on a port the
     /// ephemeral pool cannot hand to a concurrently running test.
     #[cfg(test)]
     fn bind_loopback(port: u16) -> Result<Self, PortError> {
         let listener = TcpListener::bind(("127.0.0.1", port))?;
-        Ok(Self {
-            _listener: listener,
-            port,
-        })
+        Ok(Self { listener, port })
     }
 }
 
@@ -48,10 +58,7 @@ impl PortAllocator for TcpPortAllocator {
     fn reserve_loopback(&self) -> Result<PortReservation, PortError> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        Ok(PortReservation {
-            _listener: listener,
-            port,
-        })
+        Ok(PortReservation { listener, port })
     }
 }
 
