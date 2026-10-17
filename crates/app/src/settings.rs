@@ -324,6 +324,12 @@ struct Stored {
     /// Whether a launch opens the identity page first, the same way - with the
     /// difference that this one is **on** unless the file says otherwise, so it
     /// is the off state that is named here. See [`STATUS_PAGE_OFF`].
+    ///
+    /// The key is written only when the reader turned the page off. `Stored`
+    /// denies unknown fields, so a build older than this switch would refuse a
+    /// file carrying it; leaving the default state out keeps an untouched
+    /// configuration readable by that build.
+    #[serde(skip_serializing_if = "Option::is_none")]
     status_page: Option<String>,
 }
 

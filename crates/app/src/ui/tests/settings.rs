@@ -1182,8 +1182,9 @@ fn the_identity_page_row_switches_and_stores_its_own_choice(cx: &mut TestAppCont
         row(cx, crate::settings::SettingKey::StatusPage).switch,
         Some(false)
     );
-    // The file carries every key, with `null` where the reader has not chosen
-    // one, so what the click stored is the value and not the presence of a name.
+    // The other switch is still `null`; the identity page writes its off state
+    // under its own key. What the click stored is the value, not the presence
+    // of a name.
     let written: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.join("config.json")).expect("the file it wrote"),
     )

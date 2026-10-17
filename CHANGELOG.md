@@ -44,6 +44,14 @@ says nothing about, and the notes are that section rather than the whole file.
   reader says otherwise, and turning it off is enough to leave it out of the next
   launch. See [identity page](docs/subsystems/identity-page.md).
 
+  The key is written only in the off state: while the page is on (the default),
+  `config.json` has no `status_page` entry, so a configuration written by this
+  build stays readable by a build that predates the switch. Once the page has
+  been turned off, the file carries `status_page`, which an older build refuses
+  as an unknown field - it reports the file as unreadable, falls back to
+  defaults and refuses to save. To go back to an older build after using the
+  switch, remove that line from `config.json`; the page is then on again.
+
 - **A core newer than the newest measured one is named as unmeasured**
   (Runtime/Window): `CoreCapabilities::NEWEST_MEASURED_MAJOR` is 148, and a
   profile whose core is above it is warned at start that its fingerprint
