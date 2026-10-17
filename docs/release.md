@@ -49,7 +49,11 @@ Xray, and neither is fetched without a click.
   installs that version rather than `stable`. Two compilers do not agree about
   lints, so "the gate passes" has to name one: `0.1.0` was held up by a clippy
   lint that 1.98.1 has and the checkout's 1.96.0 does not, which made a green
-  gate here and a red one on the runner both true.
+  gate here and a red one on the runner both true. The same version is the
+  workspace's `rust-version` (`Cargo.toml`), so `cargo` refuses an older compiler
+  with a clear message; an older compiler is not supported. The two declarations
+  are meant to move together, and `crates/app/src/version.rs` fails the gate
+  when they do not.
 
 ## What a release contains
 

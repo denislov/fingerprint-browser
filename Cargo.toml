@@ -11,6 +11,11 @@ members = [
 [workspace.package]
 version = "0.5.0"
 edition = "2024"
+# The minimum compiler, and the one every crate inherits. It is the version
+# `rust-toolchain.toml` pins and the gate and releases build with; an older
+# compiler is not supported. The two declarations are meant to move together,
+# and `crates/app/src/version.rs` fails the gate when they do not.
+rust-version = "1.98.1"
 license = "MIT"
 authors = ["FpBrowser Team"]
 

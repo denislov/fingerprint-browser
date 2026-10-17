@@ -264,7 +264,9 @@ See [Windows acceptance](docs/windows-acceptance.md) and [lifecycle](docs/lifecy
 ## Run
 
 Use `rustup`, which reads `rust-toolchain.toml` and installs the pinned compiler -
-the one the releases are built with - on its own. Linux needs the font and X11
+the one the releases are built with - on its own. That version is also the
+workspace's `rust-version`, so `cargo` refuses an older compiler rather than
+failing somewhere inside a dependency. Linux needs the font and X11
 development packages the UI stack links against - `libfontconfig1-dev`,
 `libfreetype-dev`, `libxcb1-dev`, `libxkbcommon-dev`, `libxkbcommon-x11-dev` - and
 no display, because the window is only opened when you run the program, not when
