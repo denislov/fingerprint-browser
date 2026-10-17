@@ -316,7 +316,7 @@ For a build to give to someone else, [releases](docs/release.md) has the version
 policy, what `[profile.release]` does and why, how the icon is generated, and the
 packaging scripts - a Windows installer, and for Linux an archive with an
 installer of its own beside a Debian package - with the workflow that drives
-them. Five releases are published, `v0.1.0` through `v0.5.0`, and the workflow
+them. Six releases are published, `v0.1.0` through `v0.6.0`, and the workflow
 has run end to end for each of them; what a runner cannot do is still
 unverified - nothing has run the published Windows installer, and the tray icon
 and the single-instance lock have not been seen working. See the
@@ -395,7 +395,7 @@ has run the installer. The lifecycle cases and the fingerprint surfaces were
 measured on a real Windows 11 machine, and remote upstream forwarding was
 reproduced there on 2026-10-17; what each covered is in
 [Windows acceptance](docs/windows-acceptance.md). Five releases, `v0.1.0`
-through `v0.5.0`, are published from the workflow in [releases](docs/release.md).
+through `v0.6.0`, are published from the workflow in [releases](docs/release.md).
 Open work is tracked as [issues](https://github.com/denislov/fingerprint-browser/issues).
 Batch operations and multi-select are not planned, for the reasons recorded in
 the [UI reference](docs/subsystems/ui-shell.md#constraints-and-failure-behavior).

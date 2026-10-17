@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 # The minimum compiler, and the one every crate inherits. It is the version
 # `rust-toolchain.toml` pins and the gate and releases build with; an older
