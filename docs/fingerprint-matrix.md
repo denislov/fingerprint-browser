@@ -8,7 +8,8 @@ file names say `ungoogled-chromium-<version>-1-x86_64_linux.tar.xz`. The name is
 the upstream's asset name, not a different engine: the switches below are read
 back out of these binaries over CDP, which is what makes them fingerprint-chromium
 rather than stock Chromium. `docs/chromium-acceptance.md` certifies the runtime
-path on the same artifacts.
+path on the same artifacts. One Windows asset (150) was also fetched and run;
+it is recorded at the end because the suite could not complete on it.
 
 ## The pivot: major 144
 
@@ -44,7 +45,10 @@ Evidence:
   and the tests were corrected (`the_capability_table_matches_this_build` now
   measures this on whatever binary `CHROMIUM_BIN` points at). The inherited claim
   about 144 turned out to be right, but it is no longer inherited: only majors 145
-  to 147 still rest on the sibling product's reading.
+  to 147 still rest on the sibling product's reading, and 149 has never been
+  published. 150 has no reading here either: its Windows asset was attempted and
+  could not be certified (see
+  [Attempted on fingerprint-chromium 150](#attempted-on-fingerprint-chromium-150-windows-not-certified)).
 - Nothing below 142 has been verified here.
 
 ## Capability table
@@ -131,6 +135,7 @@ All eleven integration tests run against every build measured here:
 CHROMIUM_BIN=/path/to/chrome-142 cargo test -p runtime --test fingerprint_real -- --ignored
 CHROMIUM_BIN=/path/to/chrome-144 cargo test -p runtime --test fingerprint_real -- --ignored
 CHROMIUM_BIN=/path/to/chrome-148 cargo test -p runtime --test fingerprint_real -- --ignored
+CHROMIUM_BIN=C:/path/to/chrome-150/chrome.exe cargo test -p runtime --test fingerprint_real -- --ignored   # Windows asset; does not complete (below)
 ```
 
 The suite resolves the major from the binary it is given and checks the table's
@@ -217,6 +222,30 @@ Not verified, and why: geolocation (this model has no location field, so no
 switch is emitted — `--fingerprint-location` also produced no coordinates in
 any test here, which cannot be separated from "this headless browser has no
 location provider"), and anything that needs a network peer.
+
+## Attempted on fingerprint-chromium 150 (Windows): not certified
+
+The newest published major was fetched and run through the same suite on
+2026-10-17: `ungoogled-chromium_150.0.7871.186-1.1_windows_x64.zip`
+(sha256 `4d549c326e51ebbabf562fd365eb5380d9d4a81200da2c60f075c688d9a77e03`).
+The suite does not complete, so no 150 column is added and
+`CoreCapabilities::NEWEST_MEASURED_MAJOR` stays 148.
+
+The failure is in the engine's canvas read-back, not in the table. With
+`--fingerprint=<seed>`, `getImageData` on a canvas that has anything drawn on it
+never returns for a region of 4x4 pixels or more; 1x1 and 2x2 return, and a
+canvas nothing has drawn on returns at any size. `toDataURL` is unaffected,
+`--disable-spoofing=canvas` avoids the hang, and the Windows 148 asset completes
+the same suite on the same machine (the control run), so the failure belongs to
+the 150 build rather than to the harness, the headless flags or this machine.
+The suite's first read times out in `FingerprintProbe::read_at`; the region
+sizes above were measured over CDP against the same binary.
+
+What this means for a reader: 150 stays installable - the list is what upstream
+published - but the compatibility report warns that its switch set was not read
+back on that build, and the Download Core dialog names the version as newer than
+the newest measured one. A page that reads a canvas can also hang on it; that is
+the engine's defect, not a switch this table can withhold.
 
 ## Defects this measurement found
 
