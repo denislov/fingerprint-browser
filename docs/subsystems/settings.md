@@ -284,9 +284,12 @@ the relative `fp-browser/config.json` when the host has no config directory.
   and an expanded sidebar both write `null`, the spelling a config file from
   before those switches existed already had. The identity page is the one switch
   that runs the other way - it is **on** by default, so what it writes down is
-  the off state (`status_page: "off"`), and `null` keeps meaning what it meant to
-  a build that had never heard of the switch: a reader who gets the page. The
-  standing choices are not like that - `set_theme`, `set_language` and
+  the off state (`status_page: "off"`), and absence keeps meaning what it meant
+  to a build that had never heard of the switch: a reader who gets the page. The
+  key is written only in the off state; `Stored` denies unknown fields, so
+  leaving the default out keeps a config file written by this build readable by
+  one that predates the switch, as long as the reader never turned the page off.
+  The standing choices are not like that - `set_theme`, `set_language` and
   `set_exit_mode` write their code even when it is the default, so `"dark"` and
   `null` both mean dark, `"en"` and `null` both mean English, and `"ask"` and
   `null` both mean ask.

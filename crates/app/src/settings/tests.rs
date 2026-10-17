@@ -386,6 +386,16 @@ fn the_identity_page_is_on_until_the_file_says_otherwise() {
         "the page is written in the language the window is in"
     );
 
+    // Saving an unrelated setting must not write the key. `Stored` denies
+    // unknown fields, so a build older than this switch refuses a file that
+    // carries one: the untouched default has to stay absent for that build to
+    // keep reading the file.
+    let untouched = config.read();
+    assert!(
+        !untouched.contains("status_page"),
+        "the default state was written into the file: {untouched}"
+    );
+
     settings
         .set_status_page(false)
         .expect("store the off state");
