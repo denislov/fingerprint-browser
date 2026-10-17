@@ -58,6 +58,13 @@ says nothing about, and the notes are that section rather than the whole file.
 
 ### Changed
 
+- **The minimum Rust version is declared** (Build): the workspace's `Cargo.toml`
+  carries `rust-version = "1.98.1"`, inherited by every crate - the same
+  compiler `rust-toolchain.toml` pins and the gate and releases use. An older
+  compiler is refused by `cargo` with a clear message instead of failing
+  somewhere inside a dependency; `crates/app/src/version.rs` fails the gate if
+  the two declarations drift.
+
 - **The architecture page points at the references instead of restating them**
   (Docs): `docs/architecture.md` keeps the positioning, the architecture diagram,
   the dependency direction and the principles; the design prose that duplicated

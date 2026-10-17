@@ -12,6 +12,11 @@
 # runner does not resolve to a different compiler than this file does. Bumping
 # the version is one edit here and three in those files; they are meant to move
 # together, and the gate cannot tell you when they have not.
+#
+# The workspace's `Cargo.toml` declares the same version as `rust-version`, which
+# is the minimum `cargo` accepts and the one every crate inherits. An older
+# compiler is refused with a clear message instead of failing somewhere inside a
+# dependency. `crates/app/src/version.rs` fails the gate if the two drift.
 [toolchain]
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]

@@ -102,4 +102,25 @@ mod tests {
         // look at all day.
         assert!(!title.contains(COMMIT), "{title}");
     }
+
+    /// The minimum compiler and the pinned toolchain are one version.
+    ///
+    /// Two declarations, one compiler: `cargo` reads `rust-version` and refuses
+    /// an older toolchain, while `rustup` and the workflows read
+    /// `rust-toolchain.toml`. A drift would either refuse the compiler the gate
+    /// uses or accept one the gate has never run on.
+    #[test]
+    fn the_minimum_rust_version_is_the_pinned_toolchain() {
+        let toolchain = include_str!("../../../rust-toolchain.toml");
+        let channel = toolchain
+            .lines()
+            .find_map(|line| line.strip_prefix("channel = "))
+            .map(|value| value.trim().trim_matches('"'))
+            .expect("rust-toolchain.toml names a channel");
+        assert_eq!(
+            env!("CARGO_PKG_RUST_VERSION"),
+            channel,
+            "Cargo.toml's rust-version and rust-toolchain.toml's channel must name the same compiler"
+        );
+    }
 }
