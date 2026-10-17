@@ -243,6 +243,25 @@ impl Text {
         }
     }
 
+    /// Which published versions are newer than the newest measured one.
+    ///
+    /// The list still offers them - it is what upstream published - but a
+    /// version above the measured line is not certified by this program, and
+    /// the reader has to be told before pressing a button that says "newest".
+    pub fn core_download_unmeasured(&self, versions: &str, newest: u32) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "Newer than the newest version this program has measured (Chromium {newest}): \
+                 {versions}. Their fingerprint switches follow the measured rule and have not \
+                 been read back on those builds."
+            ),
+            Lang::Zh => format!(
+                "比本程序测量过的最新版本（Chromium {newest}）更新：{versions}。这些版本的指纹\
+                 开关沿用已测量的规则，尚未在对应构建上读回验证。"
+            ),
+        }
+    }
+
     /// A download starting, named by the version and the system it is for.
     pub fn core_release_downloading(&self, tag: &str, platform: &str) -> String {
         match self.lang {

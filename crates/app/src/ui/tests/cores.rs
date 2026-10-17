@@ -602,6 +602,49 @@ fn the_download_dialog_lists_the_published_versions(cx: &mut TestAppContext) {
             platform.id()
         );
     }
+    assert!(
+        cx.update(|window, _| window.try_find("core-download-unmeasured").is_none()),
+        "nothing here is newer than the measured set, so there is nothing to say"
+    );
+}
+
+/// A version newer than the newest measured major is still listed, and the
+/// dialog says so before a reader installs it.
+///
+/// The list is what upstream published, not what this program certified: a
+/// version above the measured line stays offerable, but a reader choosing
+/// "newest" has to be told that its switches were not read back on that build.
+#[gpui_kit::test]
+fn the_download_dialog_names_versions_newer_than_the_newest_measured_one(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let catalog = Arc::new(FakeCatalog::listing(vec![
+        published("150.0.7871.186"),
+        published("148.0.7778.215"),
+    ]));
+    let downloader = Arc::new(FakeDownloader::unpacking("Chromium 150.0.7871.186"));
+    let (view, _runtime) = view_with_downloads(cx, catalog, downloader);
+    let cx = window(cx, &view);
+
+    open_downloads(cx);
+    wait_for_releases(cx, &view);
+    settle(cx);
+
+    let note = cx
+        .update(|window, _| {
+            window
+                .try_find("core-download-unmeasured")
+                .and_then(|element| element.label().map(str::to_string))
+        })
+        .expect("the dialog says a version is newer than the measured set");
+    assert!(note.contains("150.0.7871.186"), "{note}");
+    assert!(
+        note.contains(&domain::CoreCapabilities::NEWEST_MEASURED_MAJOR.to_string()),
+        "the note names the newest measured major: {note}"
+    );
+    assert!(
+        !note.contains("148.0.7778.215"),
+        "the measured version is not listed as newer: {note}"
+    );
 }
 
 /// Clicking the button for this system downloads that asset, unpacks it, and

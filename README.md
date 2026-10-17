@@ -44,7 +44,9 @@ this repository does not bundle or fork them.
   temporary engine is started for the test alone.
 - Read fingerprints back from a running browser and report discrepancies, and read
   back the address that browser's own traffic leaves from.
-  Linux builds 142, 144 and 148 were measured; 145–147 remain inferred.
+  Linux builds 142, 144 and 148 were measured; 145–147 remain inferred, and 150
+  is not certified (its Windows asset hangs on a seeded canvas read). A core
+  newer than the newest measured major is reported when it starts.
   See the [fingerprint matrix](docs/fingerprint-matrix.md).
 - Open a started profile on a page that says what it is: the profile, its core,
   its proxy and its ports, and one request's exit address read through that

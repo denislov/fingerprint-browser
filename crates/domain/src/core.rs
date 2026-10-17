@@ -141,6 +141,11 @@ impl CoreCapabilities {
     /// inherited. The noise switch is claimed for every major on the strength of
     /// 142, 144 and 148; only 145 to 147 still rest on the sibling product's 144
     /// reading.
+    ///
+    /// [`Self::NEWEST_MEASURED_MAJOR`] names the newest major that completed a
+    /// measurement. A core above it is still classified and launched from this
+    /// table, but the compatibility report says the table's claims have not
+    /// been read back on that build.
     pub fn for_major(major: u32) -> Self {
         let generation = FingerprintGeneration::for_major(major);
         let verified = generation == FingerprintGeneration::Chrome144Plus;
@@ -156,6 +161,28 @@ impl CoreCapabilities {
             supports_platform_version: true,
             supported_brands: VERIFIED_BRANDS.to_vec(),
         }
+    }
+
+    /// The newest major whose switch set completed a measurement here.
+    ///
+    /// The measured builds are recorded in `docs/fingerprint-matrix.md`; the
+    /// newest one is fingerprint-chromium 148. A core with a higher major is
+    /// still classified and launched from this table, but the compatibility
+    /// report warns that its claims were not read back on that build.
+    ///
+    /// 150 is deliberately above this line. Its Windows asset
+    /// (`ungoogled-chromium_150.0.7871.186-1.1_windows_x64.zip`) was fetched and
+    /// run through `fingerprint_real` on 2026-10-17, and the suite could not
+    /// complete: with `--fingerprint=<seed>`, `getImageData` on a drawn canvas
+    /// never returns for a region of 4x4 pixels or more. `toDataURL` is
+    /// unaffected and the Windows 148 asset completes the same suite, so the
+    /// failure belongs to that build rather than to the harness. Until a suite
+    /// completes on a build, its major is not certified.
+    pub const NEWEST_MEASURED_MAJOR: u32 = 148;
+
+    /// Whether this core is newer than the newest major measured here.
+    pub fn is_newer_than_measured(&self) -> bool {
+        self.major > Self::NEWEST_MEASURED_MAJOR
     }
 
     /// Whether this major's switch set was verified against a real engine.
@@ -184,6 +211,20 @@ impl CoreCapabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The boundary the compatibility warning is built on: the measured major
+    /// itself is not "newer", and the first major above it is.
+    #[test]
+    fn the_newest_measured_major_is_the_boundary() {
+        let measured = CoreCapabilities::for_major(CoreCapabilities::NEWEST_MEASURED_MAJOR);
+        assert!(
+            !measured.is_newer_than_measured(),
+            "the newest measured major is the line, not beyond it"
+        );
+
+        let newer = CoreCapabilities::for_major(CoreCapabilities::NEWEST_MEASURED_MAJOR + 1);
+        assert!(newer.is_newer_than_measured());
+    }
 
     #[test]
     fn generation_splits_at_the_verified_pivot() {

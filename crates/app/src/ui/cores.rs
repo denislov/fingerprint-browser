@@ -11,7 +11,7 @@
 use super::components::{EmptyState, PageHeader};
 use super::*;
 use crate::core_releases::{AssetKind, CoreAsset, CoreRelease, DownloadJob, Platform, REPOSITORY};
-use domain::BrowserCore;
+use domain::{BrowserCore, CoreCapabilities};
 use gpui_kit::component::dialog::Dialog;
 
 /// The core row's fixed columns.
@@ -839,6 +839,33 @@ impl Render for CoreDownloads {
             }
             ReleaseStatus::Listed(releases) => {
                 let download = self.download.as_ref();
+                // Newer than the newest measured major is still offered: this
+                // list is what upstream published, not what this program has
+                // certified. Saying which versions are above the measured line
+                // is what keeps "newest" from being read as "measured".
+                let unmeasured: Vec<&str> = releases
+                    .iter()
+                    .filter(|release| {
+                        runtime::version::parse_major(&release.tag)
+                            .is_some_and(|major| major > CoreCapabilities::NEWEST_MEASURED_MAJOR)
+                    })
+                    .map(|release| release.tag.as_str())
+                    .collect();
+                if !unmeasured.is_empty() {
+                    let line = t.core_download_unmeasured(
+                        &unmeasured.join(", "),
+                        CoreCapabilities::NEWEST_MEASURED_MAJOR,
+                    );
+                    body = body.child(
+                        div()
+                            .id("core-download-unmeasured")
+                            .test_support()
+                            .text_xs()
+                            .text_color(rgb(p.warning))
+                            .aria_label(line.clone())
+                            .child(line),
+                    );
+                }
                 body = body.child(download_columns(p, t)).child(
                     div()
                         .id("core-download-scroll")

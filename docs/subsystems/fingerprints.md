@@ -52,6 +52,7 @@ Not done here:
 | --- | --- |
 | Profile fields and their engine tokens | `crates/domain/src/fingerprint.rs`: `FingerprintProfile`, `BrowserBrand::as_arg_value`, `Platform::as_arg_value`, `SpoofingFeature::as_flag_name`, `WebRtcPolicy` |
 | Capability table | `crates/domain/src/core.rs`: `CoreCapabilities::for_major` is the one table; `FingerprintGeneration::PIVOT_MAJOR` is 144 |
+| Measured boundary | `crates/domain/src/core.rs`: `CoreCapabilities::NEWEST_MEASURED_MAJOR` (148) and `is_newer_than_measured`; the evidence is in [fingerprint-matrix.md](../fingerprint-matrix.md) |
 | Core classification, major 0 | `crates/domain/src/core.rs`: `FingerprintGeneration::for_major`, `BrowserCore::capabilities` |
 | Resolution from a core | `crates/runtime/src/capability.rs`: `DefaultCapabilityResolver::resolve` |
 | Omission vocabulary and message | `crates/runtime/src/compat.rs`: `Omission`, `Finding`, `CompatibilityReport::message` |
@@ -137,7 +138,12 @@ that logs and debugging have a predictable layout; the numbered order lives in
 ### Compatibility report
 
 `compat::check` reports only what the profile actually asked for, in a fixed
-order, so the warning is stable for the same inputs:
+order, so the warning is stable for the same inputs. A core whose major is newer
+than `CoreCapabilities::NEWEST_MEASURED_MAJOR` is reported first, before any
+finding: nothing is omitted for it, but the table's claims were not read back on
+that build, and `CompatibilityReport::message` says so. (150 is above that line:
+its Windows asset hangs on a seeded canvas read, so the suite could not certify
+it; see [fingerprint-matrix.md](../fingerprint-matrix.md).)
 
 1. `--fingerprint-brand` (and with it its version) for a brand outside
    `supported_brands` (`Omission::UnsupportedBrand`).

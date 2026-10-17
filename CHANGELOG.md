@@ -44,6 +44,18 @@ says nothing about, and the notes are that section rather than the whole file.
   reader says otherwise, and turning it off is enough to leave it out of the next
   launch. See [identity page](docs/subsystems/identity-page.md).
 
+- **A core newer than the newest measured one is named as unmeasured**
+  (Runtime/Window): `CoreCapabilities::NEWEST_MEASURED_MAJOR` is 148, and a
+  profile whose core is above it is warned at start that its fingerprint
+  switches were emitted from the measured rule without having been read back on
+  that build. The Download Core dialog names the published versions above the
+  line. fingerprint-chromium 150 is the first: on its Windows asset,
+  `getImageData` on a canvas that has been drawn on with a seed hangs for a
+  region of 4x4 pixels or more (1x1 and 2x2 return), so the fingerprint suite
+  could not certify it; the Windows 148 control passes the same suite. The
+  evidence and the reproduction are in
+  [fingerprint-matrix.md](docs/fingerprint-matrix.md).
+
 ### Changed
 
 - **The architecture page points at the references instead of restating them**

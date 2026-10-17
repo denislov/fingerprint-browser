@@ -58,12 +58,16 @@ impl Finding {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompatibilityReport {
     core: String,
+    /// The core's major, when it is newer than the newest major this program
+    /// measured. Not an omission: the switches are emitted, but the rule behind
+    /// them has not been read back on that build.
+    unmeasured_major: Option<u32>,
     findings: Vec<Finding>,
 }
 
 impl CompatibilityReport {
     pub fn is_empty(&self) -> bool {
-        self.findings.is_empty()
+        self.findings.is_empty() && self.unmeasured_major.is_none()
     }
 
     pub fn findings(&self) -> &[Finding] {
@@ -72,16 +76,21 @@ impl CompatibilityReport {
 
     /// Single-line summary for [`crate::RuntimeEvent::Warning`].
     pub fn message(&self) -> Option<String> {
-        if self.findings.is_empty() {
+        if self.is_empty() {
             return None;
         }
-        Some(
-            self.findings
-                .iter()
-                .map(Finding::message)
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
+        let mut messages = Vec::with_capacity(self.findings.len() + 1);
+        if let Some(major) = self.unmeasured_major {
+            messages.push(format!(
+                "{} (major {major}) is newer than the newest major this program has measured \
+                 ({}); its fingerprint switches are emitted from the measured rule and have not \
+                 been read back on this build",
+                self.core,
+                CoreCapabilities::NEWEST_MEASURED_MAJOR
+            ));
+        }
+        messages.extend(self.findings.iter().map(Finding::message));
+        Some(messages.join("; "))
     }
 
     fn push(
@@ -109,6 +118,9 @@ pub fn check(
 ) -> CompatibilityReport {
     let mut report = CompatibilityReport {
         core: core.name.clone(),
+        unmeasured_major: capabilities
+            .is_newer_than_measured()
+            .then_some(capabilities.major),
         findings: Vec::new(),
     };
     let fingerprint = &profile.fingerprint;
@@ -243,6 +255,52 @@ mod tests {
 
         assert!(report.is_empty(), "{:?}", report.findings());
         assert_eq!(report.message(), None);
+    }
+
+    /// A core newer than the newest measured major is reported even when
+    /// nothing is omitted: the switches are emitted, but the rule behind them
+    /// has not been read back on that build.
+    #[test]
+    fn a_core_newer_than_the_newest_measured_major_is_reported() {
+        let report = check(&core(150), &profile(), &CoreCapabilities::for_major(150));
+
+        assert!(!report.is_empty(), "a 150 core must not look measured");
+        assert!(
+            report.findings().is_empty(),
+            "nothing is omitted for this profile: {report:?}"
+        );
+        let message = report.message().expect("warning");
+        assert!(message.contains("newer than the newest major"), "{message}");
+        assert!(message.contains("major 150"), "{message}");
+        assert!(
+            message.contains(&CoreCapabilities::NEWEST_MEASURED_MAJOR.to_string()),
+            "the warning names the newest measured major: {message}"
+        );
+    }
+
+    /// The measured major itself is the line, and the next major is beyond it.
+    #[test]
+    fn the_newest_measured_major_is_not_newer_than_itself() {
+        let measured = CoreCapabilities::NEWEST_MEASURED_MAJOR;
+        let report = check(
+            &core(measured),
+            &profile(),
+            &CoreCapabilities::for_major(measured),
+        );
+        assert!(report.is_empty(), "{:?}", report.message());
+
+        let newer = measured + 1;
+        let report = check(
+            &core(newer),
+            &profile(),
+            &CoreCapabilities::for_major(newer),
+        );
+        assert!(
+            report
+                .message()
+                .is_some_and(|message| message.contains(&format!("major {newer}"))),
+            "{report:?}"
+        );
     }
 
     #[test]

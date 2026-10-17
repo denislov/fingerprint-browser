@@ -156,6 +156,13 @@ download in flight, and a `DownloadJob` is built with the directory
 - An AppImage is itself the browser once it is runnable; an installer or a disk
   image is downloaded and left as a file, with `Downloaded.executable` `None`.
 
+The list is what upstream published, not what this program has certified. When
+it contains a version newer than `CoreCapabilities::NEWEST_MEASURED_MAJOR`, the
+dialog draws one line naming those versions and the newest measured major
+(`core-download-unmeasured`, `Text::core_download_unmeasured`); the core is
+still downloadable and registered, and the compatibility warning at launch is
+what says its switch set was not read back on that build.
+
 The answer arrives through the worker channel and `drain_releases`
 (`crates/app/src/ui/workers.rs`) applies it: `AppState::finish_core_download`
 returns an `AddJob` when there is a browser to register - probed on another
