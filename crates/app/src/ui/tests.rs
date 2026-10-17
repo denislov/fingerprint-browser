@@ -491,11 +491,34 @@ fn started_proxied_profile(
 
 /// Opens the window the way the component library's own dialog tests do:
 /// a `VisualTestContext` can park the async work a dialog needs to mount.
+///
+/// Motion is off for the whole suite. Every animation the window draws then
+/// renders at its end state in the first frame and schedules none, which is what
+/// lets a test assert where a control *is* without also asserting when - and a
+/// test that wants to see something move opens the window with
+/// [`window_that_moves`] instead, and says so.
 fn window<'a>(
     cx: &'a mut TestAppContext,
     view: &gpui_kit::Entity<AppView>,
 ) -> &'a mut gpui_kit::VisualTestContext {
-    cx.update(|cx| cx.set_reduce_motion(true));
+    open_window(cx, view, false)
+}
+
+/// The same window, with motion on, for the one kind of test that is about the
+/// movement itself.
+fn window_that_moves<'a>(
+    cx: &'a mut TestAppContext,
+    view: &gpui_kit::Entity<AppView>,
+) -> &'a mut gpui_kit::VisualTestContext {
+    open_window(cx, view, true)
+}
+
+fn open_window<'a>(
+    cx: &'a mut TestAppContext,
+    view: &gpui_kit::Entity<AppView>,
+    moves: bool,
+) -> &'a mut gpui_kit::VisualTestContext {
+    cx.update(|cx| cx.set_reduce_motion(!moves));
     // The window's own keys, bound once per window: the program binds them at
     // startup, and a test window is the only window there is.
     cx.update(crate::ui::keys::bind);

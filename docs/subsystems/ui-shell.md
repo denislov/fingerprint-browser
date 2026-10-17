@@ -85,8 +85,8 @@ same five pages as `PAGES`; the code's five pages are the reference.
   `proxy_editor.rs` (`ProxyEditor`), `proxy_import.rs` (`ProxyImport`),
   `core_editor.rs` (`CoreEditor`).
 - Wiring and appearance: `crates/app/src/main.rs`, `theme.rs`
-  (`ThemeChoice`, `Palette`, `apply`, `palette`), `window_visibility.rs`,
-  `tray.rs`, `text.rs`.
+  (`ThemeChoice`, `Palette`, `apply`, `palette`, `rail_spring`),
+  `window_visibility.rs`, `tray.rs`, `text.rs`.
 
 Where this page and the code disagree, the named symbol wins.
 
@@ -179,6 +179,40 @@ run it on a `std::thread`, send one answer into a channel the tick drains:
   by a second worker (`AppState::finish_core_download` hands back a job that
   becomes an `Outcome::CoreAdded`). `sync_downloads` and `sync_xray_downloads`
   copy the state into the dialog entities after each answer.
+
+### Motion
+
+The window draws itself, so it moves itself, and the values are the design
+system's rather than this program's: `Theme::motion` (`MotionTokens`, from
+`gpui_kit::component::theme`) holds the durations, the enter/exit/move curves,
+the two springs and the two distances, in the same way it holds the colours
+[`palette`] reads back. What the window decides is *which* token each of its own
+transitions uses - `theme::rail_spring` is the whole of that list today, and the
+reason for its choice is on the function.
+
+**One transition is the window's own: the sidebar's width.** `sidebar` samples
+`base::motion::spring("sidebar-width", width, rail_spring(cx), window, cx)` and
+lays out the value it returns, so folding the rail is watched rather than
+jumped. Three properties of that helper are why it is the one used:
+
+- it is keyed by identifier and keyed state carries position **and velocity**,
+  so a toggle pressed twice redirects the rail from where the first press got to
+  instead of restarting it;
+- a spring at rest returns its target after a read and two comparisons, so a
+  settled sidebar asks for no frames at all;
+- it reads `App::reduce_motion` itself and settles on the target when the setting
+  is on, which is the same thing `AnimationExt` does for the component library's
+  dialogs and notifications - so a reader who has asked their system for less
+  motion gets a window that folds instantly rather than one that folds slowly.
+
+Nothing else in this window's own chrome is animated. A page change is a
+*remount*, not a value that moves in place, and the only helpers that replay on a
+remount sample the wall clock - which would make the check that guards them a
+check on how fast the machine ran. A colour or an opacity change is not
+observable from the headless test API at all (`ElementSnapshot` carries bounds,
+labels and roles), so it would ship as a claim nothing could falsify. What the
+component library draws - dialogs, sheets, notifications, the download progress
+bar - animates on its own and is not this window's to configure.
 
 ## State and transitions
 
@@ -338,6 +372,13 @@ Names worth naming, all in `crates/app/src/ui/tests/` and runnable as
 
 - `the_filter_narrows_the_profile_list` - the filter narrows the list only.
 - `the_sidebar_folds_to_a_rail_and_opens_again` - the sidebar's two shapes.
+- `the_rail_travels_between_its_widths` - the one test that opens the window
+  with motion on. It asserts the frame the press lands in has not moved, that 60
+  ms of the test clock later the rail is on its way, and that it comes to rest
+  at the layout's own width. Every step is the test clock's, which is the clock
+  the design system's spring reads, so a slow machine cannot turn a moving rail
+  into a settled one - and the check above, run with motion off, is what says the
+  same fold is instant for a reader who asked for less motion.
 - `a_wide_window_docks_the_details_panel_and_a_narrow_one_covers_the_list` -
   the docking breakpoint.
 - `navigation_and_settings_choices_work_without_a_pointer`,

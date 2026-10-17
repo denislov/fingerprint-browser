@@ -23,6 +23,7 @@
 //! rather than reaching for a global.
 
 use crate::text::Text;
+use gpui_kit::base::motion::Spring;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::theme::{Theme, ThemeMode, ThemeTokens};
 use gpui_kit::{App, Hsla, rgb};
@@ -296,6 +297,26 @@ pub fn palette(cx: &App) -> Palette {
     } else {
         Palette::LIGHT
     }
+}
+
+/// The policy the sidebar's width moves under.
+///
+/// The value is the design system's, not this file's, for the reason [`palette`]
+/// exists: a window whose own sidebar folded at one speed while its dialogs
+/// opened at another would be two motion systems in one window, and the
+/// component library is already the source of truth for how everything else
+/// here moves. What this file decides is *which* of its tokens this transition
+/// uses, and that is worth one sentence.
+///
+/// `spring_move` is the token for something that changes place, and a spring
+/// rather than a duration because a toggle has a position and a velocity to
+/// carry: pressed twice in a row, the second press redirects the rail from where
+/// the first one had got to instead of restarting it. Whether it moves at all is
+/// not decided here - `motion::spring` reads the application's reduce-motion
+/// setting and settles on the target when it is on, which is also what keeps the
+/// headless tests deterministic.
+pub fn rail_spring(cx: &App) -> Spring {
+    cx.theme().motion.spring_move
 }
 
 #[cfg(test)]

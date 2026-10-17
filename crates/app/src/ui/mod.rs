@@ -21,7 +21,7 @@ use crate::state::{
     XrayDownload, XrayReleaseStatus,
 };
 use crate::text::{Lang, Text};
-use crate::theme::{Palette, ThemeChoice, palette};
+use crate::theme::{Palette, ThemeChoice, palette, rail_spring};
 use crate::tray::{Tray, TrayEvent, TrayStarter};
 use crate::verifier::{FingerprintVerifier, VerificationReport};
 use crate::version;
@@ -731,7 +731,7 @@ impl Render for AppView {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(sidebar(self.state.page(), collapsed, cx, t))
+                    .child(sidebar(self.state.page(), collapsed, window, cx, t))
                     .child({
                         let log_count = self.state.log_len();
                         let log_filter = self.state.log_filter();
@@ -1019,6 +1019,7 @@ fn nav_glyph(page: Page) -> IconName {
 fn sidebar(
     page: Page,
     collapsed: bool,
+    window: &mut Window,
     cx: &mut Context<AppView>,
     t: &'static Text,
 ) -> impl IntoElement {
@@ -1041,23 +1042,40 @@ fn sidebar(
         nav = nav.child(nav_item(candidate, page, collapsed, cx, t));
     }
 
+    let rail_width = gpui_kit::base::motion::spring(
+        "sidebar-width",
+        px(if collapsed {
+            components::SIDEBAR_RAIL
+        } else {
+            components::SIDEBAR
+        }),
+        rail_spring(cx),
+        window,
+        cx,
+    );
     div()
         .id("sidebar")
         .test_support()
         .flex()
         .flex_col()
-        .w(px(if collapsed {
-            components::SIDEBAR_RAIL
-        } else {
-            components::SIDEBAR
-        }))
         .flex_shrink_0()
+        // What is inside is clipped while the width moves. The head, the labels
+        // and the footer are built for one of the two widths, so without this
+        // the open sidebar's content would paint outside the shrinking rail on
+        // its way past.
+        .overflow_hidden()
         .border_r_1()
         .border_color(rgb(p.border))
         .bg(rgb(p.panel))
         .child(brand(collapsed, cx, t))
         .child(nav)
         .child(sidebar_footer(collapsed, cx, t))
+        // The width is sampled from the design system's spring rather than
+        // taken from the layout, so folding the rail is something the reader
+        // watches happen instead of a jump. The sampled value *is* the layout
+        // width this frame, which is why nothing here asks for a redraw: the
+        // helper does, for as long as it is moving and not one frame longer.
+        .w(rail_width)
 }
 
 /// The product's mark, its name, and the way between the two widths.
