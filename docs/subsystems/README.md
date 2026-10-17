@@ -18,6 +18,7 @@ These pages describe current responsibilities, runtime paths, state, and contrac
 | Interface text and the catalog's translation rules | [Interface text](../i18n.md) |
 | Closing the window, the tray and one window per data directory | [Exit modes](../exit-modes.md) |
 | The diagnostics report and the activity log | [Diagnostics](../diagnostics.md) |
+| What each subsystem does when a failure occurs, and the test that proves it | [Failure matrix](../failure-matrix.md) |
 | Packaging and releases | [Releases](../release.md) |
 
 A subsystem can span several packages or repositories. Its reference describes the behavior those parts provide together; it does not need to list every function.
