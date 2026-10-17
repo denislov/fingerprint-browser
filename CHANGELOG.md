@@ -52,6 +52,15 @@ says nothing about, and the notes are that section rather than the whole file.
   the subsystem references became links, and the reference pages gained the
   rationale that previously lived only on this page (the appearance palette
   rules, the profile filter, the Xray inbound, the argument order, and more).
+- **The sidebar folds instead of jumping** (Window): the rail's width is
+  sampled from a spring rather than taken from the layout, so collapsing and
+  opening it is something the reader watches happen. The spring is the design
+  system's own (`Theme::motion`, the same place this window's colours come from),
+  and it carries velocity: a toggle pressed twice redirects the rail from where
+  the first press got to instead of restarting it. A settled sidebar asks for no
+  frames at all, and a reader whose system asks for less motion gets the fold
+  instantly - the same switch that the component library's dialogs and
+  notifications already answer to.
 
 ### Removed
 

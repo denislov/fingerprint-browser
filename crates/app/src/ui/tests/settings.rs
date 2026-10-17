@@ -329,6 +329,80 @@ fn the_sidebar_folds_to_a_rail_and_opens_again(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The rail travels between its two widths instead of jumping between them.
+///
+/// This is the one test in the suite that opens the window with motion on, and
+/// it says so: everywhere else the movement is off precisely so a test can
+/// assert *where* a control is without also asserting *when*. Here the movement
+/// is the subject - the test above passes whether the rail is a spring or a
+/// single frame, and would go on passing if the animation were deleted.
+///
+/// Every step is driven by the test's own clock, which is the one the design
+/// system's `motion::spring` reads (`background_executor().now()`). Nothing here
+/// waits on real time, so a slow machine cannot turn a moving rail into a
+/// settled one.
+#[gpui_kit::test]
+fn the_rail_travels_between_its_widths(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let dir = std::env::temp_dir().join(format!("fp-ui-rail-travel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let (view, _runtime) = view_with_config(cx, &dir.join("config.json"));
+    let cx = window_that_moves(cx, &view);
+
+    let width = |cx: &mut gpui_kit::VisualTestContext| {
+        cx.update(|window, _| window.find("sidebar").bounds().size.width)
+    };
+    let draw = |cx: &mut gpui_kit::VisualTestContext| {
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    };
+
+    let open = width(cx);
+    assert_eq!(
+        open,
+        px(crate::ui::components::SIDEBAR),
+        "the window opens already at its width: a spring starts at its target \
+         rather than growing into it"
+    );
+
+    cx.update(|window, cx| window.click("sidebar-toggle", cx));
+
+    // The frame the press lands in: the rail is still exactly where it was, so
+    // the fold is not a jump whose first frame already shows the end.
+    draw(cx);
+    assert_eq!(
+        width(cx),
+        open,
+        "the frame the press landed in had already moved the rail"
+    );
+
+    // A little of the spring's own time, and it is on its way.
+    cx.executor().advance_clock(Duration::from_millis(60));
+    draw(cx);
+    let moving = width(cx);
+    assert!(
+        moving < open,
+        "the rail had not moved after 60ms of its own clock: {moving:?}"
+    );
+    assert!(
+        moving > px(crate::ui::components::SIDEBAR_RAIL),
+        "the rail had already arrived after 60ms: {moving:?}"
+    );
+
+    // And it comes to rest at the width the layout asks for, not near it.
+    cx.executor().advance_clock(Duration::from_secs(2));
+    draw(cx);
+    assert_eq!(
+        width(cx),
+        px(crate::ui::components::SIDEBAR_RAIL),
+        "the spring settles where the layout puts it"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The rail's switch is the mark until the pointer arrives.
 ///
 /// A rail has room for one control, so the mark is the control: hovering the
