@@ -56,6 +56,12 @@ says nothing about, and the notes are that section rather than the whole file.
   evidence and the reproduction are in
   [fingerprint-matrix.md](docs/fingerprint-matrix.md).
 
+- **A failure matrix** (Docs): one page maps the failures each subsystem is
+  built to survive to the behavior that keeps data, processes and inputs safe,
+  the test that proves it, and the opt-in acceptance runs that need a real
+  browser, engine or network. See
+  [failure-matrix.md](docs/failure-matrix.md).
+
 ### Changed
 
 - **The minimum Rust version is declared** (Build): the workspace's `Cargo.toml`
