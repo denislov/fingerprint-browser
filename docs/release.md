@@ -5,17 +5,16 @@ in a habit because three of them are load-bearing: the version a user reports ha
 to identify a commit, the binary a user runs has to be built the same way twice,
 and nothing may be downloaded on the user's behalf.
 
-**Status: `0.5.0` release.** The version policy, the release
+**Status: `0.6.0` release.** The version policy, the release
 profile, the identity surfaces, the icons, the Linux archive, the Debian package
 and the Windows installer script all exist, and the release workflow that drives
 them has been verified end-to-end on GitHub Actions runners. The changelog's
-`## [0.5.0]` section is what the tag publishes. This release is about what the
-window costs: writes journal ahead of the file, a start reads each table once
-rather than twice and no longer waits for every registered core in turn, a
-core's `--version` is read off the thread that draws the window, and a frame is
-drawn when something changed rather than once a second. It also folds the two
-GitHub downloads into one implementation, and a database that will not open says
-why instead of ending in a panic; a release still carries neither a browser nor
+`## [0.6.0]` section is what the tag publishes. This release is about what a
+session is: a started profile opens a local identity page served by this program
+for as long as the profile runs, the sidebar folds over time instead of jumping,
+and a core newer than the newest measured major says so at start and in Download
+Core. It also declares the minimum Rust version (the pinned compiler) and adds a
+cross-subsystem failure matrix; a release still carries neither a browser nor
 Xray, and neither is fetched without a click.
 
 ## Versioning
@@ -145,8 +144,8 @@ git, because an artifact is built rather than committed. Every artifact has a
 
 ```sh
 packaging/linux/package.sh
-# dist/fp-browser-0.5.0-linux-x86_64.tar.gz
-# dist/fp-browser_0.5.0_amd64.deb
+# dist/fp-browser-0.6.0-linux-x86_64.tar.gz
+# dist/fp-browser_0.6.0_amd64.deb
 ```
 
 Two artifacts out of one staged set of files, because which files ship is not a
@@ -190,8 +189,8 @@ the binary does not claim.
 `packaging/windows/fp-browser.iss`:
 
 ```powershell
-pwsh -File packaging\windows\package.ps1 -Version 0.5.0
-# dist\fp-browser-0.5.0-windows-x86_64-setup.exe
+pwsh -File packaging\windows\package.ps1 -Version 0.6.0
+# dist\fp-browser-0.6.0-windows-x86_64-setup.exe
 ```
 
 Inno Setup 6, per-user by default (`PrivilegesRequired=lowest`, with the
@@ -235,7 +234,7 @@ run too - by hand first, then by the `v0.1.0` tag, and by every release since -
 which makes the runner the first Windows machine this project has had: the gate
 (`scripts/check.ps1`, so the Windows-only halves compile and their tests pass)
 and the packaging script (the resource-section check, then the installer build)
-both ran and passed, and `v0.1.0` through `v0.5.0` were published from them.
+both ran and passed, and `v0.1.0` through `v0.6.0` were published from them.
 
 What a runner cannot do is still unverified: nothing has **run** the installer,
 and the program has never been started on Windows. So the two Windows-only paths
